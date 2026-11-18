@@ -34,14 +34,19 @@ Pieza central: un **socket Unix** de Telar y **hooks** de Claude Code.
 
    El spinner redibuja solo mientras algo trabaja, a ~10 fps.
 
-## Fase 2 — Grupos = proyectos, sesiones que sobreviven
+## Fase 2 — Grupos = proyectos, sesiones que sobreviven (persistencia ✅ 2026-11-18)
+
+Ya están la restauración de grupos, tabs y carpetas, y `claude --resume` (ver el README). Falta asignarle una carpeta a cada grupo y el atajo de «nuevo agente».
+
 
 - Cada grupo tiene una carpeta: sus tabs nuevos abren ahí.
 - **⌘⇧T** abre un «nuevo agente»: un tab que ejecuta `claude` directamente.
 - El layout se guarda en `~/.config/telar/sesion.json`: grupos, tabs, cwd y el `session_id` que entrega el hook SessionStart.
 - Al reabrir Telar, cada tab de Claude vuelve con `claude --resume <id>`.
 
-## Fase 3 — Telar como herramienta para Claude
+## Fase 3 — Telar como herramienta para Claude ✅ (2026-11-18)
+
+Implementada, junto con `telar status` y la regla `claude/telar.md`, que `telar install` copia a `~/.claude/rules/`.
 
 Una CLI contra el mismo socket, para que una sesión de Claude Code use la terminal:
 

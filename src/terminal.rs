@@ -6,13 +6,16 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::Path;
+use std::os::fd::OwnedFd;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, Notify, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty;
@@ -97,11 +100,25 @@ pub struct Agent {
     pub session_id: Option<String>,
     pub cwd: Option<String>,
     pub message: Option<String>,
+    /// Cuántas veces cambió de estado (lo usa `telar wait`).
+    pub changes: u64,
 }
 
 impl Default for Agent {
     fn default() -> Self {
-        Self { state: AgentState::None, since: Instant::now(), session_id: None, cwd: None, message: None }
+        Self { state: AgentState::None, since: Instant::now(), session_id: None, cwd: None, message: None, changes: 0 }
+    }
+}
+
+impl Agent {
+    pub fn set_state(&mut self, state: AgentState) -> bool {
+        if state == self.state {
+            return false;
+        }
+        self.state = state;
+        self.since = Instant::now();
+        self.changes += 1;
+        true
     }
 }
 
@@ -112,11 +129,21 @@ pub struct Terminal {
     /// Sonó la campana mientras el tab no estaba visible.
     pub attention: bool,
     pub agent: Agent,
+    /// Nombre del proceso en primer plano (se refresca cada pocos segundos).
+    pub process: Option<String>,
+    /// Copia del descriptor del PTY, para preguntar por el proceso en primer plano.
+    pty: Option<OwnedFd>,
     size: GridSize,
 }
 
 impl Terminal {
-    pub fn spawn(id: u64, size: GridSize, proxy: EventLoopProxy<UserEvent>, socket: Option<&Path>) -> std::io::Result<Self> {
+    pub fn spawn(
+        id: u64,
+        size: GridSize,
+        proxy: EventLoopProxy<UserEvent>,
+        socket: Option<&Path>,
+        cwd: Option<&Path>,
+    ) -> std::io::Result<Self> {
         let listener = Listener { id, proxy };
         let mut env = HashMap::from([
             ("TERM".to_string(), "xterm-256color".to_string()),
@@ -133,17 +160,30 @@ impl Terminal {
         }
         let options = tty::Options {
             shell: None, // shell de login del usuario
-            working_directory: std::env::var_os("HOME").map(Into::into),
+            working_directory: cwd
+                .filter(|d| d.is_dir())
+                .map(Path::to_path_buf)
+                .or_else(|| std::env::var_os("HOME").map(Into::into)),
             drain_on_exit: false,
             env,
         };
         let config = Config { scrolling_history: 10_000, ..Default::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
         let pty = tty::new(&options, size.window_size(), id)?;
+        let pty_fd = pty.file().try_clone().ok().map(OwnedFd::from);
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
         let notifier = Notifier(event_loop.channel());
         event_loop.spawn();
-        Ok(Self { term, notifier, title: None, attention: false, agent: Agent::default(), size })
+        Ok(Self {
+            term,
+            notifier,
+            title: None,
+            attention: false,
+            agent: Agent::default(),
+            process: None,
+            pty: pty_fd,
+            size,
+        })
     }
 
     pub fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
@@ -161,6 +201,63 @@ impl Terminal {
 
     pub fn size(&self) -> GridSize {
         self.size
+    }
+
+    fn foreground(&self) -> Option<i32> {
+        self.pty.as_ref().and_then(crate::proc::foreground)
+    }
+
+    /// Carpeta actual del proceso en primer plano (la shell, o Claude si está corriendo).
+    pub fn cwd(&self) -> Option<PathBuf> {
+        self.foreground().and_then(crate::proc::cwd)
+    }
+
+    pub fn refresh_process(&mut self) {
+        self.process = self.foreground().and_then(crate::proc::name);
+    }
+
+    /// Texto de las últimas `lines` líneas lógicas (las líneas partidas por ancho se unen).
+    pub fn text(&self, lines: usize) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let cols = grid.columns();
+        let top = grid.topmost_line().0;
+        // Última fila con texto (o la del cursor): en una pantalla recién abierta
+        // el contenido está arriba y el resto son filas vacías.
+        let blank = |line: i32| (0..cols).all(|c| grid[Line(line)][Column(c)].c == ' ');
+        let mut bottom = grid.bottommost_line().0;
+        while bottom > grid.cursor.point.line.0 && bottom > top && blank(bottom) {
+            bottom -= 1;
+        }
+        let start = (bottom - (lines as i32) * 4).max(top);
+        let skip = Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER;
+        let mut out: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for line in start..=bottom {
+            let row = &grid[Line(line)];
+            for col in 0..cols {
+                let cell = &row[Column(col)];
+                if cell.flags.intersects(skip) {
+                    continue;
+                }
+                current.push(cell.c);
+                if let Some(extra) = cell.zerowidth() {
+                    current.extend(extra);
+                }
+            }
+            if !row[Column(cols - 1)].flags.contains(Flags::WRAPLINE) {
+                out.push(current.trim_end().to_string());
+                current.clear();
+            }
+        }
+        if !current.is_empty() {
+            out.push(current.trim_end().to_string());
+        }
+        while out.last().is_some_and(String::is_empty) {
+            out.pop();
+        }
+        let from = out.len().saturating_sub(lines);
+        out[from..].join("\n")
     }
 }
 

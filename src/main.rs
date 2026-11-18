@@ -1,16 +1,20 @@
 //! Telar: terminal personal con grupos de tabs en una barra lateral.
 
+mod cli;
 mod font;
 mod hooks;
 mod input;
 mod ipc;
+mod proc;
 mod renderer;
+mod session;
 mod terminal;
 mod theme;
 mod ui;
 mod workspace;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,44 +39,30 @@ use crate::renderer::{Quad, Renderer};
 use crate::terminal::{AgentState, Terminal};
 use crate::theme::Rgba;
 use crate::ui::{Hit, Layout, View};
-use crate::workspace::Workspace;
+use crate::session::{Saved, SavedGroup, SavedTab};
+use crate::workspace::{Group, Workspace};
 
 const FONT_PT: f32 = 13.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 const SPINNER_TICK: Duration = Duration::from_millis(80);
+/// Cada cuánto se refrescan procesos/carpetas y se guarda la sesión (si cambió).
+const SAVE_TICK: Duration = Duration::from_secs(5);
 
 pub enum UserEvent {
     Term(u64, TermEvent),
     Ipc(ipc::Request),
 }
 
-const USAGE: &str = "Uso: telar [comando]
-
-Sin comando abre la terminal. Comandos:
-  install-hooks    agrega los hooks de Telar a ~/.claude/settings.json
-  uninstall-hooks  los quita (los demás hooks no se tocan)
-  tabs             lista grupos y tabs del Telar actual, en JSON
-  hook             lo ejecuta Claude Code en cada evento (uso interno)";
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None => {}
         Some("hook") => return ipc::hook_main(),
-        Some("install-hooks") => return finish(hooks::install()),
-        Some("uninstall-hooks") => return finish(hooks::uninstall()),
-        Some("tabs") => {
-            return finish(
-                ipc::request(&json!({ "cmd": "tabs" }), true)
-                    .and_then(|v| serde_json::to_string_pretty(&v).map_err(|e| e.to_string())),
-            );
-        }
-        Some("-h" | "--help" | "help") => return println!("{USAGE}"),
-        Some(other) => {
-            eprintln!("Comando desconocido: {other}\n\n{USAGE}");
-            std::process::exit(2);
-        }
+        Some("install" | "install-hooks") => return finish(hooks::install()),
+        Some("uninstall" | "uninstall-hooks") => return finish(hooks::uninstall()),
+        Some("-h" | "--help" | "help") => return println!("{}", cli::USAGE),
+        Some(cmd) => return finish(cli::run(cmd, &args[1..])),
     }
 
     env_logger::init();
@@ -86,6 +76,7 @@ fn main() {
 
 fn finish(result: Result<String, String>) {
     match result {
+        Ok(msg) if msg.is_empty() => {}
         Ok(msg) => println!("{msg}"),
         Err(e) => {
             eprintln!("{e}");
@@ -126,6 +117,10 @@ struct State {
     server: Option<ipc::Server>,
     started: Instant,
     next_tick: Instant,
+    /// Guardar la sesión en disco (no en modo snapshot, para no pisar la real).
+    persist: bool,
+    last_saved: Option<Saved>,
+    next_save: Instant,
 }
 
 /// Modo de prueba: `TELAR_SNAPSHOT=archivo.bmp` abre la app, escribe
@@ -192,6 +187,9 @@ impl ApplicationHandler<UserEvent> for App {
             },
             started: Instant::now(),
             next_tick: Instant::now(),
+            persist: std::env::var_os("TELAR_SNAPSHOT").is_none() || std::env::var_os("TELAR_SESSION_FILE").is_some(),
+            last_saved: None,
+            next_save: Instant::now() + SAVE_TICK,
         };
         if let Some(server) = &state.server {
             // Para que el modo snapshot (y quien depure) sepa dónde está el socket.
@@ -200,8 +198,17 @@ impl ApplicationHandler<UserEvent> for App {
                 eprintln!("TELAR_SOCKET={}", server.path.display());
             }
         }
-        state.new_group();
-        if state.snapshot.is_some() {
+        let restored = match state.persist.then(session::load).flatten() {
+            Some(saved) => {
+                state.restore(saved);
+                !state.ws.groups.is_empty()
+            }
+            None => false,
+        };
+        if state.ws.groups.is_empty() {
+            state.new_group();
+        }
+        if state.snapshot.is_some() && !restored {
             state.snapshot_setup();
         }
         self.state = Some(state);
@@ -282,18 +289,30 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // Mientras algún agente trabaja, el indicador pulsa: se redibuja a ~12 fps.
         // Si nadie trabaja, la app vuelve a dormir hasta el próximo evento.
-        let mut wake = st.snapshot.as_ref().map(|s| s.at);
+        if now >= st.next_save {
+            st.periodic();
+            st.next_save = now + SAVE_TICK;
+        }
+        let mut wake = Some(st.snapshot.as_ref().map_or(st.next_save, |s| s.at.min(st.next_save)));
         if st.terms.values().any(|t| t.agent.state == AgentState::Working) {
             if now >= st.next_tick {
                 st.window.request_redraw();
                 st.next_tick = now + SPINNER_TICK;
             }
-            wake = Some(wake.map_or(st.next_tick, |w| w.min(st.next_tick)));
+            wake = wake.map(|w| w.min(st.next_tick));
         }
         event_loop.set_control_flow(match wake {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Se guarda antes de cerrar las terminales: así las sesiones de Claude
+        // quedan registradas como abiertas y se retoman al volver a abrir.
+        if let Some(st) = self.state.as_mut() {
+            st.save_session();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -340,11 +359,17 @@ impl State {
         Layout::new(size.width as f32, size.height as f32, self.window.scale_factor() as f32, &self.fonts, n_tabs)
     }
 
+    /// Abre una terminal nueva en la carpeta del tab activo (o en `cwd` si se indica).
     fn spawn_term(&mut self) -> Option<u64> {
+        let cwd = self.active().and_then(|t| t.cwd());
+        self.spawn_term_in(cwd.as_deref())
+    }
+
+    fn spawn_term_in(&mut self, cwd: Option<&Path>) -> Option<u64> {
         let id = self.next_id;
         self.next_id += 1;
         let socket = self.server.as_ref().map(|s| s.path.as_path());
-        match Terminal::spawn(id, self.layout().grid_size(), self.proxy.clone(), socket) {
+        match Terminal::spawn(id, self.layout().grid_size(), self.proxy.clone(), socket, cwd) {
             Ok(t) => {
                 self.terms.insert(id, t);
                 Some(id)
@@ -769,7 +794,7 @@ impl State {
         if let Some(t) = self.ws.active_term().and_then(|id| self.terms.get_mut(&id)) {
             t.attention = false;
             if t.agent.state == AgentState::Done {
-                t.agent.state = AgentState::Idle;
+                t.agent.set_state(AgentState::Idle);
             }
         }
     }
@@ -815,8 +840,98 @@ impl State {
                 json!({ "ok": true })
             }
             Some("tabs") => self.tabs_json(),
+            Some("status") => match self.resolve_tab(&body["tab"]) {
+                Ok(id) => json!({ "ok": true, "tab": self.tab_json(id) }),
+                Err(e) => json!({ "ok": false, "error": e }),
+            },
+            Some("read") => match self.resolve_tab(&body["tab"]) {
+                Ok(id) => {
+                    let lines = body["lines"].as_u64().unwrap_or(50).clamp(1, 100_000) as usize;
+                    json!({ "ok": true, "id": id, "text": self.terms[&id].text(lines) })
+                }
+                Err(e) => json!({ "ok": false, "error": e }),
+            },
+            Some("send") => match self.resolve_tab(&body["tab"]) {
+                Ok(id) => {
+                    let text = body["text"].as_str().unwrap_or_default();
+                    let t = &self.terms[&id];
+                    // Texto de varias líneas: como pegado, para que los saltos no se tomen como Enter.
+                    let bytes = if text.contains('\n') && body["raw"] != json!(true) {
+                        input::paste_bytes(text, *t.term.lock().mode())
+                    } else {
+                        text.as_bytes().to_vec()
+                    };
+                    t.write(bytes);
+                    json!({ "ok": true, "id": id })
+                }
+                Err(e) => json!({ "ok": false, "error": e }),
+            },
+            Some("new") => self.ipc_new(body),
             other => json!({ "ok": false, "error": format!("comando desconocido: {other:?}") }),
         }
+    }
+
+    /// `<tab>`: id, `grupo/n` (n desde 1) o parte del título (sin distinguir mayúsculas).
+    fn resolve_tab(&self, spec: &Value) -> Result<u64, String> {
+        let exists = |id: u64| self.terms.contains_key(&id).then_some(id).ok_or(format!("no existe el tab {id}"));
+        if let Some(id) = spec.as_u64() {
+            return exists(id);
+        }
+        let s = spec.as_str().ok_or("falta <tab>")?.trim();
+        if let Ok(id) = s.parse::<u64>() {
+            return exists(id);
+        }
+        let lower = s.to_lowercase();
+        if let Some((group, n)) = lower.rsplit_once('/') {
+            if let Ok(n) = n.parse::<usize>() {
+                let g = self.ws.groups.iter().find(|g| g.name.to_lowercase() == group).ok_or(format!("no existe el grupo «{group}»"))?;
+                return g.tabs.get(n.wrapping_sub(1)).copied().ok_or(format!("el grupo «{}» no tiene tab {n}", g.name));
+            }
+        }
+        let matches: Vec<u64> = self
+            .terms
+            .iter()
+            .filter(|(_, t)| t.title.as_deref().is_some_and(|title| title.to_lowercase().contains(&lower)))
+            .map(|(id, _)| *id)
+            .collect();
+        match matches.as_slice() {
+            [id] => Ok(*id),
+            [] => Err(format!("ningún tab coincide con «{s}»")),
+            many => Err(format!("«{s}» coincide con varios tabs: {many:?}; usa el id")),
+        }
+    }
+
+    /// `telar new`: tab nuevo en el grupo indicado (se crea si no existe), en el
+    /// grupo del tab que lo pidió, o en el activo. No roba el foco salvo `focus`.
+    fn ipc_new(&mut self, body: &Value) -> Value {
+        let cwd = body["cwd"].as_str().map(PathBuf::from);
+        let focus = body["focus"].as_bool().unwrap_or(false);
+        let Some(id) = self.spawn_term_in(cwd.as_deref()) else {
+            return json!({ "ok": false, "error": "no se pudo abrir la shell" });
+        };
+        let gi = match body["group"].as_str() {
+            Some(name) => match self.ws.groups.iter().position(|g| g.name.eq_ignore_ascii_case(name)) {
+                Some(gi) => {
+                    self.ws.insert_tab(gi, id, focus);
+                    gi
+                }
+                None => self.ws.push_group(name.to_string(), id, focus),
+            },
+            None => {
+                let gi = body["near"].as_u64().and_then(|near| self.ws.group_of(near)).unwrap_or(self.ws.active);
+                self.ws.insert_tab(gi, id, focus);
+                gi
+            }
+        };
+        if let Some(command) = body["command"].as_str().filter(|c| !c.trim().is_empty()) {
+            // La shell todavía arranca: lo escrito queda en el buffer del PTY y se ejecuta al estar lista.
+            self.write(id, format!("{command}\r").into_bytes());
+        }
+        if focus {
+            self.after_switch();
+        }
+        self.window.request_redraw();
+        json!({ "ok": true, "id": id, "group": self.ws.groups[gi].name })
     }
 
     fn tabs_json(&self) -> Value {
@@ -829,24 +944,126 @@ impl State {
                 let tabs: Vec<Value> = g
                     .tabs
                     .iter()
-                    .filter_map(|id| self.terms.get(id).map(|t| (id, t)))
-                    .map(|(id, t)| {
-                        json!({
-                            "id": id,
-                            "title": t.title,
-                            "active": Some(*id) == active,
-                            "state": t.agent.state.name(),
-                            "state_secs": t.agent.since.elapsed().as_secs(),
-                            "session_id": t.agent.session_id,
-                            "cwd": t.agent.cwd,
-                            "message": t.agent.message,
-                        })
+                    .map(|id| {
+                        let mut v = self.tab_json(*id);
+                        v["active"] = json!(Some(*id) == active);
+                        v
                     })
                     .collect();
                 json!({ "name": g.name, "tabs": tabs })
             })
             .collect();
         json!({ "ok": true, "groups": groups })
+    }
+
+    fn tab_json(&self, id: u64) -> Value {
+        let Some(t) = self.terms.get(&id) else { return Value::Null };
+        let group = self.ws.group_of(id).map(|gi| self.ws.groups[gi].name.clone());
+        json!({
+            "id": id,
+            "group": group,
+            "title": t.title,
+            "process": t.process,
+            "state": t.agent.state.name(),
+            "state_secs": t.agent.since.elapsed().as_secs(),
+            "changes": t.agent.changes,
+            "session_id": t.agent.session_id,
+            "cwd": t.cwd().or_else(|| t.agent.cwd.as_ref().map(PathBuf::from)),
+            "message": t.agent.message,
+        })
+    }
+
+    /// Cada pocos segundos: nombre del proceso de cada tab y guardado de la sesión.
+    fn periodic(&mut self) {
+        let mut changed = false;
+        for t in self.terms.values_mut() {
+            let before = t.process.clone();
+            t.refresh_process();
+            changed |= before != t.process;
+            // Claude se cerró sin avisar (sin SessionEnd): si hace rato que en primer plano
+            // hay una shell, el tab vuelve a ser una shell normal y no se retoma al reabrir.
+            let shell = t.process.as_deref().is_some_and(proc::is_shell);
+            // Solo en «en espera» o «terminó»: mientras trabaja, una herramienta Bash larga
+            // también puede dejar una shell en primer plano.
+            let resting = matches!(t.agent.state, AgentState::Idle | AgentState::Done);
+            if shell && resting && t.agent.since.elapsed() > Duration::from_secs(30) {
+                t.agent.set_state(AgentState::None);
+                changed = true;
+            }
+        }
+        if changed {
+            self.window.request_redraw();
+        }
+        self.save_session();
+    }
+
+    fn saved_state(&self) -> Saved {
+        let groups = self
+            .ws
+            .groups
+            .iter()
+            .map(|g| SavedGroup {
+                name: g.name.clone(),
+                active: g.active,
+                tabs: g
+                    .tabs
+                    .iter()
+                    .filter_map(|id| self.terms.get(id))
+                    .map(|t| {
+                        let claude = (t.agent.state != AgentState::None).then(|| t.agent.session_id.clone()).flatten();
+                        // Con Claude abierto, su carpeta es donde se inició la sesión (la necesita --resume).
+                        let cwd = if claude.is_some() {
+                            t.agent.cwd.as_ref().map(PathBuf::from).or_else(|| t.cwd())
+                        } else {
+                            t.cwd()
+                        };
+                        SavedTab { title: t.title.clone(), cwd, claude }
+                    })
+                    .collect(),
+            })
+            .collect();
+        Saved { active: self.ws.active, groups }
+    }
+
+    fn save_session(&mut self) {
+        if !self.persist {
+            return;
+        }
+        let saved = self.saved_state();
+        if self.last_saved.as_ref() != Some(&saved) {
+            session::save(&saved);
+            self.last_saved = Some(saved);
+        }
+    }
+
+    /// Vuelve a abrir los grupos y tabs guardados; los que tenían Claude retoman su sesión.
+    fn restore(&mut self, saved: Saved) {
+        let mut groups = Vec::new();
+        for g in saved.groups {
+            let mut tabs = Vec::new();
+            for tab in &g.tabs {
+                let Some(id) = self.spawn_term_in(tab.cwd.as_deref()) else { continue };
+                if let Some(t) = self.terms.get_mut(&id) {
+                    t.title = tab.title.clone();
+                }
+                if let Some(session) = &tab.claude {
+                    self.write(id, format!("claude --resume {session}\r").into_bytes());
+                    // Ya cuenta como tab de Claude aunque su hook SessionStart aún no llegue:
+                    // si se cierra Telar antes, la sesión no se pierde.
+                    if let Some(t) = self.terms.get_mut(&id) {
+                        t.agent.session_id = Some(session.clone());
+                        t.agent.cwd = tab.cwd.as_ref().map(|c| c.display().to_string());
+                        t.agent.set_state(AgentState::Idle);
+                    }
+                }
+                tabs.push(id);
+            }
+            if !tabs.is_empty() {
+                let active = g.active.min(tabs.len() - 1);
+                groups.push(Group { name: g.name, tabs, active });
+            }
+        }
+        self.ws.restore(groups, saved.active);
     }
 
     /// Evento de un hook de Claude Code en el tab `tab`.
@@ -881,11 +1098,9 @@ impl State {
         } else if new != AgentState::Working {
             agent.message = None;
         }
-        if new == agent.state {
+        if !agent.set_state(new) {
             return;
         }
-        agent.state = new;
-        agent.since = Instant::now();
         if matches!(new, AgentState::NeedsYou | AgentState::Done) && !self.focused && self.snapshot.is_none() {
             let what = if new == AgentState::NeedsYou {
                 if message.is_empty() { "Claude te necesita".to_string() } else { message.to_string() }

@@ -73,7 +73,9 @@ fn reply(mut stream: &UnixStream, value: Value) {
 /// Cliente: envía una petición al Telar indicado por `TELAR_SOCKET`.
 /// Con `wait = false` no espera respuesta (lo usan los hooks para no frenar a Claude).
 pub fn request(body: &Value, wait: bool) -> Result<Value, String> {
-    let path = std::env::var_os("TELAR_SOCKET").ok_or("TELAR_SOCKET no está definido: esto solo funciona dentro de Telar")?;
+    let path = std::env::var_os("TELAR_SOCKET")
+        .filter(|p| !p.is_empty())
+        .ok_or("TELAR_SOCKET no está definido: este comando solo funciona dentro de un tab de Telar")?;
     request_to(Path::new(&path), body, wait)
 }
 

@@ -35,8 +35,37 @@ impl Workspace {
 
     pub fn add_group(&mut self, first_tab: u64) {
         let name = self.next_group_name();
+        self.push_group(name, first_tab, true);
+    }
+
+    /// Agrega un grupo con su primer tab. Devuelve su índice.
+    pub fn push_group(&mut self, name: String, first_tab: u64, focus: bool) -> usize {
         self.groups.push(Group { name, tabs: vec![first_tab], active: 0 });
-        self.active = self.groups.len() - 1;
+        if focus || self.groups.len() == 1 {
+            self.active = self.groups.len() - 1;
+        }
+        self.groups.len() - 1
+    }
+
+    /// Agrega un tab al final del grupo `gi`; con `focus` lo deja visible.
+    pub fn insert_tab(&mut self, gi: usize, id: u64, focus: bool) {
+        let Some(g) = self.groups.get_mut(gi) else { return };
+        g.tabs.push(id);
+        if focus {
+            g.active = g.tabs.len() - 1;
+            self.active = gi;
+        }
+    }
+
+    pub fn group_of(&self, id: u64) -> Option<usize> {
+        self.groups.iter().position(|g| g.tabs.contains(&id))
+    }
+
+    /// Restaura grupos guardados (los ids ya son de terminales vivas).
+    pub fn restore(&mut self, groups: Vec<Group>, active: usize) {
+        self.created = groups.len();
+        self.groups = groups;
+        self.active = active.min(self.groups.len().saturating_sub(1));
     }
 
     pub fn add_tab(&mut self, id: u64) {

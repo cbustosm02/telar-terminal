@@ -317,7 +317,11 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
             out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_HOVER));
         }
         let fallback = format!("Tab {}", i + 1);
-        let title = v.terms.get(id).and_then(|t| t.title.as_deref()).unwrap_or(&fallback);
+        let title = v
+            .terms
+            .get(id)
+            .and_then(|t| t.title.as_deref().or(t.process.as_deref()))
+            .unwrap_or(&fallback);
         let close = l.tab_close_rect(i);
         let color = if active { theme::TEXT } else { theme::TEXT_DIM };
         let ty = r.y + (r.h - ch) / 2.0;

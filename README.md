@@ -5,9 +5,18 @@ Terminal personal para macOS escrita en Rust. Organiza las terminales en **grupo
 ## Ejecutar
 
 ```bash
-cargo run --release
-./target/release/telar install-hooks   # una vez: integra Claude Code (ver abajo)
+cargo build --release
+./target/release/telar install   # una vez: hooks de Claude Code, enlace ~/.local/bin/telar y regla para Claude
+telar                            # abre la terminal
 ```
+
+## Sesiones que sobreviven
+
+Al cerrar Telar y volver a abrirlo se recuperan los grupos, los tabs y la carpeta de cada uno. Los tabs que tenían Claude Code abierto ejecutan `claude --resume <id>` y retoman su conversación.
+
+- El estado se guarda en `~/.config/telar/sesion.json`: al cerrar la app, y cada 5 s si algo cambió (por si se cae).
+- Si cierras el último tab a propósito, la próxima vez Telar abre limpio.
+- La carpeta de cada tab es la del proceso en primer plano (tu shell después de un `cd`). En los tabs de Claude se usa la carpeta donde empezó la sesión, que es la que necesita `--resume`.
 
 ## Claude Code
 
@@ -28,11 +37,22 @@ Funcionamiento:
 2. `install-hooks` agrega a `~/.claude/settings.json` un hook por evento, que corre `telar hook`. Respeta tus otros hooks y deja un respaldo en `settings.json.telar-bak`.
 3. Fuera de Telar el hook no hace nada.
 
-Para quitarlos: `telar uninstall-hooks`.
+Para quitarlo todo (hooks, enlace y regla): `telar uninstall`.
+
+### CLI (para ti y para Claude, dentro de Telar)
 
 ```bash
-telar tabs    # dentro de Telar: grupos, tabs, estado, session_id y cwd en JSON
+telar tabs                          # grupos y tabs con estado, session_id y carpeta (JSON)
+telar status <tab>                  # un tab
+telar read <tab> [-n 200]           # texto de la pantalla y el scrollback
+telar send <tab> "texto" [--enter]  # escribir en un tab (varias líneas van como pegado)
+telar new [--group G] [--cwd DIR] [--focus] -- <comando>   # abrir un tab; imprime su id
+telar wait <tab> [--state done] [--timeout 600]            # esperar a que Claude termine
 ```
+
+`<tab>` puede ser el id, `self`, `grupo/n` (n desde 1) o parte del título.
+
+`telar install` también deja la regla `~/.claude/rules/telar.md` (copia de `claude/telar.md`). Con ella, Claude sabe que puede leer otros tabs (logs de servidores, tests) y coordinar agentes.
 
 ## Modelo
 
@@ -77,7 +97,10 @@ Mouse:
 | `src/input.rs` | Teclado → secuencias xterm |
 | `src/theme.rs` | Paleta y colores de la interfaz |
 | `src/ipc.rs` | Socket Unix, cliente y `telar hook` |
-| `src/hooks.rs` | `install-hooks` / `uninstall-hooks` en `~/.claude/settings.json` |
+| `src/hooks.rs` | `install` / `uninstall`: hooks, enlace y regla |
+| `src/cli.rs` | Comandos `tabs`, `status`, `read`, `send`, `new`, `wait` |
+| `src/session.rs` | Guardar y restaurar grupos, tabs y sesiones de Claude |
+| `src/proc.rs` | Proceso en primer plano de cada tab: nombre y carpeta |
 
 Solo se dibuja cuando hay cambios (`ControlFlow::Wait`). Los tabs que no se ven no consumen GPU. En reposo usa 0 % de CPU y unos 50 MB de memoria.
 

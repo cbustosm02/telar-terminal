@@ -2138,6 +2138,7 @@ dependencies = [
  "arboard",
  "bytemuck",
  "env_logger",
+ "libc",
  "log",
  "memmap2",
  "pollster",
