@@ -1,0 +1,23 @@
+[package]
+name = "telar"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal personal: grupos de tabs en una barra lateral, render propio por GPU."
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+arboard = "3.7.0"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+env_logger = "0.11.11"
+log = "0.4.35"
+memmap2 = "0.9.12"
+pollster = "1.0.2"
+swash = "0.2.10"
+wgpu = "30.0.2"
+winit = "0.30.13"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

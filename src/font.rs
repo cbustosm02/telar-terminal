@@ -1,0 +1,213 @@
+//! Fuentes: carga (mmap), rasterización con swash y atlas de glifos.
+//!
+//! Cada glifo se rasteriza una sola vez y queda en un atlas RGBA en la GPU.
+//! Los glifos monocromos se guardan como (255, 255, 255, alfa) y se tiñen en el
+//! shader; los de color (emoji) se guardan tal cual.
+
+use std::collections::HashMap;
+
+use swash::scale::image::Content;
+use swash::scale::{Render, ScaleContext, Source, StrikeWith};
+use swash::zeno::Format;
+use swash::FontRef;
+
+pub const ATLAS_SIZE: u32 = 2048;
+
+/// Estilo de un glifo: índice en `primary`.
+pub const REGULAR: u8 = 0;
+pub const BOLD: u8 = 1;
+pub const ITALIC: u8 = 2;
+pub const BOLD_ITALIC: u8 = 3;
+
+const PRIMARY: &str = "/System/Library/Fonts/Menlo.ttc";
+const FALLBACKS: &[&str] = &[
+    "/System/Library/Fonts/SFNSMono.ttf",
+    "/System/Library/Fonts/Apple Symbols.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/Apple Color Emoji.ttc",
+];
+
+#[derive(Clone, Copy, Debug)]
+pub struct Glyph {
+    /// Región en el atlas, en píxeles: x, y, ancho, alto.
+    pub uv: [f32; 4],
+    /// Desplazamiento desde el origen de la celda (izquierda) y la línea base (arriba).
+    pub left: f32,
+    pub top: f32,
+    pub color: bool,
+}
+
+pub struct Upload {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub data: Vec<u8>,
+}
+
+/// Empaquetador por filas (shelf) con 1 px de margen entre glifos.
+struct Atlas {
+    x: u32,
+    y: u32,
+    row_h: u32,
+    uploads: Vec<Upload>,
+}
+
+impl Atlas {
+    fn new() -> Self {
+        Self { x: 1, y: 1, row_h: 0, uploads: Vec::new() }
+    }
+
+    fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        if w + 2 > ATLAS_SIZE || h + 2 > ATLAS_SIZE {
+            return None;
+        }
+        if self.x + w + 1 > ATLAS_SIZE {
+            self.x = 1;
+            self.y += self.row_h + 1;
+            self.row_h = 0;
+        }
+        if self.y + h + 1 > ATLAS_SIZE {
+            return None;
+        }
+        let pos = (self.x, self.y);
+        self.x += w + 1;
+        self.row_h = self.row_h.max(h);
+        Some(pos)
+    }
+}
+
+pub struct Fonts {
+    primary: [FontRef<'static>; 4],
+    fallbacks: Vec<FontRef<'static>>,
+    ctx: ScaleContext,
+    pub size: f32,
+    pub cell_w: f32,
+    pub cell_h: f32,
+    /// Distancia desde el borde superior de la celda hasta la línea base.
+    pub baseline: f32,
+    pub underline: f32,
+    pub stroke: f32,
+    cache: HashMap<(char, u8), Option<Glyph>>,
+    atlas: Atlas,
+    /// El atlas se vació en este frame: hay que volver a dibujar.
+    pub atlas_reset: bool,
+}
+
+/// Mapea el archivo en memoria y lo deja vivo durante toda la app: las páginas
+/// solo se cargan cuando se leen, así Apple Color Emoji (~180 MB) no cuesta RAM.
+fn map(path: &str) -> Option<&'static [u8]> {
+    let file = std::fs::File::open(path).ok()?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    let mmap: &'static memmap2::Mmap = Box::leak(Box::new(mmap));
+    Some(&mmap[..])
+}
+
+impl Fonts {
+    pub fn new(size: f32) -> Self {
+        let data = map(PRIMARY).expect("no se pudo abrir Menlo");
+        let face = |i: usize| FontRef::from_index(data, i).unwrap_or_else(|| FontRef::from_index(data, 0).unwrap());
+        let primary = [face(0), face(1), face(2), face(3)];
+        let fallbacks = FALLBACKS
+            .iter()
+            .filter_map(|p| map(p))
+            .filter_map(|d| FontRef::from_index(d, 0))
+            .collect();
+        let mut fonts = Self {
+            primary,
+            fallbacks,
+            ctx: ScaleContext::new(),
+            size: 0.0,
+            cell_w: 0.0,
+            cell_h: 0.0,
+            baseline: 0.0,
+            underline: 0.0,
+            stroke: 1.0,
+            cache: HashMap::new(),
+            atlas: Atlas::new(),
+            atlas_reset: false,
+        };
+        fonts.set_size(size);
+        fonts
+    }
+
+    pub fn set_size(&mut self, size: f32) {
+        self.size = size;
+        let font = self.primary[0];
+        let m = font.metrics(&[]).scale(size);
+        let advance = font.glyph_metrics(&[]).scale(size).advance_width(font.charmap().map('M'));
+        self.cell_w = advance.round().max(1.0);
+        self.cell_h = (m.ascent + m.descent + m.leading).ceil().max(1.0);
+        self.baseline = m.ascent.round();
+        self.underline = (self.baseline - m.underline_offset).round();
+        self.stroke = m.stroke_size.round().max(1.0);
+        self.clear_atlas();
+    }
+
+    fn clear_atlas(&mut self) {
+        self.cache.clear();
+        self.atlas = Atlas::new();
+        self.atlas_reset = true;
+    }
+
+    pub fn take_uploads(&mut self) -> Vec<Upload> {
+        std::mem::take(&mut self.atlas.uploads)
+    }
+
+    pub fn glyph(&mut self, c: char, style: u8) -> Option<Glyph> {
+        if let Some(g) = self.cache.get(&(c, style)) {
+            return *g;
+        }
+        let g = self.rasterize(c, style);
+        self.cache.insert((c, style), g);
+        g
+    }
+
+    fn rasterize(&mut self, c: char, style: u8) -> Option<Glyph> {
+        let candidates = std::iter::once(self.primary[style as usize])
+            .chain(std::iter::once(self.primary[0]))
+            .chain(self.fallbacks.iter().copied());
+
+        for font in candidates {
+            let id = font.charmap().map(c);
+            if id == 0 {
+                continue;
+            }
+            let mut scaler = self.ctx.builder(font).size(self.size).hint(true).build();
+            let image = Render::new(&[
+                Source::ColorOutline(0),
+                Source::ColorBitmap(StrikeWith::BestFit),
+                Source::Outline,
+            ])
+            .format(Format::Alpha)
+            .render(&mut scaler, id)?;
+
+            let (w, h) = (image.placement.width, image.placement.height);
+            if w == 0 || h == 0 {
+                return None; // glifo vacío (espacio)
+            }
+            let color = image.content == Content::Color;
+            let data = match image.content {
+                Content::Mask => image.data.iter().flat_map(|a| [255, 255, 255, *a]).collect(),
+                Content::Color => image.data,
+                Content::SubpixelMask => image.data.chunks(4).flat_map(|p| [255, 255, 255, p[1]]).collect(),
+            };
+            let (x, y) = match self.atlas.alloc(w, h) {
+                Some(pos) => pos,
+                None => {
+                    // Atlas lleno: se vacía y se empieza de nuevo (muy raro).
+                    self.clear_atlas();
+                    self.atlas.alloc(w, h)?
+                }
+            };
+            self.atlas.uploads.push(Upload { x, y, w, h, data });
+            return Some(Glyph {
+                uv: [x as f32, y as f32, w as f32, h as f32],
+                left: image.placement.left as f32,
+                top: image.placement.top as f32,
+                color,
+            });
+        }
+        None
+    }
+}
