@@ -1,4 +1,4 @@
-//! Sesión guardada: grupos, tabs, carpetas y sesiones de Claude Code.
+//! Sesión guardada: grupos (con su carpeta), tabs, carpetas y sesiones de Claude Code.
 //! Permite cerrar Telar y volver a abrirlo sin perder nada.
 //!
 //! Archivo: `~/.config/telar/sesion.json`.
@@ -18,6 +18,7 @@ pub struct SavedTab {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedGroup {
     pub name: String,
+    pub dir: Option<PathBuf>,
     pub active: usize,
     pub tabs: Vec<SavedTab>,
 }
@@ -44,6 +45,7 @@ impl Saved {
             "active": self.active,
             "groups": self.groups.iter().map(|g| json!({
                 "name": g.name,
+                "dir": g.dir,
                 "active": g.active,
                 "tabs": g.tabs.iter().map(|t| json!({
                     "title": t.title,
@@ -70,6 +72,7 @@ impl Saved {
                     .collect();
                 (!tabs.is_empty()).then(|| SavedGroup {
                     name: g["name"].as_str().unwrap_or("Grupo").to_string(),
+                    dir: g["dir"].as_str().map(PathBuf::from),
                     active: g["active"].as_u64().unwrap_or(0) as usize,
                     tabs,
                 })

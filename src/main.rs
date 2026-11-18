@@ -359,7 +359,7 @@ impl State {
         Layout::new(size.width as f32, size.height as f32, self.window.scale_factor() as f32, &self.fonts, n_tabs)
     }
 
-    /// Abre una terminal nueva en la carpeta del tab activo (o en `cwd` si se indica).
+    /// Abre una terminal nueva en la carpeta del tab activo.
     fn spawn_term(&mut self) -> Option<u64> {
         let cwd = self.active().and_then(|t| t.cwd());
         self.spawn_term_in(cwd.as_deref())
@@ -381,21 +381,57 @@ impl State {
         }
     }
 
-    fn new_group(&mut self) {
-        if let Some(id) = self.spawn_term() {
-            self.ws.add_group(id);
-            self.window.request_redraw();
-        }
+    fn new_group(&mut self) -> Option<u64> {
+        let id = self.spawn_term()?;
+        self.ws.add_group(id);
+        self.window.request_redraw();
+        Some(id)
     }
 
-    fn new_tab(&mut self) {
+    /// Carpeta de un tab nuevo en el grupo activo: la del grupo, o si no tiene, la del tab activo.
+    fn new_tab_cwd(&self) -> Option<PathBuf> {
+        let dir = self.ws.group().and_then(|g| g.dir.clone()).filter(|d| d.is_dir());
+        dir.or_else(|| self.active().and_then(|t| t.cwd()))
+    }
+
+    fn new_tab(&mut self) -> Option<u64> {
         if self.ws.groups.is_empty() {
             return self.new_group();
         }
-        if let Some(id) = self.spawn_term() {
-            self.ws.add_tab(id);
-            self.window.request_redraw();
+        let cwd = self.new_tab_cwd();
+        let id = self.spawn_term_in(cwd.as_deref())?;
+        self.ws.add_tab(id);
+        self.window.request_redraw();
+        Some(id)
+    }
+
+    /// ⌘⇧T: tab nuevo que arranca Claude Code (en la carpeta del grupo).
+    fn new_agent(&mut self) {
+        if let Some(id) = self.new_tab() {
+            // La shell todavía arranca: lo escrito queda en el buffer del PTY y se ejecuta al estar lista.
+            self.write(id, b"claude\r".to_vec());
         }
+    }
+
+    /// La primera sesión de Claude de un grupo sin carpeta le da la suya; si el grupo aún
+    /// se llama «Grupo N», también su nombre. Así sus tabs y agentes nuevos abren en ese proyecto.
+    fn adopt_group_dir(&mut self, tab: u64, dir: &Path) {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if home.as_deref() == Some(dir) || !dir.is_dir() {
+            return;
+        }
+        let Some(gi) = self.ws.group_of(tab) else { return };
+        let g = &mut self.ws.groups[gi];
+        if g.dir.is_some() {
+            return;
+        }
+        g.dir = Some(dir.to_path_buf());
+        if workspace::is_default_name(&g.name) {
+            if let Some(base) = dir.file_name() {
+                g.name = base.to_string_lossy().into_owned();
+            }
+        }
+        self.window.request_redraw();
     }
 
     /// Cierra una terminal. Devuelve `true` si ya no queda ninguna (hay que salir).
@@ -540,8 +576,13 @@ impl State {
         }
         let Key::Character(key) = event.key_without_modifiers() else { return false };
         match key.to_lowercase().as_str() {
-            "t" => self.new_tab(),
-            "n" => self.new_group(),
+            "t" if m.shift_key() => self.new_agent(),
+            "t" => {
+                self.new_tab();
+            }
+            "n" => {
+                self.new_group();
+            }
             "w" => {
                 if let Some(id) = self.ws.active_term() {
                     return self.close_term(id);
@@ -675,7 +716,9 @@ impl State {
                     self.after_switch();
                 }
             }
-            (Hit::NewGroup, MouseButton::Left) => self.new_group(),
+            (Hit::NewGroup, MouseButton::Left) => {
+                self.new_group();
+            }
             (Hit::Tab(i), MouseButton::Left) => {
                 self.ws.select_tab(i);
                 self.after_switch();
@@ -686,7 +729,9 @@ impl State {
                     self.resize_terms();
                 }
             }
-            (Hit::NewTab, MouseButton::Left) => self.new_tab(),
+            (Hit::NewTab, MouseButton::Left) => {
+                self.new_tab();
+            }
             (Hit::Drag, MouseButton::Left) => {
                 if count == 2 {
                     let max = self.window.is_maximized();
@@ -867,6 +912,7 @@ impl State {
                 Err(e) => json!({ "ok": false, "error": e }),
             },
             Some("new") => self.ipc_new(body),
+            Some("group") => self.ipc_group(body),
             other => json!({ "ok": false, "error": format!("comando desconocido: {other:?}") }),
         }
     }
@@ -904,7 +950,7 @@ impl State {
     /// `telar new`: tab nuevo en el grupo indicado (se crea si no existe), en el
     /// grupo del tab que lo pidió, o en el activo. No roba el foco salvo `focus`.
     fn ipc_new(&mut self, body: &Value) -> Value {
-        let cwd = body["cwd"].as_str().map(PathBuf::from);
+        let cwd = body["cwd"].as_str().map(PathBuf::from).filter(|d| d.is_absolute());
         let focus = body["focus"].as_bool().unwrap_or(false);
         let Some(id) = self.spawn_term_in(cwd.as_deref()) else {
             return json!({ "ok": false, "error": "no se pudo abrir la shell" });
@@ -915,7 +961,8 @@ impl State {
                     self.ws.insert_tab(gi, id, focus);
                     gi
                 }
-                None => self.ws.push_group(name.to_string(), id, focus),
+                // Grupo nuevo: su carpeta es la del tab con que se crea.
+                None => self.ws.push_group(name.to_string(), id, focus, cwd.clone()),
             },
             None => {
                 let gi = body["near"].as_u64().and_then(|near| self.ws.group_of(near)).unwrap_or(self.ws.active);
@@ -934,6 +981,33 @@ impl State {
         json!({ "ok": true, "id": id, "group": self.ws.groups[gi].name })
     }
 
+    /// `telar group`: muestra o cambia el nombre y la carpeta de un grupo
+    /// (el indicado, el del tab que lo pidió o el activo).
+    fn ipc_group(&mut self, body: &Value) -> Value {
+        let gi = match body["group"].as_str() {
+            Some(name) => self.ws.groups.iter().position(|g| g.name.eq_ignore_ascii_case(name)),
+            None => body["near"].as_u64().and_then(|near| self.ws.group_of(near)).or(Some(self.ws.active)),
+        };
+        let Some(g) = gi.and_then(|gi| self.ws.groups.get_mut(gi)) else {
+            return json!({ "ok": false, "error": "no existe ese grupo" });
+        };
+        if let Some(dir) = body["dir"].as_str() {
+            if dir.is_empty() {
+                g.dir = None;
+            } else if Path::new(dir).is_absolute() && Path::new(dir).is_dir() {
+                g.dir = Some(PathBuf::from(dir));
+            } else {
+                return json!({ "ok": false, "error": format!("no es una carpeta: {dir}") });
+            }
+        }
+        if let Some(name) = body["name"].as_str().map(str::trim).filter(|n| !n.is_empty()) {
+            g.name = name.to_string();
+        }
+        let v = json!({ "ok": true, "name": g.name, "dir": g.dir, "tabs": g.tabs.len() });
+        self.window.request_redraw();
+        v
+    }
+
     fn tabs_json(&self) -> Value {
         let active = self.ws.active_term();
         let groups: Vec<Value> = self
@@ -950,7 +1024,7 @@ impl State {
                         v
                     })
                     .collect();
-                json!({ "name": g.name, "tabs": tabs })
+                json!({ "name": g.name, "dir": g.dir, "tabs": tabs })
             })
             .collect();
         json!({ "ok": true, "groups": groups })
@@ -1004,6 +1078,7 @@ impl State {
             .iter()
             .map(|g| SavedGroup {
                 name: g.name.clone(),
+                dir: g.dir.clone(),
                 active: g.active,
                 tabs: g
                     .tabs
@@ -1060,7 +1135,7 @@ impl State {
             }
             if !tabs.is_empty() {
                 let active = g.active.min(tabs.len() - 1);
-                groups.push(Group { name: g.name, tabs, active });
+                groups.push(Group { name: g.name, tabs, active, dir: g.dir });
             }
         }
         self.ws.restore(groups, saved.active);
@@ -1068,6 +1143,11 @@ impl State {
 
     /// Evento de un hook de Claude Code en el tab `tab`.
     fn on_hook(&mut self, tab: u64, p: &Value) {
+        if p["hook_event_name"] == "SessionStart" {
+            if let Some(cwd) = p["cwd"].as_str() {
+                self.adopt_group_dir(tab, Path::new(cwd));
+            }
+        }
         let visible = self.ws.active_term() == Some(tab) && self.focused;
         let Some(t) = self.terms.get_mut(&tab) else { return };
         let agent = &mut t.agent;

@@ -19,6 +19,10 @@ Sin comando abre la terminal. Comandos (dentro de Telar):
   new [--group G] [--cwd DIR] [--focus] [-- comando…]
                                      abre un tab (en el grupo del tab actual si no se indica)
                                      y ejecuta el comando; imprime el id del tab nuevo
+  group [--group G] [--dir DIR] [--name NOMBRE]
+                                     muestra o cambia la carpeta y el nombre de un grupo
+                                     (por defecto el del tab actual); sus tabs nuevos abren
+                                     en esa carpeta. --dir \"\" la quita
   wait <tab> [--state S] [--timeout SEG]
                                      espera a que Claude en ese tab deje de trabajar
                                      (o a que llegue al estado S: idle, done, needs-you, shell)
@@ -119,10 +123,11 @@ pub fn run(cmd: &str, raw: &[String]) -> Result<String, String> {
         }
         "new" => {
             let a = Args::parse(raw, &["--group", "-g", "--cwd"]);
-            let cwd = a
-                .value(&["--cwd"])
-                .map(String::from)
-                .or_else(|| std::env::current_dir().ok().map(|d| d.display().to_string()));
+            // Absoluta: la app resolvería una ruta relativa desde su propia carpeta.
+            let cwd = match a.value(&["--cwd"]) {
+                Some(d) => std::fs::canonicalize(d).map_err(|e| format!("{d}: {e}"))?,
+                None => std::env::current_dir().map_err(|e| e.to_string())?,
+            };
             let near = std::env::var("TELAR_TAB_ID").ok().and_then(|v| v.parse::<u64>().ok());
             let command = (!a.positional.is_empty()).then(|| a.positional.join(" "));
             let v = call(json!({
@@ -134,6 +139,25 @@ pub fn run(cmd: &str, raw: &[String]) -> Result<String, String> {
                 "command": command,
             }))?;
             Ok(v["id"].to_string())
+        }
+        "group" => {
+            let a = Args::parse(raw, &["--group", "-g", "--dir", "--name"]);
+            // Rutas relativas, respecto a la carpeta de quien llama (la app no la conoce).
+            let dir = match a.value(&["--dir"]) {
+                Some("") => Some(String::new()),
+                Some(d) => Some(std::fs::canonicalize(d).map_err(|e| format!("{d}: {e}"))?.display().to_string()),
+                None => None,
+            };
+            let near = std::env::var("TELAR_TAB_ID").ok().and_then(|v| v.parse::<u64>().ok());
+            let mut v = call(json!({
+                "cmd": "group",
+                "group": a.value(&["--group", "-g"]),
+                "near": near,
+                "dir": dir,
+                "name": a.value(&["--name"]),
+            }))?;
+            v.as_object_mut().map(|o| o.remove("ok"));
+            Ok(pretty(&v))
         }
         "wait" => {
             let a = Args::parse(raw, &["--state", "--timeout"]);

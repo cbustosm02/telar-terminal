@@ -1,10 +1,19 @@
 //! Modelo: grupos en la barra lateral; cada grupo tiene sus propios tabs.
 //! Solo guarda ids de terminal; las terminales viven en `App::terms`.
 
+use std::path::PathBuf;
+
 pub struct Group {
     pub name: String,
     pub tabs: Vec<u64>,
     pub active: usize,
+    /// Carpeta del proyecto del grupo: ahí se abren sus tabs nuevos.
+    pub dir: Option<PathBuf>,
+}
+
+/// Nombre puesto por Telar («Grupo 3»), no por el usuario.
+pub fn is_default_name(name: &str) -> bool {
+    name.strip_prefix("Grupo ").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[derive(Default)]
@@ -35,12 +44,12 @@ impl Workspace {
 
     pub fn add_group(&mut self, first_tab: u64) {
         let name = self.next_group_name();
-        self.push_group(name, first_tab, true);
+        self.push_group(name, first_tab, true, None);
     }
 
     /// Agrega un grupo con su primer tab. Devuelve su índice.
-    pub fn push_group(&mut self, name: String, first_tab: u64, focus: bool) -> usize {
-        self.groups.push(Group { name, tabs: vec![first_tab], active: 0 });
+    pub fn push_group(&mut self, name: String, first_tab: u64, focus: bool, dir: Option<PathBuf>) -> usize {
+        self.groups.push(Group { name, tabs: vec![first_tab], active: 0, dir });
         if focus || self.groups.len() == 1 {
             self.active = self.groups.len() - 1;
         }

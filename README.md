@@ -48,6 +48,7 @@ telar read <tab> [-n 200]           # texto de la pantalla y el scrollback
 telar send <tab> "texto" [--enter]  # escribir en un tab (varias líneas van como pegado)
 telar new [--group G] [--cwd DIR] [--focus] -- <comando>   # abrir un tab; imprime su id
 telar wait <tab> [--state done] [--timeout 600]            # esperar a que Claude termine
+telar group [--group G] [--dir DIR] [--name N]             # ver o cambiar la carpeta y el nombre de un grupo
 ```
 
 `<tab>` puede ser el id, `self`, `grupo/n` (n desde 1) o parte del título.
@@ -57,6 +58,7 @@ telar wait <tab> [--state done] [--timeout 600]            # esperar a que Claud
 ## Modelo
 
 - La barra lateral lista los grupos. Al crear un grupo, se crea con un tab.
+- Cada grupo puede tener una carpeta de proyecto: sus tabs nuevos abren ahí. La toma sola de la primera sesión de Claude que se abre en él (y, si se llamaba «Grupo N», también el nombre de esa carpeta). Se cambia con `telar group --dir`.
 - La barra de arriba muestra los tabs del grupo activo.
 - Al cerrar el último tab de un grupo, el grupo se elimina. Al cerrar el último grupo, se cierra la app.
 - Un punto ámbar en un tab o grupo indica que sonó la campana mientras no estaba visible.
@@ -65,7 +67,8 @@ telar wait <tab> [--state done] [--timeout 600]            # esperar a que Claud
 
 | Atajo | Acción |
 |---|---|
-| ⌘T | Nuevo tab en el grupo activo |
+| ⌘T | Nuevo tab en el grupo activo (en la carpeta del grupo) |
+| ⌘⇧T | Nuevo agente: tab que arranca `claude` |
 | ⌘N | Nuevo grupo |
 | ⌘W | Cerrar tab |
 | ⌘J | Ir al siguiente tab que te necesita |

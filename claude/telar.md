@@ -8,6 +8,7 @@ Telar agrupa tabs, y cada tab suele tener una sesión de Claude Code. El comando
 - `telar new [--group G] [--cwd DIR] [--focus] -- <comando>`: abre un tab, por defecto en tu mismo grupo y sin quitarle el foco al usuario. Imprime su id.
   - Ejemplo de agente en paralelo: `telar new -- claude "tarea"`.
 - `telar wait <tab> [--state done] [--timeout 600]`: espera a que Claude en ese tab deje de trabajar.
+- `telar group [--dir DIR] [--name N]`: muestra o cambia la carpeta y el nombre de tu grupo (los tabs nuevos del grupo abren en esa carpeta).
 
 Reglas:
 - Leer otros tabs (`tabs`, `read`, `status`) está bien cuando te sirve para la tarea.
