@@ -3,12 +3,16 @@
 //! alacritty_terminal ya trae el PTY y un hilo lector (`EventLoop`), así que no
 //! hace falta portable-pty. Cada terminal tiene su propio hilo de lectura; la
 //! UI solo se entera por eventos `UserEvent::Term`.
+//!
+//! Una terminal suspendida no tiene PTY ni proceso: solo conserva su pantalla
+//! (reconstruida desde `screen::to_ansi`) para la vista previa.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, Notify, WindowSize};
@@ -23,16 +27,34 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::UserEvent;
 
+/// Cada terminal que se crea (también al reanudar un tab, que conserva su id) tiene
+/// una generación distinta. Así los eventos tardíos del proceso anterior se descartan.
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Clone)]
 pub struct Listener {
     id: u64,
+    generation: u64,
     proxy: EventLoopProxy<UserEvent>,
 }
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
-        let _ = self.proxy.send_event(UserEvent::Term(self.id, event));
+        let _ = self.proxy.send_event(UserEvent::Term(self.id, self.generation, event));
     }
+}
+
+impl Listener {
+    fn new(id: u64, proxy: EventLoopProxy<UserEvent>) -> Self {
+        Self { id, generation: GENERATION.fetch_add(1, Ordering::Relaxed), proxy }
+    }
+}
+
+/// Lo que guarda un tab suspendido para poder reanudarlo.
+pub struct Frozen {
+    pub cwd: Option<PathBuf>,
+    /// Pantalla como texto ANSI (también se guarda en la sesión).
+    pub screen: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -124,7 +146,10 @@ impl Agent {
 
 pub struct Terminal {
     pub term: Arc<FairMutex<Term<Listener>>>,
-    notifier: Notifier,
+    /// `None` si está suspendida.
+    notifier: Option<Notifier>,
+    pub generation: u64,
+    pub frozen: Option<Frozen>,
     pub title: Option<String>,
     /// Sonó la campana mientras el tab no estaba visible.
     pub attention: bool,
@@ -144,7 +169,7 @@ impl Terminal {
         socket: Option<&Path>,
         cwd: Option<&Path>,
     ) -> std::io::Result<Self> {
-        let listener = Listener { id, proxy };
+        let listener = Listener::new(id, proxy);
         let mut env = HashMap::from([
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -171,12 +196,15 @@ impl Terminal {
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
         let pty = tty::new(&options, size.window_size(), id)?;
         let pty_fd = pty.file().try_clone().ok().map(OwnedFd::from);
+        let listener_generation = listener.generation;
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
         let notifier = Notifier(event_loop.channel());
         event_loop.spawn();
         Ok(Self {
             term,
-            notifier,
+            notifier: Some(notifier),
+            generation: listener_generation,
+            frozen: None,
             title: None,
             attention: false,
             agent: Agent::default(),
@@ -186,8 +214,35 @@ impl Terminal {
         })
     }
 
+    /// Terminal suspendida: sin proceso, con la pantalla guardada en `frozen.screen`.
+    pub fn frozen(id: u64, size: GridSize, proxy: EventLoopProxy<UserEvent>, frozen: Frozen) -> Self {
+        let listener = Listener::new(id, proxy);
+        let generation = listener.generation;
+        let config = Config { scrolling_history: 0, ..Default::default() };
+        let mut term = Term::new(config, &size, listener);
+        crate::screen::load(&mut term, &frozen.screen);
+        Self {
+            term: Arc::new(FairMutex::new(term)),
+            notifier: None,
+            generation,
+            frozen: Some(frozen),
+            title: None,
+            attention: false,
+            agent: Agent::default(),
+            process: None,
+            pty: None,
+            size,
+        }
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.frozen.is_some()
+    }
+
     pub fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
-        self.notifier.notify(bytes);
+        if let Some(n) = &self.notifier {
+            n.notify(bytes);
+        }
     }
 
     pub fn resize(&mut self, size: GridSize) {
@@ -195,7 +250,9 @@ impl Terminal {
             return;
         }
         self.size = size;
-        let _ = self.notifier.0.send(Msg::Resize(size.window_size()));
+        if let Some(n) = &self.notifier {
+            let _ = n.0.send(Msg::Resize(size.window_size()));
+        }
         self.term.lock().resize(size);
     }
 
@@ -209,6 +266,9 @@ impl Terminal {
 
     /// Carpeta actual del proceso en primer plano (la shell, o Claude si está corriendo).
     pub fn cwd(&self) -> Option<PathBuf> {
+        if let Some(f) = &self.frozen {
+            return f.cwd.clone();
+        }
         self.foreground().and_then(crate::proc::cwd)
     }
 
@@ -264,6 +324,8 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         // Cierra el hilo lector; al soltar el PTY la shell recibe SIGHUP.
-        let _ = self.notifier.0.send(Msg::Shutdown);
+        if let Some(n) = &self.notifier {
+            let _ = n.0.send(Msg::Shutdown);
+        }
     }
 }

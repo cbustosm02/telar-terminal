@@ -49,11 +49,36 @@ telar send <tab> "texto" [--enter]  # escribir en un tab (varias líneas van com
 telar new [--group G] [--cwd DIR] [--focus] -- <comando>   # abrir un tab; imprime su id
 telar wait <tab> [--state done] [--timeout 600]            # esperar a que Claude termine
 telar group [--group G] [--dir DIR] [--name N]             # ver o cambiar la carpeta y el nombre de un grupo
+telar suspend <tab> | --group G [--force]                  # suspender (ver abajo)
+telar resume <tab> | --group G                             # reanudar
+telar awake [on|off|auto]                                  # mantener el Mac despierto
 ```
 
 `<tab>` puede ser el id, `self`, `grupo/n` (n desde 1) o parte del título.
 
 `telar install` también deja la regla `~/.claude/rules/telar.md` (copia de `claude/telar.md`). Con ella, Claude sabe que puede leer otros tabs (logs de servidores, tests) y coordinar agentes.
+
+## Suspender tabs y grupos
+
+Para tener muchas sesiones a la vista sin que consuman recursos:
+
+- **⌘S** suspende el tab activo (o lo reanuda). **⌘⇧S** suspende el grupo entero; si ya está todo suspendido, lo reanuda.
+- Suspender cierra la shell y Claude (lo que más memoria usa) y guarda la última pantalla con sus colores. El tab queda con una ☾ y, al abrirlo, se ve esa pantalla atenuada. `telar read` también funciona sobre ella.
+- **Enter** en un tab suspendido lo reanuda: abre una shell en su carpeta y, si tenía Claude, ejecuta `claude --resume` con la misma sesión.
+- Al suspender un grupo se saltan los tabs donde Claude está trabajando o esperando un permiso (por CLI, `--force` los incluye).
+- Los tabs suspendidos siguen suspendidos al reabrir Telar, sin arrancar nada; reabrir con muchas sesiones dormidas es instantáneo.
+
+## Mantener el Mac despierto
+
+Abajo en la barra lateral, **Despierto** (clic o **⌘⇧C**) alterna entre:
+
+| Modo | Efecto |
+|---|---|
+| no | nada |
+| siempre | `caffeinate -dims` mientras Telar esté abierto |
+| Claude | solo mientras algún Claude esté trabajando |
+
+El punto azul indica que `caffeinate` está corriendo. Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina solo. El modo se guarda en la sesión.
 
 ## Modelo
 
@@ -69,6 +94,9 @@ telar group [--group G] [--dir DIR] [--name N]             # ver o cambiar la ca
 |---|---|
 | ⌘T | Nuevo tab en el grupo activo (en la carpeta del grupo) |
 | ⌘⇧T | Nuevo agente: tab que arranca `claude` |
+| ⌘S | Suspender o reanudar el tab activo (Enter también reanuda) |
+| ⌘⇧S | Suspender o reanudar el grupo activo |
+| ⌘⇧C | Despierto: no → siempre → mientras Claude trabaja |
 | ⌘N | Nuevo grupo |
 | ⌘W | Cerrar tab |
 | ⌘J | Ir al siguiente tab que te necesita |

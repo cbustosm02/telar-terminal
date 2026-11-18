@@ -16,6 +16,7 @@ use alacritty_terminal::term::color::{Colors, COUNT};
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 
+use crate::awake;
 use crate::font::{self, Fonts, Glyph};
 use crate::renderer::{Quad, KIND_COLOR, KIND_MASK};
 use crate::terminal::{AgentState, GridSize, Listener, Terminal};
@@ -57,6 +58,8 @@ pub enum Hit {
     Tab(usize),
     CloseTab(usize),
     NewTab,
+    /// Interruptor de `caffeinate`, abajo en la barra lateral.
+    Awake,
     /// Zona vacía de la barra de título: arrastra la ventana.
     Drag,
     Terminal,
@@ -120,8 +123,17 @@ impl Layout {
         Rect { w: NEW_TAB_W * self.s, ..r }
     }
 
+    /// Fila de «Despierto», al pie de la barra lateral.
+    fn awake_rect(&self) -> Rect {
+        let s = self.s;
+        Rect { x: 8.0 * s, y: self.h - (GROUP_ROW_H + 8.0) * s, w: (SIDEBAR_W - 16.0) * s, h: (GROUP_ROW_H - 2.0) * s }
+    }
+
     pub fn hit(&self, x: f32, y: f32, n_groups: usize, n_tabs: usize) -> Hit {
         if x < self.sidebar_w() {
+            if self.awake_rect().contains(x, y) {
+                return Hit::Awake;
+            }
             if let Some(i) = (0..n_groups).find(|i| self.group_rect(*i).contains(x, y)) {
                 return Hit::Group(i);
             }
@@ -173,6 +185,8 @@ pub struct View<'a> {
     pub palette: &'a [Rgba; COUNT],
     /// Segundos desde que abrió la app (para animar el indicador de «trabajando»).
     pub time: f32,
+    /// Modo de `caffeinate` y si está corriendo ahora.
+    pub awake: (awake::Mode, bool),
 }
 
 /// Prioridad y color del indicador de un tab (None = sin indicador).
@@ -241,12 +255,41 @@ pub fn draw(out: &mut Vec<Quad>, fg: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layo
     draw_sidebar(out, fonts, l, v);
     draw_tabbar(out, fonts, l, v);
     let mut ime_cell = None;
-    if let Some(t) = v.ws.active_term().and_then(|id| v.terms.get(&id)) {
+    let active = v.ws.active_term().and_then(|id| v.terms.get(&id));
+    if let Some(t) = active {
         let term = t.term.lock();
         ime_cell = draw_terminal(out, fg, fonts, l, &term, v);
     }
     out.append(fg);
+    if active.is_some_and(Terminal::is_suspended) {
+        draw_suspended(out, fonts, l);
+        return None;
+    }
     ime_cell
+}
+
+/// Marca de tab suspendido (en lugar del punto de estado).
+const MOON: &str = "☾";
+
+/// Vista previa de un tab suspendido: su última pantalla, atenuada, con un aviso abajo.
+fn draw_suspended(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout) {
+    let s = l.s;
+    let x0 = l.sidebar_w();
+    let top = l.titlebar_h();
+    let mut veil = theme::CHROME_BG;
+    veil[3] = 0.55;
+    out.push(Quad::rect(x0, top, l.w - x0, l.h - top, veil));
+
+    let msg = "Suspendido · Enter para reanudar · ⌘⇧S reanuda el grupo";
+    let (cw, ch) = (fonts.cell_w, fonts.cell_h);
+    let pad = 14.0 * s;
+    let w = (msg.chars().count() as f32 * cw + 2.0 * pad).min(l.w - x0 - 24.0 * s);
+    let h = ch + 2.0 * 9.0 * s;
+    let x = x0 + (l.w - x0 - w) / 2.0;
+    let y = l.h - h - 28.0 * s;
+    out.push(Quad::rounded(x - s, y - s, w + 2.0 * s, h + 2.0 * s, 9.0 * s, theme::BORDER));
+    out.push(Quad::rounded(x, y, w, h, 8.0 * s, theme::ITEM_ACTIVE));
+    text(out, fonts, x + pad, y + (h - ch) / 2.0, msg, theme::TEXT, w - 2.0 * pad);
 }
 
 fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
@@ -267,6 +310,7 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
         }
         let ty = r.y + (r.h - ch) / 2.0;
         let tx = r.x + 12.0 * s;
+        let asleep = g.tabs.iter().all(|id| v.terms.get(id).is_some_and(Terminal::is_suspended));
         let count = g.tabs.len().to_string();
         let badge_w = count.len() as f32 * fonts.cell_w;
         let name_w = r.w - 24.0 * s - badge_w - 8.0 * s;
@@ -277,16 +321,18 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
                 out.push(Quad::rect(tx + w + s, ty + 2.0 * s, 2.0 * s, ch - 4.0 * s, theme::ACCENT));
             }
             _ => {
-                let color = if active { theme::TEXT } else { theme::TEXT_DIM };
+                let color = if active && !asleep { theme::TEXT } else { theme::TEXT_DIM };
                 text(out, fonts, tx, ty, &g.name, color, name_w);
             }
         }
         text(out, fonts, r.x + r.w - 12.0 * s - badge_w, ty, &count, theme::TEXT_DIM, badge_w + 1.0);
-        // El grupo muestra el estado más urgente de sus tabs.
+        // El grupo muestra el estado más urgente de sus tabs (o la luna si todos duermen).
         let worst = g.tabs.iter().filter_map(|id| v.terms.get(id)).filter_map(|t| status(t, v.time)).max_by_key(|(p, _)| *p);
+        let d = 7.0 * s;
         if let Some((_, color)) = worst {
-            let d = 7.0 * s;
             dot(out, r.x + r.w - 12.0 * s - badge_w - d - 7.0 * s, r.y + r.h / 2.0, d, color);
+        } else if asleep {
+            text(out, fonts, r.x + r.w - 12.0 * s - badge_w - fonts.cell_w - 6.0 * s, ty, MOON, theme::TEXT_DIM, fonts.cell_w + 1.0);
         }
     }
 
@@ -297,6 +343,21 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
     }
     let color = if hovered { theme::TEXT } else { theme::TEXT_DIM };
     text(out, fonts, r.x + 12.0 * s, r.y + (r.h - ch) / 2.0, "+ Nuevo grupo", color, r.w - 24.0 * s);
+
+    // Pie: «Despierto» (caffeinate). Punto azul mientras está corriendo.
+    let r = l.awake_rect();
+    let hovered = v.hover == Hit::Awake;
+    if hovered {
+        out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_HOVER));
+    }
+    let (mode, running) = v.awake;
+    let color = if hovered || mode != awake::Mode::Off { theme::TEXT } else { theme::TEXT_DIM };
+    let ty = r.y + (r.h - ch) / 2.0;
+    text(out, fonts, r.x + 12.0 * s, ty, mode.label(), color, r.w - 40.0 * s);
+    if running {
+        let d = 7.0 * s;
+        dot(out, r.x + r.w - 12.0 * s - d, r.y + r.h / 2.0, d, theme::ACCENT);
+    }
 }
 
 fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> Option<()> {
@@ -323,10 +384,14 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
             .and_then(|t| t.title.as_deref().or(t.process.as_deref()))
             .unwrap_or(&fallback);
         let close = l.tab_close_rect(i);
-        let color = if active { theme::TEXT } else { theme::TEXT_DIM };
+        let suspended = v.terms.get(id).is_some_and(Terminal::is_suspended);
+        let color = if active && !suspended { theme::TEXT } else { theme::TEXT_DIM };
         let ty = r.y + (r.h - ch) / 2.0;
         let mut tx = r.x + 10.0 * s;
-        if let Some((_, color)) = v.terms.get(id).and_then(|t| status(t, v.time)) {
+        if suspended {
+            text(out, fonts, tx - 1.0 * s, ty, MOON, theme::TEXT_DIM, fonts.cell_w + 1.0);
+            tx += fonts.cell_w + 5.0 * s;
+        } else if let Some((_, color)) = v.terms.get(id).and_then(|t| status(t, v.time)) {
             let d = 7.0 * s;
             dot(out, tx, r.y + r.h / 2.0, d, color);
             tx += d + 7.0 * s;

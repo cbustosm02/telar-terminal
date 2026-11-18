@@ -23,6 +23,12 @@ Sin comando abre la terminal. Comandos (dentro de Telar):
                                      muestra o cambia la carpeta y el nombre de un grupo
                                      (por defecto el del tab actual); sus tabs nuevos abren
                                      en esa carpeta. --dir \"\" la quita
+  suspend <tab> | --group G [--force]
+                                     suspende: cierra la shell y Claude y deja la última pantalla
+                                     a la vista (no suspende tabs que trabajan, salvo --force)
+  resume <tab> | --group G           reanuda (Claude retoma la misma sesión)
+  awake [on|off|auto]                mantener el Mac despierto (caffeinate -dims): siempre,
+                                     nunca, o solo mientras algún Claude trabaja
   wait <tab> [--state S] [--timeout SEG]
                                      espera a que Claude en ese tab deje de trabajar
                                      (o a que llegue al estado S: idle, done, needs-you, shell)
@@ -158,6 +164,33 @@ pub fn run(cmd: &str, raw: &[String]) -> Result<String, String> {
             }))?;
             v.as_object_mut().map(|o| o.remove("ok"));
             Ok(pretty(&v))
+        }
+        "suspend" | "resume" => {
+            let a = Args::parse(raw, &["--group", "-g"]);
+            let group = a.value(&["--group", "-g"]);
+            let tab = match (group, a.positional.first()) {
+                (Some(_), _) => Value::Null,
+                (None, Some(t)) => tab_spec(t),
+                (None, None) => return Err("falta <tab> o --group G".into()),
+            };
+            let v = call(json!({ "cmd": cmd, "tab": tab, "group": group, "force": a.has(&["--force"]) }))?;
+            let n = v["changed"].as_array().map_or(0, Vec::len);
+            Ok(match (cmd, n) {
+                (_, 0) => "Nada que cambiar".to_string(),
+                ("suspend", _) => format!("Suspendidos: {}", v["changed"]),
+                _ => format!("Reanudados: {}", v["changed"]),
+            })
+        }
+        "awake" => {
+            let v = call(json!({ "cmd": "awake", "mode": raw.first() }))?;
+            let mode = v["mode"].as_str().unwrap_or_default();
+            let what = match mode {
+                "on" => "siempre",
+                "auto" => "mientras algún Claude trabaja",
+                _ => "no",
+            };
+            let now = if v["active"] == json!(true) { "activo ahora" } else { "inactivo ahora" };
+            Ok(format!("Despierto: {what} ({mode}); caffeinate {now}"))
         }
         "wait" => {
             let a = Args::parse(raw, &["--state", "--timeout"]);

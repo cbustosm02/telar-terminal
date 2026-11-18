@@ -1,5 +1,6 @@
 //! Telar: terminal personal con grupos de tabs en una barra lateral.
 
+mod awake;
 mod cli;
 mod font;
 mod hooks;
@@ -7,6 +8,7 @@ mod input;
 mod ipc;
 mod proc;
 mod renderer;
+mod screen;
 mod session;
 mod terminal;
 mod theme;
@@ -36,7 +38,7 @@ use winit::window::{CursorIcon, UserAttentionType, Window, WindowId};
 
 use crate::font::Fonts;
 use crate::renderer::{Quad, Renderer};
-use crate::terminal::{AgentState, Terminal};
+use crate::terminal::{AgentState, Frozen, Terminal};
 use crate::theme::Rgba;
 use crate::ui::{Hit, Layout, View};
 use crate::session::{Saved, SavedGroup, SavedTab};
@@ -50,7 +52,8 @@ const SPINNER_TICK: Duration = Duration::from_millis(80);
 const SAVE_TICK: Duration = Duration::from_secs(5);
 
 pub enum UserEvent {
-    Term(u64, TermEvent),
+    /// Evento de la terminal `id`, de la generación indicada (ver `terminal::Listener`).
+    Term(u64, u64, TermEvent),
     Ipc(ipc::Request),
 }
 
@@ -121,6 +124,8 @@ struct State {
     persist: bool,
     last_saved: Option<Saved>,
     next_save: Instant,
+    /// `caffeinate`: mantener el Mac despierto (⌘⇧C).
+    awake: awake::Awake,
 }
 
 /// Modo de prueba: `TELAR_SNAPSHOT=archivo.bmp` abre la app, escribe
@@ -190,6 +195,7 @@ impl ApplicationHandler<UserEvent> for App {
             persist: std::env::var_os("TELAR_SNAPSHOT").is_none() || std::env::var_os("TELAR_SESSION_FILE").is_some(),
             last_saved: None,
             next_save: Instant::now() + SAVE_TICK,
+            awake: awake::Awake::default(),
         };
         if let Some(server) = &state.server {
             // Para que el modo snapshot (y quien depure) sepa dónde está el socket.
@@ -211,16 +217,21 @@ impl ApplicationHandler<UserEvent> for App {
         if state.snapshot.is_some() && !restored {
             state.snapshot_setup();
         }
+        state.update_awake();
         self.state = Some(state);
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let Some(st) = self.state.as_mut() else { return };
         let (id, event) = match event {
-            UserEvent::Term(id, event) => (id, event),
+            // De un proceso anterior del mismo tab (suspendido o reanudado): se ignora.
+            UserEvent::Term(id, generation, _) if st.terms.get(&id).is_none_or(|t| t.generation != generation) => return,
+            UserEvent::Term(id, _, event) => (id, event),
             UserEvent::Ipc(req) => {
                 let response = st.on_ipc(&req.body);
                 let _ = req.reply.send(response);
+                // Un hook pudo cambiar si hay algún Claude trabajando.
+                st.update_awake();
                 return;
             }
         };
@@ -368,15 +379,100 @@ impl State {
     fn spawn_term_in(&mut self, cwd: Option<&Path>) -> Option<u64> {
         let id = self.next_id;
         self.next_id += 1;
+        let t = self.spawn_with_id(id, cwd)?;
+        self.terms.insert(id, t);
+        Some(id)
+    }
+
+    fn spawn_with_id(&self, id: u64, cwd: Option<&Path>) -> Option<Terminal> {
         let socket = self.server.as_ref().map(|s| s.path.as_path());
-        match Terminal::spawn(id, self.layout().grid_size(), self.proxy.clone(), socket, cwd) {
-            Ok(t) => {
-                self.terms.insert(id, t);
-                Some(id)
+        Terminal::spawn(id, self.layout().grid_size(), self.proxy.clone(), socket, cwd)
+            .map_err(|e| log::error!("no se pudo abrir la shell: {e}"))
+            .ok()
+    }
+
+    /// Suspende un tab: guarda su pantalla y cierra su shell (y Claude, si corre ahí).
+    /// Queda la vista previa; al reanudarlo, Claude retoma la misma sesión.
+    fn suspend(&mut self, id: u64) -> bool {
+        let Some(old) = self.terms.get_mut(&id) else { return false };
+        if old.is_suspended() {
+            return false;
+        }
+        let claude = old.agent.state != AgentState::None && old.agent.session_id.is_some();
+        // Con Claude, su carpeta es donde se inició la sesión (la necesita --resume).
+        let cwd = if claude { old.agent.cwd.as_ref().map(PathBuf::from).or_else(|| old.cwd()) } else { old.cwd() };
+        let screen = screen::to_ansi(&old.term.lock());
+        let title = old.title.take();
+        let mut agent = std::mem::take(&mut old.agent);
+        let size = old.size();
+        let mut t = Terminal::frozen(id, size, self.proxy.clone(), Frozen { cwd, screen });
+        t.title = title;
+        if claude {
+            agent.set_state(AgentState::Idle);
+            agent.message = None;
+            t.agent = agent;
+        }
+        // Al reemplazarla se suelta la terminal vieja: su shell recibe SIGHUP.
+        self.terms.insert(id, t);
+        self.window.request_redraw();
+        true
+    }
+
+    /// Vuelve a abrir un tab suspendido en su carpeta; si tenía Claude, retoma la sesión.
+    fn resume(&mut self, id: u64) -> bool {
+        let Some(old) = self.terms.get(&id) else { return false };
+        let Some(frozen) = &old.frozen else { return false };
+        let cwd = frozen.cwd.clone();
+        let session = old.agent.session_id.clone().filter(|_| old.agent.state != AgentState::None);
+        let title = old.title.clone();
+        let Some(mut t) = self.spawn_with_id(id, cwd.as_deref()) else { return false };
+        t.title = title;
+        if let Some(session) = session {
+            resume_claude(&mut t, &session, cwd.as_deref());
+        }
+        self.terms.insert(id, t);
+        self.window.request_redraw();
+        true
+    }
+
+    /// Tabs del grupo que se pueden suspender sin cortar trabajo: no están trabajando
+    /// ni esperando un permiso.
+    fn suspendable(&self, gi: usize) -> Vec<u64> {
+        let Some(g) = self.ws.groups.get(gi) else { return Vec::new() };
+        g.tabs
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.terms.get(id).is_some_and(|t| {
+                    !t.is_suspended() && !matches!(t.agent.state, AgentState::Working | AgentState::NeedsYou)
+                })
+            })
+            .collect()
+    }
+
+    /// ⌘S: suspende o reanuda el tab activo.
+    fn toggle_suspend_tab(&mut self) {
+        let Some(id) = self.ws.active_term() else { return };
+        if self.terms.get(&id).is_some_and(Terminal::is_suspended) {
+            self.resume(id);
+        } else {
+            self.suspend(id);
+        }
+    }
+
+    /// ⌘⇧S: suspende el grupo activo (salvo los tabs que trabajan); si ya está todo
+    /// suspendido, lo reanuda entero.
+    fn toggle_suspend_group(&mut self) {
+        let gi = self.ws.active;
+        let awake = self.suspendable(gi);
+        if awake.is_empty() {
+            let tabs = self.ws.groups.get(gi).map(|g| g.tabs.clone()).unwrap_or_default();
+            for id in tabs {
+                self.resume(id);
             }
-            Err(e) => {
-                log::error!("no se pudo abrir la shell: {e}");
-                None
+        } else {
+            for id in awake {
+                self.suspend(id);
             }
         }
     }
@@ -554,6 +650,12 @@ impl State {
             return false;
         }
 
+        if let Some(id) = self.ws.active_term().filter(|id| self.terms.get(id).is_some_and(Terminal::is_suspended)) {
+            if event.logical_key == Key::Named(NamedKey::Enter) {
+                self.resume(id);
+            }
+            return false;
+        }
         if let Some(bytes) = input::key_to_bytes(event, m, self.active_mode()) {
             self.send_input(bytes);
         }
@@ -590,9 +692,12 @@ impl State {
             }
             "q" => return true,
             "j" => self.jump_to_attention(),
+            "c" if m.shift_key() => self.cycle_awake(),
             "c" => self.copy_selection(),
             "v" => self.paste(),
             "r" if m.shift_key() => self.start_rename(self.ws.active),
+            "s" if m.shift_key() => self.toggle_suspend_group(),
+            "s" => self.toggle_suspend_tab(),
             "=" | "+" => {
                 self.font_pt = (self.font_pt + 1.0).min(36.0);
                 self.apply_font_size();
@@ -653,7 +758,7 @@ impl State {
             self.hover = hit;
             let icon = match hit {
                 Hit::Terminal => CursorIcon::Text,
-                Hit::Group(_) | Hit::NewGroup | Hit::Tab(_) | Hit::CloseTab(_) | Hit::NewTab => CursorIcon::Pointer,
+                Hit::Group(_) | Hit::NewGroup | Hit::Tab(_) | Hit::CloseTab(_) | Hit::NewTab | Hit::Awake => CursorIcon::Pointer,
                 _ => CursorIcon::Default,
             };
             self.window.set_cursor(icon);
@@ -732,6 +837,7 @@ impl State {
             (Hit::NewTab, MouseButton::Left) => {
                 self.new_tab();
             }
+            (Hit::Awake, MouseButton::Left) => self.cycle_awake(),
             (Hit::Drag, MouseButton::Left) => {
                 if count == 2 {
                     let max = self.window.is_maximized();
@@ -897,6 +1003,9 @@ impl State {
                 Err(e) => json!({ "ok": false, "error": e }),
             },
             Some("send") => match self.resolve_tab(&body["tab"]) {
+                Ok(id) if self.terms[&id].is_suspended() => {
+                    json!({ "ok": false, "error": format!("el tab {id} está suspendido; reanúdalo con `telar resume {id}`") })
+                }
                 Ok(id) => {
                     let text = body["text"].as_str().unwrap_or_default();
                     let t = &self.terms[&id];
@@ -913,6 +1022,18 @@ impl State {
             },
             Some("new") => self.ipc_new(body),
             Some("group") => self.ipc_group(body),
+            Some("awake") => {
+                if let Some(s) = body["mode"].as_str() {
+                    let Some(mode) = awake::Mode::parse(s) else {
+                        return json!({ "ok": false, "error": format!("modo desconocido «{s}»: usa on, off o auto") });
+                    };
+                    self.awake.mode = mode;
+                    self.update_awake();
+                    self.window.request_redraw();
+                }
+                json!({ "ok": true, "mode": self.awake.mode.name(), "active": self.awake.active() })
+            }
+            Some(cmd @ ("suspend" | "resume")) => self.ipc_suspend(cmd == "suspend", body),
             other => json!({ "ok": false, "error": format!("comando desconocido: {other:?}") }),
         }
     }
@@ -1008,6 +1129,47 @@ impl State {
         v
     }
 
+    /// `telar suspend` / `telar resume`: un tab o un grupo entero.
+    fn ipc_suspend(&mut self, suspend: bool, body: &Value) -> Value {
+        let force = body["force"].as_bool().unwrap_or(false);
+        let ids: Vec<u64> = match body["group"].as_str() {
+            Some(name) => {
+                let Some(gi) = self.ws.groups.iter().position(|g| g.name.eq_ignore_ascii_case(name)) else {
+                    return json!({ "ok": false, "error": format!("no existe el grupo «{name}»") });
+                };
+                if suspend && !force { self.suspendable(gi) } else { self.ws.groups[gi].tabs.clone() }
+            }
+            None => match self.resolve_tab(&body["tab"]) {
+                Ok(id) => {
+                    let busy = self.terms[&id].agent.state;
+                    if suspend && !force && matches!(busy, AgentState::Working | AgentState::NeedsYou) {
+                        return json!({ "ok": false, "error": format!("Claude está {} en el tab {id}; usa --force para suspenderlo igual", if busy == AgentState::Working { "trabajando" } else { "esperando tu respuesta" }) });
+                    }
+                    vec![id]
+                }
+                Err(e) => return json!({ "ok": false, "error": e }),
+            },
+        };
+        let changed: Vec<u64> = ids.into_iter().filter(|id| if suspend { self.suspend(*id) } else { self.resume(*id) }).collect();
+        json!({ "ok": true, "changed": changed })
+    }
+
+    /// ⌘⇧C o clic abajo en la barra lateral: apagado → siempre → con Claude.
+    fn cycle_awake(&mut self) {
+        self.awake.mode = self.awake.mode.next();
+        self.update_awake();
+        self.window.request_redraw();
+    }
+
+    fn update_awake(&mut self) {
+        let working = self.terms.values().any(|t| t.agent.state == AgentState::Working);
+        let before = self.awake.active();
+        self.awake.update(working);
+        if before != self.awake.active() {
+            self.window.request_redraw();
+        }
+    }
+
     fn tabs_json(&self) -> Value {
         let active = self.ws.active_term();
         let groups: Vec<Value> = self
@@ -1039,6 +1201,7 @@ impl State {
             "title": t.title,
             "process": t.process,
             "state": t.agent.state.name(),
+            "suspended": t.is_suspended(),
             "state_secs": t.agent.since.elapsed().as_secs(),
             "changes": t.agent.changes,
             "session_id": t.agent.session_id,
@@ -1068,6 +1231,7 @@ impl State {
         if changed {
             self.window.request_redraw();
         }
+        self.update_awake();
         self.save_session();
     }
 
@@ -1086,18 +1250,21 @@ impl State {
                     .filter_map(|id| self.terms.get(id))
                     .map(|t| {
                         let claude = (t.agent.state != AgentState::None).then(|| t.agent.session_id.clone()).flatten();
+                        let screen = t.frozen.as_ref().map(|f| f.screen.clone());
                         // Con Claude abierto, su carpeta es donde se inició la sesión (la necesita --resume).
-                        let cwd = if claude.is_some() {
+                        let cwd = if t.is_suspended() {
+                            t.cwd()
+                        } else if claude.is_some() {
                             t.agent.cwd.as_ref().map(PathBuf::from).or_else(|| t.cwd())
                         } else {
                             t.cwd()
                         };
-                        SavedTab { title: t.title.clone(), cwd, claude }
+                        SavedTab { title: t.title.clone(), cwd, claude, screen }
                     })
                     .collect(),
             })
             .collect();
-        Saved { active: self.ws.active, groups }
+        Saved { active: self.ws.active, groups, awake: self.awake.mode.name().to_string() }
     }
 
     fn save_session(&mut self) {
@@ -1113,24 +1280,35 @@ impl State {
 
     /// Vuelve a abrir los grupos y tabs guardados; los que tenían Claude retoman su sesión.
     fn restore(&mut self, saved: Saved) {
+        self.awake.mode = awake::Mode::parse(&saved.awake).unwrap_or_default();
         let mut groups = Vec::new();
         for g in saved.groups {
             let mut tabs = Vec::new();
-            for tab in &g.tabs {
-                let Some(id) = self.spawn_term_in(tab.cwd.as_deref()) else { continue };
-                if let Some(t) = self.terms.get_mut(&id) {
-                    t.title = tab.title.clone();
-                }
-                if let Some(session) = &tab.claude {
-                    self.write(id, format!("claude --resume {session}\r").into_bytes());
-                    // Ya cuenta como tab de Claude aunque su hook SessionStart aún no llegue:
-                    // si se cierra Telar antes, la sesión no se pierde.
-                    if let Some(t) = self.terms.get_mut(&id) {
-                        t.agent.session_id = Some(session.clone());
-                        t.agent.cwd = tab.cwd.as_ref().map(|c| c.display().to_string());
-                        t.agent.set_state(AgentState::Idle);
+            for tab in g.tabs {
+                let id = self.next_id;
+                // Suspendido: no arranca nada, solo vuelve su vista previa.
+                let mut t = match tab.screen {
+                    Some(screen) => {
+                        self.next_id += 1;
+                        let mut t = Terminal::frozen(id, self.layout().grid_size(), self.proxy.clone(), Frozen { cwd: tab.cwd.clone(), screen });
+                        if let Some(session) = &tab.claude {
+                            t.agent.session_id = Some(session.clone());
+                            t.agent.cwd = tab.cwd.as_ref().map(|c| c.display().to_string());
+                            t.agent.set_state(AgentState::Idle);
+                        }
+                        t
                     }
-                }
+                    None => {
+                        let Some(id) = self.spawn_term_in(tab.cwd.as_deref()) else { continue };
+                        let mut t = self.terms.remove(&id).unwrap();
+                        if let Some(session) = &tab.claude {
+                            resume_claude(&mut t, session, tab.cwd.as_deref());
+                        }
+                        t
+                    }
+                };
+                t.title = tab.title;
+                self.terms.insert(id, t);
                 tabs.push(id);
             }
             if !tabs.is_empty() {
@@ -1143,6 +1321,10 @@ impl State {
 
     /// Evento de un hook de Claude Code en el tab `tab`.
     fn on_hook(&mut self, tab: u64, p: &Value) {
+        // Un tab suspendido no tiene Claude: lo que llegue es del proceso que se cerró (SessionEnd).
+        if self.terms.get(&tab).is_none_or(Terminal::is_suspended) {
+            return;
+        }
         if p["hook_event_name"] == "SessionStart" {
             if let Some(cwd) = p["cwd"].as_str() {
                 self.adopt_group_dir(tab, Path::new(cwd));
@@ -1227,6 +1409,7 @@ impl State {
             focused: self.focused,
             palette: &self.palette,
             time: self.started.elapsed().as_secs_f32(),
+            awake: (self.awake.mode, self.awake.active()),
         };
         let ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
         if let Some((col, row)) = ime_cell {
@@ -1246,6 +1429,17 @@ impl State {
 }
 
 /// Notificación de macOS (sin bundle de app todavía, vía osascript).
+/// Retoma en `t` (recién abierto) la sesión de Claude `session`.
+fn resume_claude(t: &mut Terminal, session: &str, cwd: Option<&Path>) {
+    // La shell todavía arranca: lo escrito queda en el buffer del PTY y se ejecuta al estar lista.
+    t.write(format!("claude --resume {session}\r").into_bytes());
+    // Ya cuenta como tab de Claude aunque su hook SessionStart aún no llegue:
+    // si se cierra Telar antes, la sesión no se pierde.
+    t.agent.session_id = Some(session.to_string());
+    t.agent.cwd = cwd.map(|c| c.display().to_string());
+    t.agent.set_state(AgentState::Idle);
+}
+
 fn notify_macos(title: &str, body: &str) {
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!("display notification \"{}\" with title \"Telar\" subtitle \"{}\"", esc(body), esc(title));

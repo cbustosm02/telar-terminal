@@ -13,6 +13,8 @@ pub struct SavedTab {
     pub cwd: Option<PathBuf>,
     /// `session_id` de Claude Code si en el tab había una sesión abierta.
     pub claude: Option<String>,
+    /// Pantalla (texto ANSI) si el tab estaba suspendido: al reabrir sigue suspendido.
+    pub screen: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +29,8 @@ pub struct SavedGroup {
 pub struct Saved {
     pub active: usize,
     pub groups: Vec<SavedGroup>,
+    /// Modo de `caffeinate` (`off`, `on`, `auto`).
+    pub awake: String,
 }
 
 fn path() -> PathBuf {
@@ -43,6 +47,7 @@ impl Saved {
         json!({
             "version": 1,
             "active": self.active,
+            "awake": self.awake,
             "groups": self.groups.iter().map(|g| json!({
                 "name": g.name,
                 "dir": g.dir,
@@ -51,6 +56,7 @@ impl Saved {
                     "title": t.title,
                     "cwd": t.cwd,
                     "claude_session": t.claude,
+                    "suspended_screen": t.screen,
                 })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         })
@@ -68,6 +74,7 @@ impl Saved {
                         title: t["title"].as_str().map(String::from),
                         cwd: t["cwd"].as_str().map(PathBuf::from),
                         claude: t["claude_session"].as_str().map(String::from),
+                        screen: t["suspended_screen"].as_str().map(String::from),
                     })
                     .collect();
                 (!tabs.is_empty()).then(|| SavedGroup {
@@ -78,7 +85,11 @@ impl Saved {
                 })
             })
             .collect();
-        Some(Self { active: v["active"].as_u64().unwrap_or(0) as usize, groups })
+        Some(Self {
+            active: v["active"].as_u64().unwrap_or(0) as usize,
+            groups,
+            awake: v["awake"].as_str().unwrap_or("off").to_string(),
+        })
     }
 }
 

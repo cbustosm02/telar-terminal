@@ -61,3 +61,16 @@ Descartados:
 ## Arranque de zsh (2026-11-18)
 
 Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar la sesión. El `.zshrc` del usuario tardaba de 2 a 7 s (y más de 1 min con la máquina cargada). Causas, de mayor a menor: `ng completion script` (arranca node), sdkman-init (más de mil funciones), `jenv init` (dos procesos bash: rehash y refresh-plugins), `compinit` con chequeo completo, `kubectl completion` y `/usr/libexec/java_home`. Tras cachear los completados en `~/.cache/zsh` (se regeneran si el programa cambia), usar `compinit -C` con chequeo diario y cargar sdkman y jenv al usarlos: **0,05 s**, con el mismo entorno final (comparado variable por variable). No es parte del repo; respaldo en `~/.zshrc.bak-arranque`.
+
+## Suspender tabs (2026-11-18)
+
+- Suspender = cerrar el proceso (la shell y Claude: cientos de MB por sesión) y quedarse con una copia de la pantalla. No se usó SIGSTOP: un proceso detenido sigue ocupando su memoria, y Claude retoma bien su sesión con `claude --resume`, que ya usaba la restauración.
+- La pantalla se guarda como texto ANSI (`screen::to_ansi`): caracteres, colores (básicos, 256 y RGB) y estilos de la pantalla visible, sin scrollback. La vista previa es una `Term` sin PTY a la que se le pasa ese texto por el parser (`screen::load`); por eso se dibuja con el mismo código que una terminal viva, y `telar read` y la selección funcionan sobre ella. Al ser texto, se guarda en `sesion.json` (`suspended_screen`) y el tab sigue suspendido al reabrir Telar, sin arrancar nada. Hay una prueba de ida y vuelta en `screen.rs`.
+- El tab conserva su id al suspender y reanudar. Para que los eventos tardíos de la terminal anterior (p. ej. `ChildExit`, que cerraría el tab) no afecten a la nueva, cada terminal tiene una generación (`Listener`), y los eventos de otra generación se descartan. Los hooks de un tab suspendido también se ignoran: el `SessionEnd` del Claude que se cerró borraría la sesión a retomar.
+- Al suspender un grupo se saltan los tabs que trabajan o esperan un permiso: cortarlos perdería trabajo en curso.
+
+## Despierto / caffeinate (2026-11-18)
+
+- `caffeinate -dims -w <pid>` como proceso hijo: `-w` lo termina si Telar muere, incluso con `kill -9` (probado).
+- El modo «Claude» lo enciende mientras algún tab está en `working`; se reevalúa con cada mensaje del socket (los hooks) y cada 5 s.
+- El emoji ☕ no se usó en la barra lateral: la fuente de respaldo da su glifo de texto, que se ve diminuto.
