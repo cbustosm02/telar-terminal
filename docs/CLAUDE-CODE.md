@@ -10,7 +10,9 @@ Telar se va a usar sobre todo con muchas sesiones de Claude Code en paralelo, un
 - **Costo de los tabs ocultos:** no se dibujan. Su hilo PTY sigue leyendo, pero no hay trabajo de GPU.
 - **Synchronized output (DEC 2026):** el parser de alacritty_terminal lo soporta, así que el TUI se redibuja sin parpadeo.
 
-## Fase 1 — Estado de cada sesión (prioridad)
+## Fase 1 — Estado de cada sesión ✅ (2026-11-18)
+
+Implementada tal como se describe abajo. Se verificó con hooks simulados y con un `claude -p` real dentro de Telar: SessionStart → idle, UserPromptSubmit → working, Stop y SessionEnd → shell.
 
 Pieza central: un **socket Unix** de Telar y **hooks** de Claude Code.
 

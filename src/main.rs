@@ -1,7 +1,9 @@
 //! Telar: terminal personal con grupos de tabs en una barra lateral.
 
 mod font;
+mod hooks;
 mod input;
+mod ipc;
 mod renderer;
 mod terminal;
 mod theme;
@@ -25,11 +27,12 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::macos::WindowAttributesExtMacOS;
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-use winit::window::{CursorIcon, Window, WindowId};
+use serde_json::{Value, json};
+use winit::window::{CursorIcon, UserAttentionType, Window, WindowId};
 
 use crate::font::Fonts;
 use crate::renderer::{Quad, Renderer};
-use crate::terminal::Terminal;
+use crate::terminal::{AgentState, Terminal};
 use crate::theme::Rgba;
 use crate::ui::{Hit, Layout, View};
 use crate::workspace::Workspace;
@@ -37,16 +40,58 @@ use crate::workspace::Workspace;
 const FONT_PT: f32 = 13.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
+const SPINNER_TICK: Duration = Duration::from_millis(80);
+
 pub enum UserEvent {
     Term(u64, TermEvent),
+    Ipc(ipc::Request),
 }
 
+const USAGE: &str = "Uso: telar [comando]
+
+Sin comando abre la terminal. Comandos:
+  install-hooks    agrega los hooks de Telar a ~/.claude/settings.json
+  uninstall-hooks  los quita (los demás hooks no se tocan)
+  tabs             lista grupos y tabs del Telar actual, en JSON
+  hook             lo ejecuta Claude Code en cada evento (uso interno)";
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None => {}
+        Some("hook") => return ipc::hook_main(),
+        Some("install-hooks") => return finish(hooks::install()),
+        Some("uninstall-hooks") => return finish(hooks::uninstall()),
+        Some("tabs") => {
+            return finish(
+                ipc::request(&json!({ "cmd": "tabs" }), true)
+                    .and_then(|v| serde_json::to_string_pretty(&v).map_err(|e| e.to_string())),
+            );
+        }
+        Some("-h" | "--help" | "help") => return println!("{USAGE}"),
+        Some(other) => {
+            eprintln!("Comando desconocido: {other}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    }
+
     env_logger::init();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App { proxy: event_loop.create_proxy(), state: None };
     event_loop.run_app(&mut app).expect("event loop");
+    // Al salir se suelta el estado y, con él, el socket.
+    drop(app);
+}
+
+fn finish(result: Result<String, String>) {
+    match result {
+        Ok(msg) => println!("{msg}"),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 struct App {
@@ -78,6 +123,9 @@ struct State {
     quads: Vec<Quad>,
     fg_quads: Vec<Quad>,
     snapshot: Option<Snapshot>,
+    server: Option<ipc::Server>,
+    started: Instant,
+    next_tick: Instant,
 }
 
 /// Modo de prueba: `TELAR_SNAPSHOT=archivo.bmp` abre la app, escribe
@@ -129,10 +177,29 @@ impl ApplicationHandler<UserEvent> for App {
             fg_quads: Vec::new(),
             snapshot: std::env::var_os("TELAR_SNAPSHOT").map(|p| Snapshot {
                 path: p.into(),
-                at: Instant::now() + Duration::from_millis(2500),
+                at: Instant::now()
+                    + Duration::from_millis(
+                        std::env::var("TELAR_SNAPSHOT_DELAY_MS").ok().and_then(|d| d.parse().ok()).unwrap_or(2500),
+                    ),
                 capture_now: false,
             }),
+            server: match ipc::serve(self.proxy.clone()) {
+                Ok(server) => Some(server),
+                Err(e) => {
+                    log::error!("no se pudo abrir el socket de Telar: {e}");
+                    None
+                }
+            },
+            started: Instant::now(),
+            next_tick: Instant::now(),
         };
+        if let Some(server) = &state.server {
+            // Para que el modo snapshot (y quien depure) sepa dónde está el socket.
+            log::info!("socket: {}", server.path.display());
+            if state.snapshot.is_some() {
+                eprintln!("TELAR_SOCKET={}", server.path.display());
+            }
+        }
         state.new_group();
         if state.snapshot.is_some() {
             state.snapshot_setup();
@@ -140,8 +207,16 @@ impl ApplicationHandler<UserEvent> for App {
         self.state = Some(state);
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, UserEvent::Term(id, event): UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let Some(st) = self.state.as_mut() else { return };
+        let (id, event) = match event {
+            UserEvent::Term(id, event) => (id, event),
+            UserEvent::Ipc(req) => {
+                let response = st.on_ipc(&req.body);
+                let _ = req.reply.send(response);
+                return;
+            }
+        };
         let visible = st.ws.active_term() == Some(id);
         match event {
             TermEvent::Wakeup if visible => st.window.request_redraw(),
@@ -196,14 +271,29 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(st) = self.state.as_mut() else { return };
-        let Some(snap) = st.snapshot.as_mut() else { return };
-        if Instant::now() >= snap.at {
-            snap.capture_now = true;
-            st.draw();
-            event_loop.exit();
-        } else {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(snap.at));
+        let now = Instant::now();
+        if let Some(snap) = st.snapshot.as_mut() {
+            if now >= snap.at {
+                snap.capture_now = true;
+                st.draw();
+                event_loop.exit();
+                return;
+            }
         }
+        // Mientras algún agente trabaja, el indicador pulsa: se redibuja a ~12 fps.
+        // Si nadie trabaja, la app vuelve a dormir hasta el próximo evento.
+        let mut wake = st.snapshot.as_ref().map(|s| s.at);
+        if st.terms.values().any(|t| t.agent.state == AgentState::Working) {
+            if now >= st.next_tick {
+                st.window.request_redraw();
+                st.next_tick = now + SPINNER_TICK;
+            }
+            wake = Some(wake.map_or(st.next_tick, |w| w.min(st.next_tick)));
+        }
+        event_loop.set_control_flow(match wake {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -218,6 +308,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ScaleFactorChanged { .. } => st.apply_font_size(),
             WindowEvent::Focused(focused) => {
                 st.focused = focused;
+                if focused {
+                    st.mark_seen();
+                }
                 st.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => st.mods = m.state(),
@@ -250,7 +343,8 @@ impl State {
     fn spawn_term(&mut self) -> Option<u64> {
         let id = self.next_id;
         self.next_id += 1;
-        match Terminal::spawn(id, self.layout().grid_size(), self.proxy.clone()) {
+        let socket = self.server.as_ref().map(|s| s.path.as_path());
+        match Terminal::spawn(id, self.layout().grid_size(), self.proxy.clone(), socket) {
             Ok(t) => {
                 self.terms.insert(id, t);
                 Some(id)
@@ -429,6 +523,7 @@ impl State {
                 }
             }
             "q" => return true,
+            "j" => self.jump_to_attention(),
             "c" => self.copy_selection(),
             "v" => self.paste(),
             "r" if m.shift_key() => self.start_rename(self.ws.active),
@@ -459,9 +554,7 @@ impl State {
     /// Al cambiar de tab o grupo: el tamaño puede haber cambiado (nº de tabs) y hay que repintar.
     fn after_switch(&mut self) {
         self.editing = None;
-        if let Some(t) = self.ws.active_term().and_then(|id| self.terms.get_mut(&id)) {
-            t.attention = false;
-        }
+        self.mark_seen();
         self.resize_terms();
         self.window.request_redraw();
     }
@@ -671,6 +764,148 @@ impl State {
         }
     }
 
+    /// El tab activo ya se vio: se limpia la campana y «terminó» pasa a «en espera».
+    fn mark_seen(&mut self) {
+        if let Some(t) = self.ws.active_term().and_then(|id| self.terms.get_mut(&id)) {
+            t.attention = false;
+            if t.agent.state == AgentState::Done {
+                t.agent.state = AgentState::Idle;
+            }
+        }
+    }
+
+    /// Qué tan urgente es un tab: 2 = te necesita, 1 = terminó o sonó la campana.
+    fn urgency(&self, id: u64) -> u8 {
+        match self.terms.get(&id) {
+            Some(t) if t.agent.state == AgentState::NeedsYou => 2,
+            Some(t) if t.agent.state == AgentState::Done || t.attention => 1,
+            _ => 0,
+        }
+    }
+
+    /// ⌘J: salta al siguiente tab que te necesita; si no hay, al siguiente que terminó.
+    fn jump_to_attention(&mut self) {
+        let all: Vec<(usize, usize, u64)> = self
+            .ws
+            .groups
+            .iter()
+            .enumerate()
+            .flat_map(|(gi, g)| g.tabs.iter().enumerate().map(move |(ti, id)| (gi, ti, *id)))
+            .collect();
+        let current = self.ws.active_term();
+        let start = all.iter().position(|(_, _, id)| Some(*id) == current).map_or(0, |p| p + 1);
+        let ordered = all.iter().cycle().skip(start).take(all.len());
+        let target = ordered
+            .clone()
+            .find(|(_, _, id)| self.urgency(*id) == 2)
+            .or_else(|| ordered.clone().find(|(_, _, id)| self.urgency(*id) == 1));
+        if let Some(&(gi, ti, _)) = target {
+            self.ws.select_group(gi);
+            self.ws.select_tab(ti);
+            self.after_switch();
+        }
+    }
+
+    fn on_ipc(&mut self, body: &Value) -> Value {
+        match body["cmd"].as_str() {
+            Some("hook") => {
+                if let Some(tab) = body["tab"].as_u64() {
+                    self.on_hook(tab, &body["payload"]);
+                }
+                json!({ "ok": true })
+            }
+            Some("tabs") => self.tabs_json(),
+            other => json!({ "ok": false, "error": format!("comando desconocido: {other:?}") }),
+        }
+    }
+
+    fn tabs_json(&self) -> Value {
+        let active = self.ws.active_term();
+        let groups: Vec<Value> = self
+            .ws
+            .groups
+            .iter()
+            .map(|g| {
+                let tabs: Vec<Value> = g
+                    .tabs
+                    .iter()
+                    .filter_map(|id| self.terms.get(id).map(|t| (id, t)))
+                    .map(|(id, t)| {
+                        json!({
+                            "id": id,
+                            "title": t.title,
+                            "active": Some(*id) == active,
+                            "state": t.agent.state.name(),
+                            "state_secs": t.agent.since.elapsed().as_secs(),
+                            "session_id": t.agent.session_id,
+                            "cwd": t.agent.cwd,
+                            "message": t.agent.message,
+                        })
+                    })
+                    .collect();
+                json!({ "name": g.name, "tabs": tabs })
+            })
+            .collect();
+        json!({ "ok": true, "groups": groups })
+    }
+
+    /// Evento de un hook de Claude Code en el tab `tab`.
+    fn on_hook(&mut self, tab: u64, p: &Value) {
+        let visible = self.ws.active_term() == Some(tab) && self.focused;
+        let Some(t) = self.terms.get_mut(&tab) else { return };
+        let agent = &mut t.agent;
+        if let Some(sid) = p["session_id"].as_str() {
+            agent.session_id = Some(sid.to_string());
+        }
+        if let Some(cwd) = p["cwd"].as_str() {
+            agent.cwd = Some(cwd.to_string());
+        }
+        let message = p["message"].as_str().unwrap_or_default();
+        let new = match p["hook_event_name"].as_str().unwrap_or_default() {
+            "SessionStart" => Some(AgentState::Idle),
+            "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(AgentState::Working),
+            "Notification" => {
+                // El aviso de «sigo esperando tu input» (a los 60 s) no cambia nada:
+                // la sesión ya está en «terminó» o «en espera».
+                let idle = p["notification_type"].as_str() == Some("idle_prompt")
+                    || message.contains("waiting for your input");
+                if idle { None } else { Some(AgentState::NeedsYou) }
+            }
+            "Stop" => Some(if visible { AgentState::Idle } else { AgentState::Done }),
+            "SessionEnd" => Some(AgentState::None),
+            _ => None,
+        };
+        let Some(new) = new else { return };
+        if new == AgentState::NeedsYou {
+            agent.message = Some(message.to_string());
+        } else if new != AgentState::Working {
+            agent.message = None;
+        }
+        if new == agent.state {
+            return;
+        }
+        agent.state = new;
+        agent.since = Instant::now();
+        if matches!(new, AgentState::NeedsYou | AgentState::Done) && !self.focused && self.snapshot.is_none() {
+            let what = if new == AgentState::NeedsYou {
+                if message.is_empty() { "Claude te necesita".to_string() } else { message.to_string() }
+            } else {
+                "Claude terminó".to_string()
+            };
+            let place = self.place_of(tab);
+            notify_macos(&place, &what);
+            self.window.request_user_attention(Some(UserAttentionType::Informational));
+        }
+        self.window.request_redraw();
+    }
+
+    /// «Grupo › título del tab», para las notificaciones.
+    fn place_of(&self, tab: u64) -> String {
+        let group = self.ws.groups.iter().find(|g| g.tabs.contains(&tab)).map_or("", |g| g.name.as_str());
+        let title = self.terms.get(&tab).and_then(|t| t.title.clone()).unwrap_or_default();
+        if title.is_empty() { group.to_string() } else { format!("{group} › {title}") }
+    }
+
     /// Escenario del modo snapshot: varios grupos y tabs, y el texto de prueba.
     fn snapshot_setup(&mut self) {
         self.ws.groups[0].name = "telar".into();
@@ -696,6 +931,7 @@ impl State {
             preedit: &self.preedit,
             focused: self.focused,
             palette: &self.palette,
+            time: self.started.elapsed().as_secs_f32(),
         };
         let ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
         if let Some((col, row)) = ime_cell {
@@ -712,4 +948,18 @@ impl State {
             self.window.request_redraw();
         }
     }
+}
+
+/// Notificación de macOS (sin bundle de app todavía, vía osascript).
+fn notify_macos(title: &str, body: &str) {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!("display notification \"{}\" with title \"Telar\" subtitle \"{}\"", esc(body), esc(title));
+    // En un hilo que espera al proceso, para no dejar zombis.
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
 }

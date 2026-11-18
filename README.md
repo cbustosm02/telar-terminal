@@ -6,6 +6,32 @@ Terminal personal para macOS escrita en Rust. Organiza las terminales en **grupo
 
 ```bash
 cargo run --release
+./target/release/telar install-hooks   # una vez: integra Claude Code (ver abajo)
+```
+
+## Claude Code
+
+Cada tab sabe en qué está su sesión de Claude Code y lo muestra con un punto en el tab y en su grupo. El grupo muestra el estado más urgente de sus tabs:
+
+| Indicador | Estado |
+|---|---|
+| azul pulsando | trabajando |
+| ámbar | te necesita (permiso o pregunta) |
+| verde | terminó y no lo has visto |
+| sin punto | shell normal, o sesión esperando tu prompt |
+
+- **⌘J** salta al siguiente tab que te necesita (o, si no hay, al siguiente que terminó).
+- Con la ventana sin foco llega una notificación de macOS y el ícono rebota en el Dock.
+
+Funcionamiento:
+1. Telar abre un socket (`$TMPDIR/telar-<pid>.sock`) y exporta `TELAR_SOCKET`, `TELAR_TAB_ID` y `TELAR_BIN` en cada tab.
+2. `install-hooks` agrega a `~/.claude/settings.json` un hook por evento, que corre `telar hook`. Respeta tus otros hooks y deja un respaldo en `settings.json.telar-bak`.
+3. Fuera de Telar el hook no hace nada.
+
+Para quitarlos: `telar uninstall-hooks`.
+
+```bash
+telar tabs    # dentro de Telar: grupos, tabs, estado, session_id y cwd en JSON
 ```
 
 ## Modelo
@@ -22,6 +48,7 @@ cargo run --release
 | ⌘T | Nuevo tab en el grupo activo |
 | ⌘N | Nuevo grupo |
 | ⌘W | Cerrar tab |
+| ⌘J | Ir al siguiente tab que te necesita |
 | ⌘1…⌘9 | Ir al tab N |
 | ⌘⇧← / ⌘⇧→, ⌃Tab | Tab anterior / siguiente |
 | ⌘⇧↑ / ⌘⇧↓ | Grupo anterior / siguiente |
@@ -49,6 +76,8 @@ Mouse:
 | `src/font.rs` | swash: rasterizado, atlas de glifos y fuentes de respaldo (mmap) |
 | `src/input.rs` | Teclado → secuencias xterm |
 | `src/theme.rs` | Paleta y colores de la interfaz |
+| `src/ipc.rs` | Socket Unix, cliente y `telar hook` |
+| `src/hooks.rs` | `install-hooks` / `uninstall-hooks` en `~/.claude/settings.json` |
 
 Solo se dibuja cuando hay cambios (`ControlFlow::Wait`). Los tabs que no se ven no consumen GPU. En reposo usa 0 % de CPU y unos 50 MB de memoria.
 

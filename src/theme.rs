@@ -22,6 +22,7 @@ pub const ACCENT: Rgba = hex(0x6fa8f2);
 pub const TEXT: Rgba = hex(0xd6dae3);
 pub const TEXT_DIM: Rgba = hex(0x7d8390);
 pub const ATTENTION: Rgba = hex(0xe6b450);
+pub const DONE: Rgba = hex(0x9ccf7e);
 pub const SELECTION: Rgba = hex(0x2f4a6e);
 
 // Terminal.

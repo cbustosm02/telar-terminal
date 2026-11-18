@@ -36,4 +36,10 @@ Descartados:
   - se presenta con `queue.present(frame)`;
   - `get_mapped_range()` devuelve un `Result`;
   - `get_current_texture()` devuelve el enum `CurrentSurfaceTexture`.
+- **Hooks de Claude Code:**
+  - Heredan el entorno del proceso `claude`, que a su vez hereda el del tab. Por eso `TELAR_TAB_ID` identifica de qué tab viene cada evento sin configurar nada más.
+  - Con `claude -p` se disparan SessionStart, UserPromptSubmit, Stop y SessionEnd.
+  - El aviso de inactividad (`notification_type: idle_prompt`, «waiting for your input») no cambia el estado. Si lo cambiara, todo tab terminado pasaría a ámbar a los 60 s.
+- **El hook no espera la respuesta del socket:** escribe la línea y cierra, para no frenar a Claude.
+- **Animación del indicador:** solo mientras algún tab trabaja, con `ControlFlow::WaitUntil` a ~12 fps. Si nadie trabaja, la app duerme.
 - **Captura de pantalla:** `screencapture` falla sin el permiso de grabación. Por eso existe el modo `TELAR_SNAPSHOT`, que lee el frame desde la GPU.

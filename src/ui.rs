@@ -18,7 +18,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 
 use crate::font::{self, Fonts, Glyph};
 use crate::renderer::{Quad, KIND_COLOR, KIND_MASK};
-use crate::terminal::{GridSize, Listener, Terminal};
+use crate::terminal::{AgentState, GridSize, Listener, Terminal};
 use crate::theme::{self, Rgba};
 use crate::workspace::Workspace;
 
@@ -171,6 +171,28 @@ pub struct View<'a> {
     pub preedit: &'a str,
     pub focused: bool,
     pub palette: &'a [Rgba; COUNT],
+    /// Segundos desde que abrió la app (para animar el indicador de «trabajando»).
+    pub time: f32,
+}
+
+/// Prioridad y color del indicador de un tab (None = sin indicador).
+fn status(t: &Terminal, time: f32) -> Option<(u8, Rgba)> {
+    match t.agent.state {
+        AgentState::NeedsYou => Some((4, theme::ATTENTION)),
+        AgentState::Done => Some((3, theme::DONE)),
+        _ if t.attention => Some((2, theme::ATTENTION)),
+        AgentState::Working => {
+            let pulse = 0.5 + 0.5 * (time * std::f32::consts::TAU * 0.9).sin();
+            let mut c = theme::ACCENT;
+            c[3] = 0.3 + 0.7 * pulse;
+            Some((1, c))
+        }
+        _ => None,
+    }
+}
+
+fn dot(out: &mut Vec<Quad>, x: f32, cy: f32, d: f32, color: Rgba) {
+    out.push(Quad::rounded(x, cy - d / 2.0, d, d, d / 2.0, color));
 }
 
 fn push_glyph(out: &mut Vec<Quad>, fonts: &Fonts, g: Glyph, x: f32, y: f32, box_w: f32, color: Rgba) {
@@ -260,10 +282,11 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
             }
         }
         text(out, fonts, r.x + r.w - 12.0 * s - badge_w, ty, &count, theme::TEXT_DIM, badge_w + 1.0);
-        if g.tabs.iter().any(|id| v.terms.get(id).is_some_and(|t| t.attention)) {
-            let d = 6.0 * s;
-            let dx = r.x + r.w - 12.0 * s - badge_w - d - 6.0 * s;
-            out.push(Quad::rounded(dx, r.y + (r.h - d) / 2.0, d, d, d / 2.0, theme::ATTENTION));
+        // El grupo muestra el estado más urgente de sus tabs.
+        let worst = g.tabs.iter().filter_map(|id| v.terms.get(id)).filter_map(|t| status(t, v.time)).max_by_key(|(p, _)| *p);
+        if let Some((_, color)) = worst {
+            let d = 7.0 * s;
+            dot(out, r.x + r.w - 12.0 * s - badge_w - d - 7.0 * s, r.y + r.h / 2.0, d, color);
         }
     }
 
@@ -299,10 +322,10 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
         let color = if active { theme::TEXT } else { theme::TEXT_DIM };
         let ty = r.y + (r.h - ch) / 2.0;
         let mut tx = r.x + 10.0 * s;
-        if v.terms.get(id).is_some_and(|t| t.attention) {
-            let d = 6.0 * s;
-            out.push(Quad::rounded(tx, r.y + (r.h - d) / 2.0, d, d, d / 2.0, theme::ATTENTION));
-            tx += d + 6.0 * s;
+        if let Some((_, color)) = v.terms.get(id).and_then(|t| status(t, v.time)) {
+            let d = 7.0 * s;
+            dot(out, tx, r.y + r.h / 2.0, d, color);
+            tx += d + 7.0 * s;
         }
         text(out, fonts, tx, ty, title, color, close.x - tx - 4.0 * s);
         if active || hovered {

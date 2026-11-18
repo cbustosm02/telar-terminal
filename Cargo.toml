@@ -12,6 +12,7 @@ env_logger = "0.11.11"
 log = "0.4.35"
 memmap2 = "0.9.12"
 pollster = "1.0.2"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 swash = "0.2.10"
 wgpu = "30.0.2"
 winit = "0.30.13"
