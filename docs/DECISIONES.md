@@ -169,3 +169,10 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - Si era el único grupo, Telar sigue con uno nuevo en lugar de cerrarse. Se guarda la sesión y se recalculan los límites por grupo, que se indican por índice.
 - Con la búsqueda abierta las filas son resultados y no tienen ✕.
 - `TELAR_SNAPSHOT_DELETE=n` abre la confirmación del grupo n en el modo captura.
+
+## Carpeta de inicio (2026-11-19)
+
+- Pedido del usuario: que cada tab nuevo aparezca en una carpeta elegida. Se guarda en `config.json` (`general.start_dir`, solo rutas absolutas) y se elige en la sección nueva **General** de la configuración, con `NSOpenPanel` en modo carpeta (`appicon::pick_folder`).
+- Orden para un tab nuevo: la carpeta del grupo (la de su proyecto, que toma de su primera sesión de Claude o de `telar group --dir`), luego la de inicio, y si no hay ninguna, la del tab visible, como antes. Un grupo nuevo abre en la de inicio. `telar new` sin `--cwd` también. Si la carpeta ya no existe, se ignora y la sección lo marca en rojo.
+- No cambia los tabs abiertos ni los restaurados, que tienen su propia carpeta.
+- General quedó como primera sección; las teclas de la configuración (filtro de fuentes y flechas) ahora solo actúan en Apariencia: antes también cambiaban la fuente desde Rendimiento e Inactividad.

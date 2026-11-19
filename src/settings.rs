@@ -1,11 +1,11 @@
 //! Modal de configuración (⌘,). Barra de secciones a la izquierda y el contenido de la
-//! sección a la derecha, dibujado con el kit (`kit.rs`). Por ahora hay una sección,
-//! «Apariencia»: tema, fuente y tamaño. Para sumar otra: agregarla a `SECTIONS`, su
-//! geometría y su dibujo.
+//! sección a la derecha, dibujado con el kit (`kit.rs`). Para sumar una sección:
+//! agregarla a `SECTIONS`, su geometría, sus clics y su dibujo.
 //!
 //! Los cambios se aplican al instante (la terminal de atrás sirve de vista previa)
 //! y se guardan solos en `config.json`.
 
+use std::path::Path;
 use std::time::Duration;
 
 use crate::appicon;
@@ -17,11 +17,21 @@ use crate::renderer::Quad;
 use crate::theme::{self, Theme};
 use crate::ui::{Layout, Rect};
 
-pub const SECTIONS: &[(char, &str)] =
-    &[(icons::PALETTE, "Apariencia"), (icons::IMAGE, "Ícono"), (icons::GAUGE, "Rendimiento"), (icons::TIMER, "Inactividad")];
+pub const SECTIONS: &[(char, &str)] = &[
+    (icons::HOME, "General"),
+    (icons::PALETTE, "Apariencia"),
+    (icons::IMAGE, "Ícono"),
+    (icons::GAUGE, "Rendimiento"),
+    (icons::TIMER, "Inactividad"),
+];
+
+/// Sección General: la carpeta de inicio.
+pub const GENERAL_SECTION: usize = 0;
+/// Sección Apariencia: tema, fuente y tamaño (la única que usa el teclado).
+pub const APPEARANCE_SECTION: usize = 1;
 
 /// Sección de límites de memoria.
-pub const PERF_SECTION: usize = 2;
+pub const PERF_SECTION: usize = 3;
 const PERF_ROW_H: f32 = 40.0;
 
 /// Datos de la sección Rendimiento.
@@ -35,7 +45,7 @@ pub struct Perf {
 }
 
 /// Sección de suspensión por inactividad.
-pub const IDLE_SECTION: usize = 3;
+pub const IDLE_SECTION: usize = 4;
 const IDLE_ROW_H: f32 = 38.0;
 
 /// Datos de la sección Inactividad.
@@ -62,10 +72,12 @@ pub struct Ctx<'a> {
     pub app_icon: &'a str,
     pub perf: Perf,
     pub idle: IdleView,
+    /// Carpeta de inicio elegida y si todavía existe.
+    pub start_dir: Option<&'a Path>,
 }
 
 /// Sección del ícono de la app.
-pub const ICON_SECTION: usize = 1;
+pub const ICON_SECTION: usize = 2;
 const ICON_CARD_H: f32 = 168.0;
 
 const PANEL_W: f32 = 760.0;
@@ -106,6 +118,9 @@ pub enum Hit {
     IdleRunning,
     /// Interruptor de un grupo: se suspende por inactividad o no.
     IdleExempt(usize),
+    /// «Elegir carpeta…» y «Quitar» de la carpeta de inicio.
+    PickStartDir,
+    ClearStartDir,
 }
 
 #[derive(Default)]
@@ -231,6 +246,10 @@ struct Geometry {
     size_up: Rect,
     icon_cards: Vec<Rect>,
     pick: Rect,
+    /// Sección General: la tarjeta con la carpeta y sus dos botones.
+    start_card: Rect,
+    start_pick: Rect,
+    start_clear: Rect,
 }
 
 fn geometry(l: &Layout) -> Geometry {
@@ -275,7 +294,31 @@ fn geometry(l: &Layout) -> Geometry {
         .collect::<Vec<_>>();
     let cards_end = icon_cards.last().map_or(themes_y, |r| r.y + r.h);
     let pick = Rect { x: content_x, y: cards_end + 18.0 * s, w: 170.0 * s, h: 32.0 * s };
-    Geometry { panel, close, nav, content_x, content_w, title_y, themes_y, themes, font_label_y, search, list, rows, size_y, size_down, size_up, icon_cards, pick }
+    let start_card = Rect { x: content_x, y: themes_y + 22.0 * s, w: content_w, h: 56.0 * s };
+    let start_pick = Rect { x: content_x, y: start_card.y + start_card.h + 12.0 * s, w: 170.0 * s, h: 32.0 * s };
+    let start_clear = Rect { x: start_pick.x + start_pick.w + 8.0 * s, w: 100.0 * s, ..start_pick };
+    Geometry {
+        panel,
+        close,
+        nav,
+        content_x,
+        content_w,
+        title_y,
+        themes_y,
+        themes,
+        font_label_y,
+        search,
+        list,
+        rows,
+        size_y,
+        size_down,
+        size_up,
+        icon_cards,
+        pick,
+        start_card,
+        start_pick,
+        start_clear,
+    }
 }
 
 impl Settings {
@@ -346,6 +389,15 @@ impl Settings {
                 return *h;
             }
             return ig.rows.iter().find(|(_, r, _)| r.contains(x, y)).map_or(Hit::Inside, |(gi, _, _)| Hit::IdleExempt(*gi));
+        }
+        if self.section == GENERAL_SECTION {
+            return if g.start_pick.contains(x, y) {
+                Hit::PickStartDir
+            } else if g.start_clear.contains(x, y) {
+                Hit::ClearStartDir
+            } else {
+                Hit::Inside
+            };
         }
         if self.section == ICON_SECTION {
             if let Some(i) = g.icon_cards.iter().position(|r| r.contains(x, y)) {
@@ -425,6 +477,10 @@ impl Settings {
             k.text_in(*r, r.x + 34.0 * s, name, Text::label().color(color));
         }
 
+        if self.section == GENERAL_SECTION {
+            self.draw_general(&mut k, &g, ctx.start_dir);
+            return;
+        }
         if self.section == ICON_SECTION {
             self.draw_icons(&mut k, &g, app_icon);
             return;
@@ -654,6 +710,51 @@ impl Settings {
         k.text(cx, ig.note_y, note, Text::small(), g.content_w);
     }
 
+    /// Sección General: la carpeta de inicio.
+    fn draw_general(&self, k: &mut Kit, g: &Geometry, start_dir: Option<&Path>) {
+        let s = k.s;
+        let th = theme::t();
+        let cx = g.content_x;
+        k.text(cx, g.title_y, "General", Text::title(), g.content_w - 40.0 * s);
+        k.text(cx, g.title_y + 22.0 * s, "Se aplica al instante y se guarda sola", Text::small(), g.content_w);
+
+        k.text(cx, g.themes_y, "CARPETA DE INICIO", Text::caption(), g.content_w);
+        let r = g.start_card;
+        k.bordered(r, 8.0, th.chrome, th.border);
+        let exists = start_dir.is_some_and(Path::is_dir);
+        let icon_color = if exists { th.accent } else { th.text_dim };
+        k.icon(r.x + 24.0 * s, r.y + r.h / 2.0, if start_dir.is_some() { icons::FOLDER_OPEN } else { icons::FOLDER }, 18.0, icon_color);
+        let tx = r.x + 46.0 * s;
+        let tw = r.x + r.w - 14.0 * s - tx;
+        let (line1, line2) = match start_dir {
+            Some(dir) => {
+                let name = dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
+                let detail = if exists { short_path(dir) } else { format!("{} · ya no existe", short_path(dir)) };
+                (name, detail)
+            }
+            None => ("Sin carpeta de inicio".to_string(), "Los tabs nuevos abren en la carpeta del tab que tienes a la vista".to_string()),
+        };
+        k.text(tx, r.y + 10.0 * s, &line1, Text::label(), tw);
+        let detail_color = if start_dir.is_some() && !exists { th.danger } else { th.text_dim };
+        k.text(tx, r.y + 30.0 * s, &line2, Text::small().color(detail_color), tw);
+
+        k.button(g.start_pick, "Elegir carpeta…", Some(icons::FOLDER_INPUT), Variant::Subtle, self.hover == Some(Hit::PickStartDir));
+        if start_dir.is_some() {
+            k.button(g.start_clear, "Quitar", Some(icons::FOLDER_X), Variant::Ghost, self.hover == Some(Hit::ClearStartDir));
+        }
+
+        let mut y = g.start_pick.y + g.start_pick.h + 22.0 * s;
+        let notes = [
+            "Los tabs y grupos nuevos abren en esta carpeta.",
+            "Un grupo con carpeta propia (la de su proyecto) sigue usando la suya.",
+            "Los tabs que ya existen, y los que se restauran al abrir Telar, no cambian.",
+        ];
+        for note in notes {
+            k.text(cx, y, note, Text::small(), g.content_w);
+            y += 18.0 * s;
+        }
+    }
+
     fn draw_icons(&self, k: &mut Kit, g: &Geometry, current: &str) {
         let s = k.s;
         let th = theme::t();
@@ -770,10 +871,20 @@ mod tests {
     fn clic_en_las_tarjetas_de_tema() {
         let l = Layout::with_cell(1400.0, 900.0, 1.0, 8.0, 16.0, 1);
         let g = geometry(&l);
-        let st = Settings::default();
+        let st = Settings { section: APPEARANCE_SECTION, ..Default::default() };
         let fonts = crate::font::Fonts::new("Menlo", 13.0);
         for (i, r) in g.themes.iter().enumerate() {
             assert_eq!(st.hit(r.x + 5.0, r.y + 5.0, &l, &fonts, 0), Hit::Theme(i));
         }
+    }
+}
+
+/// Ruta con `~` en lugar de la carpeta personal.
+fn short_path(p: &Path) -> String {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match home.as_deref().and_then(|h| p.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => p.display().to_string(),
     }
 }

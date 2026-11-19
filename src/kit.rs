@@ -22,6 +22,9 @@ pub mod icons {
     pub const CPU: char = '\u{e0a9}';
     pub const FOLDER: char = '\u{e0d7}';
     pub const FOLDER_OPEN: char = '\u{e247}';
+    pub const FOLDER_INPUT: char = '\u{e334}';
+    pub const FOLDER_X: char = '\u{e33e}';
+    pub const HOME: char = '\u{e0f5}';
     pub const GAUGE: char = '\u{e1bf}';
     pub const IMAGE: char = '\u{e0f6}';
     pub const UPLOAD: char = '\u{e19e}';

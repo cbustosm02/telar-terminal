@@ -208,6 +208,30 @@ pub fn pick_file() -> Option<PathBuf> {
     }
 }
 
+/// Panel de macOS para elegir una carpeta (se puede crear una nueva). `None` si se cancela.
+pub fn pick_folder(message: &str, start: Option<&std::path::Path>) -> Option<PathBuf> {
+    unsafe {
+        let panel: Retained<AnyObject> = msg_send![class!(NSOpenPanel), openPanel];
+        let _: () = msg_send![&*panel, setCanChooseFiles: false];
+        let _: () = msg_send![&*panel, setCanChooseDirectories: true];
+        let _: () = msg_send![&*panel, setCanCreateDirectories: true];
+        let _: () = msg_send![&*panel, setAllowsMultipleSelection: false];
+        let _: () = msg_send![&*panel, setMessage: &*nsstring(message)];
+        if let Some(dir) = start.and_then(|d| d.to_str()) {
+            let url: Retained<AnyObject> = msg_send![class!(NSURL), fileURLWithPath: &*nsstring(dir)];
+            let _: () = msg_send![&*panel, setDirectoryURL: &*url];
+        }
+        let response: isize = msg_send![&*panel, runModal];
+        if response != 1 {
+            return None; // cancelado
+        }
+        let url: Option<Retained<AnyObject>> = msg_send![&*panel, URL];
+        let path: Option<Retained<AnyObject>> = msg_send![&*url?, path];
+        let utf8: *const std::ffi::c_char = msg_send![&*path?, UTF8String];
+        (!utf8.is_null()).then(|| PathBuf::from(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

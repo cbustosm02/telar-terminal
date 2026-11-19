@@ -511,8 +511,14 @@ impl State {
     }
 
     /// Abre una terminal nueva en la carpeta del tab activo.
+    /// Carpeta de inicio de la configuración, si sigue existiendo.
+    fn start_dir(&self) -> Option<PathBuf> {
+        self.config.start_dir.clone().filter(|d| d.is_dir())
+    }
+
+    /// Tab para un grupo nuevo: en la carpeta de inicio o, sin ella, en la del tab activo.
     fn spawn_term(&mut self) -> Option<u64> {
-        let cwd = self.active().and_then(|t| t.cwd());
+        let cwd = self.start_dir().or_else(|| self.active().and_then(|t| t.cwd()));
         self.spawn_term_in(cwd.as_deref())
     }
 
@@ -738,10 +744,11 @@ impl State {
         self.window.request_redraw();
     }
 
-    /// Carpeta de un tab nuevo en el grupo activo: la del grupo, o si no tiene, la del tab activo.
+    /// Carpeta de un tab nuevo en el grupo activo: la del grupo; si no tiene, la de inicio
+    /// de la configuración; y si tampoco hay, la del tab activo.
     fn new_tab_cwd(&self) -> Option<PathBuf> {
         let dir = self.ws.group().and_then(|g| g.dir.clone()).filter(|d| d.is_dir());
-        dir.or_else(|| self.active().and_then(|t| t.cwd()))
+        dir.or_else(|| self.start_dir()).or_else(|| self.active().and_then(|t| t.cwd()))
     }
 
     fn new_tab(&mut self) -> Option<u64> {
@@ -1264,7 +1271,15 @@ impl State {
             let hover = Some(hit);
             if hover != st.hover {
                 st.hover = hover;
-                let pointer = matches!(hit, settings::Hit::Close | settings::Hit::Section(_) | settings::Hit::Font(_) | settings::Hit::SizeDown | settings::Hit::SizeUp);
+                let pointer = matches!(
+                    hit,
+                    settings::Hit::Close
+                        | settings::Hit::Section(_)
+                        | settings::Hit::Font(_)
+                        | settings::Hit::SizeDown
+                        | settings::Hit::SizeUp
+                        | settings::Hit::PickStartDir
+                ) || (hit == settings::Hit::ClearStartDir && self.config.start_dir.is_some());
                 self.window.set_cursor(if pointer { CursorIcon::Pointer } else { CursorIcon::Default });
                 self.window.request_redraw();
             }
@@ -1844,7 +1859,7 @@ impl State {
     /// `telar new`: tab nuevo en el grupo indicado (se crea si no existe), en el
     /// grupo del tab que lo pidió, o en el activo. No roba el foco salvo `focus`.
     fn ipc_new(&mut self, body: &Value) -> Value {
-        let cwd = body["cwd"].as_str().map(PathBuf::from).filter(|d| d.is_absolute());
+        let cwd = body["cwd"].as_str().map(PathBuf::from).filter(|d| d.is_absolute()).or_else(|| self.start_dir());
         let focus = body["focus"].as_bool().unwrap_or(false);
         let Some(id) = self.spawn_term_in(cwd.as_deref()) else {
             return json!({ "ok": false, "error": "no se pudo abrir la shell" });
@@ -2219,6 +2234,17 @@ impl State {
                 }
             }
             settings::Hit::PickIcon => self.pick_app_icon(),
+            settings::Hit::PickStartDir => {
+                let current = self.start_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+                if let Some(dir) = appicon::pick_folder("Elige la carpeta donde abren los tabs nuevos", current.as_deref()) {
+                    self.config.start_dir = Some(dir);
+                    self.config.save();
+                }
+            }
+            settings::Hit::ClearStartDir => {
+                self.config.start_dir = None;
+                self.config.save();
+            }
             settings::Hit::LimitDown(i) => self.step_limit(i, -1),
             settings::Hit::LimitUp(i) => self.step_limit(i, 1),
             settings::Hit::AutoSuspend => {
@@ -2254,7 +2280,7 @@ impl State {
         let page = st.page(&l, &self.fonts);
         let mut apply = false;
         // Las flechas y el filtro son de la sección Apariencia.
-        if st.section == settings::ICON_SECTION {
+        if st.section != settings::APPEARANCE_SECTION {
             let close = event.logical_key == Key::Named(NamedKey::Escape)
                 || (cmd && matches!(event.key_without_modifiers(), Key::Character(ref c) if c.as_str() == "," || c.as_str() == "w"));
             if close {
@@ -2603,6 +2629,7 @@ impl State {
             self.toggle_settings();
             if let Some(st) = self.settings.as_mut() {
                 match section.as_str() {
+                    "apariencia" => st.section = settings::APPEARANCE_SECTION,
                     "icono" => st.section = settings::ICON_SECTION,
                     "rendimiento" => st.section = settings::PERF_SECTION,
                     "inactividad" => st.section = settings::IDLE_SECTION,
@@ -2696,6 +2723,7 @@ impl State {
                 app_icon: &self.config.app_icon,
                 perf: self.perf_view(),
                 idle: self.idle_view(),
+                start_dir: self.config.start_dir.as_deref(),
             };
             st.draw(&mut self.quads, &mut self.fonts, &l, &ctx);
             ime_cell = None;

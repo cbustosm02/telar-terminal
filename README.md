@@ -20,6 +20,7 @@ cargo build --release
 
 **⌘,** (o el engranaje ⚙ junto a «GRUPOS») abre la configuración. Los cambios se aplican al instante (la terminal de atrás sirve de vista previa) y se guardan solos en `~/.config/telar/config.json`.
 
+- **General · Carpeta de inicio:** la carpeta donde abren los tabs y grupos nuevos (también `telar new` sin `--cwd`). Se elige con el panel de carpetas de macOS y se quita con «Quitar». Un grupo con carpeta propia (la de su proyecto) sigue usando la suya; sin carpeta de inicio, un tab nuevo abre en la del tab que tienes a la vista.
 - **Apariencia · Tema:** 10 temas predefinidos (Telar, Tokyo Night, Catppuccin Mocha y Latte, Dracula, Nord, Gruvbox Dark, One Dark, Rosé Pine y GitHub Light). Cambian la interfaz y los colores de la terminal. ←/→ los recorre.
 - **Apariencia · Fuente:** la fuente de la terminal y su tamaño (la interfaz usa SF Pro). La lista muestra JetBrains Mono (incluida en Telar; es la que usa Ghostty por defecto) y las fuentes monoespaciadas instaladas en el Mac. Escribe para filtrar; ↑↓ cambian la fuente; − y + el tamaño (⌘0 vuelve a ese tamaño).
 - **Ícono:** el ícono de la app. Por defecto, «Ventana con grupos»; hay otras tres propuestas y uno propio desde un archivo (PNG, JPEG, HEIC o ICNS). Cambia en el Dock al instante y queda guardado en Telar.app. Los íconos incluidos se generan con `scripts/iconos.py`.
@@ -151,7 +152,7 @@ Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina so
 | ⌘S | Suspender o reanudar el tab activo (Enter también reanuda) |
 | ⌘⇧S | Suspender o reanudar el grupo activo |
 | ⌘⇧C | Despierto: no → siempre → mientras Claude trabaja |
-| ⌘, | Configuración (tema, fuente, tamaño) |
+| ⌘, | Configuración (carpeta de inicio, tema, fuente, ícono, límites, inactividad) |
 | ⌘P | Buscar un tab o grupo por nombre (↑↓ elige, Enter va, Esc cierra) |
 | ⌘N | Nuevo grupo |
 | ⌘W | Cerrar tab |

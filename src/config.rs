@@ -30,6 +30,8 @@ pub struct Config {
     pub auto_suspend: bool,
     /// Suspensión por inactividad (ver `idle`).
     pub idle: crate::idle::Rules,
+    /// Carpeta de inicio: donde abren los tabs y grupos nuevos (si el grupo no tiene la suya).
+    pub start_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -43,6 +45,7 @@ impl Default for Config {
             ram_limit_mb: 0,
             auto_suspend: true,
             idle: crate::idle::Rules::default(),
+            start_dir: None,
         }
     }
 }
@@ -58,6 +61,9 @@ fn path() -> PathBuf {
 impl Config {
     pub fn to_json(&self) -> Value {
         json!({
+            "general": {
+                "start_dir": self.start_dir,
+            },
             "appearance": {
                 "theme": self.theme,
                 "font_family": self.font_family,
@@ -97,6 +103,7 @@ impl Config {
                     include_running: i["include_running"].as_bool().unwrap_or(d.idle.include_running),
                 }
             },
+            start_dir: v["general"]["start_dir"].as_str().map(PathBuf::from).filter(|p| p.is_absolute()),
         }
     }
 
@@ -141,6 +148,7 @@ mod tests {
             ram_limit_mb: 4096,
             auto_suspend: false,
             idle: crate::idle::Rules { tab_min: 30, group_min: 120, include_waiting: true, include_running: false },
+            start_dir: Some(PathBuf::from("/tmp/proyectos")),
         };
         assert_eq!(Config::from_json(&c.to_json()), c);
     }
@@ -151,5 +159,7 @@ mod tests {
         let c = Config::from_json(&json!({ "appearance": { "font_family": " ", "font_size": 400 } }));
         assert_eq!(c.font_family, "JetBrains Mono");
         assert_eq!(c.font_size, FONT_SIZE_MAX);
+        let c = Config::from_json(&json!({ "general": { "start_dir": "relativa/no" } }));
+        assert_eq!(c.start_dir, None, "solo rutas absolutas");
     }
 }
