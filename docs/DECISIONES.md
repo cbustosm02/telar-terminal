@@ -211,3 +211,8 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - Los enlaces se pintan con el azul brillante del tema (ANSI 12); el que está bajo el puntero, con el acento.
 - ⌘← y ⌘→ mandan Ctrl+A y Ctrl+E (inicio y final de la línea), como ⌘⌫ manda Ctrl+U.
 - Actualizaciones: Telar buscaba solo al abrirse y guardaba lo encontrado; si salía otra versión, «Actualizar» instalaba la vieja y había que repetir. Ahora `update::install` vuelve a consultar antes de descargar e instala la más nueva, y cada hora se busca en segundo plano (`check_quietly`: sin «Buscando…» y sin avisar errores de red). Un resultado tardío no pisa una instalación en curso.
+
+## El ⏺ de Claude Code como círculo del tema (2026-11-19)
+
+- Claude Code pone `⏺` (U+23FA) delante de cada paso. JetBrains Mono no lo tiene y macOS lo dibujaba con Apple Color Emoji: un cuadrito azul de «grabar». A pedido del usuario, Telar lo dibuja como un círculo propio (un quad redondeado, sin glifo).
+- Color: mientras Claude trabaja, el último `⏺` de la pantalla (el paso en curso) late con `status_pulse`, el mismo acento y ritmo que el punto del tab y del grupo. Los demás van en gris (`text_dim`), también los que Claude marca en verde al terminar. Los que marca en rojo (error) quedan rojos: `is_reddish` acepta el rojo puro o rosado (ANSI de cada tema, el de Claude) y no el naranja de Claude.

@@ -457,17 +457,40 @@ pub fn search(ws: &Workspace, terms: &HashMap<u64, Terminal>, query: &str) -> Ve
 }
 
 /// Prioridad y color del indicador de un tab (None = sin indicador).
+/// Color del punto de «trabajando»: el acento, latiendo.
+fn status_pulse(time: f32) -> Rgba {
+    let pulse = 0.5 + 0.5 * (time * std::f32::consts::TAU * 0.9).sin();
+    let mut c = theme::t().accent;
+    c[3] = 0.3 + 0.7 * pulse;
+    c
+}
+
+/// Marca de paso de Claude Code (⏺).
+const STEP_MARKER: char = '\u{23FA}';
+
+/// Rojo de error (el de los pasos que fallaron): rojo puro o rosado, como el rojo ANSI de
+/// cada tema o el de Claude. El naranja de Claude (más verde que azul) no cuenta.
+fn is_reddish(c: Rgba) -> bool {
+    c[0] > 0.6 && c[0] - c[1] > 0.3 && c[2] >= c[1] - 0.05
+}
+
+/// Último ⏺ de la pantalla visible (fila, columna), el del paso en curso.
+fn last_step_marker(term: &Term<Listener>) -> Option<(usize, usize)> {
+    use alacritty_terminal::grid::Dimensions;
+    let grid = term.grid();
+    let offset = grid.display_offset() as i32;
+    (0..term.screen_lines()).rev().find_map(|row| {
+        let line = &grid[Line(row as i32 - offset)];
+        (0..term.columns()).find(|c| line[Column(*c)].c == STEP_MARKER).map(|c| (row, c))
+    })
+}
+
 fn status(t: &Terminal, time: f32) -> Option<(u8, Rgba)> {
     match t.agent.state {
         AgentState::NeedsYou => Some((4, theme::t().attention)),
         AgentState::Done => Some((3, theme::t().done)),
         _ if t.attention => Some((2, theme::t().attention)),
-        AgentState::Working => {
-            let pulse = 0.5 + 0.5 * (time * std::f32::consts::TAU * 0.9).sin();
-            let mut c = theme::t().accent;
-            c[3] = 0.3 + 0.7 * pulse;
-            Some((1, c))
-        }
+        AgentState::Working => Some((1, status_pulse(time))),
         _ => None,
     }
 }
@@ -521,7 +544,8 @@ pub fn draw(out: &mut Vec<Quad>, fg: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layo
     let active = v.ws.active_term().and_then(|id| v.terms.get(&id));
     if let Some(t) = active {
         let term = t.term.lock();
-        ime_cell = draw_terminal(out, fg, fonts, l, &term, v);
+        let working = t.agent.state == AgentState::Working;
+        ime_cell = draw_terminal(out, fg, fonts, l, &term, v, working);
     }
     out.append(fg);
     let mut k = Kit::new(out, fonts, l.s);
@@ -985,6 +1009,7 @@ fn draw_terminal(
     l: &Layout,
     term: &Term<Listener>,
     v: &View,
+    working: bool,
 ) -> Option<(usize, usize)> {
     let content = term.renderable_content();
     let colors = content.colors;
@@ -1000,6 +1025,10 @@ fn draw_terminal(
     let links = crate::links::scan(term);
     let link_at = |col: usize, row: usize| links.iter().position(|k| k.contains(col, row));
     let hovered_link = v.link_cell.and_then(|(c, r)| link_at(c, r));
+
+    // El ⏺ que Claude Code pone delante de cada paso: mientras trabaja, el último de la
+    // pantalla es el paso en curso.
+    let last_step = if working { last_step_marker(term) } else { None };
 
     let cursor = content.cursor;
     let show_cursor = cursor.shape != CursorShape::Hidden && content.mode.contains(TermMode::SHOW_CURSOR);
@@ -1054,6 +1083,20 @@ fn draw_terminal(
         }
 
         let skip = Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN;
+        if cell.c == STEP_MARKER && !flags.intersects(skip) {
+            // Un círculo propio en lugar del glifo (macOS lo dibuja como emoji): el paso en
+            // curso late como el punto del tab; los demás, en gris; los errores, en rojo.
+            let color = if is_reddish(cfg) {
+                theme::t().danger
+            } else if last_step == Some((row as usize, p.column.0)) {
+                status_pulse(v.time)
+            } else {
+                theme::t().text_dim
+            };
+            let d = (cw * 0.78).min(ch * 0.55).round();
+            fg.push(Quad::rounded(x + ((cw - d) / 2.0).round(), y + ((ch - d) / 2.0).round(), d, d, d / 2.0, color));
+            continue;
+        }
         if cell.c != ' ' && cell.c != '\t' && !flags.intersects(skip) {
             let style = match (flags.contains(Flags::BOLD), flags.contains(Flags::ITALIC)) {
                 (true, true) => font::BOLD_ITALIC,
@@ -1117,6 +1160,15 @@ pub fn grid_point(term: &Term<Listener>, col: usize, row: usize) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rojo_de_error() {
+        assert!(is_reddish([1.0, 0.33, 0.33, 1.0]), "rojo ANSI");
+        assert!(is_reddish([0.97, 0.46, 0.56, 1.0]), "rojo rosado de un tema");
+        assert!(is_reddish([1.0, 0.42, 0.5, 1.0]), "rojo de Claude");
+        assert!(!is_reddish(theme::CLAUDE), "naranja de Claude");
+        assert!(!is_reddish([0.3, 0.8, 0.4, 1.0]) && !is_reddish([0.6, 0.6, 0.6, 1.0]));
+    }
 
     fn layout() -> Layout {
         Layout::with_cell(1200.0, 780.0, 1.0, 8.0, 16.0, 3)
