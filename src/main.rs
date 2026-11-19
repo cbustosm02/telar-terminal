@@ -392,7 +392,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
             TermEvent::Title(title) => {
                 if let Some(t) = st.terms.get_mut(&id) {
-                    t.title = Some(title);
+                    // Un título vacío (Claude lo deja así al salir) es como no tener título.
+                    t.title = (!title.trim().is_empty()).then_some(title);
                 }
                 st.window.request_redraw();
             }
@@ -605,9 +606,8 @@ impl State {
         let Some(mut t) = self.spawn_with_id(id, cwd.as_deref()) else { return false };
         t.title = title;
         t.name = name;
-        if let Some(session) = session {
-            resume_claude(&mut t, &session, cwd.as_deref());
-        } else if let Some(command) = command {
+        let claude = session.is_some_and(|s| resume_claude(&mut t, &s, cwd.as_deref()));
+        if let Some(command) = command.filter(|_| !claude) {
             t.write(format!("{command}\r").into_bytes());
         }
         self.terms.insert(id, t);
@@ -1170,6 +1170,14 @@ impl State {
     fn shortcut(&mut self, event: &KeyEvent) -> bool {
         let m = self.mods;
         if let Key::Named(named) = &event.logical_key {
+            // ⌘⌫: borra la línea hasta el cursor (Ctrl+U), como en Terminal.app e iTerm.
+            // Funciona en zsh, bash y en el prompt de Claude Code.
+            if *named == NamedKey::Backspace && !m.shift_key() {
+                if self.active().is_some_and(|t| !t.is_suspended()) {
+                    self.send_input(vec![0x15]);
+                }
+                return false;
+            }
             match (named, m.shift_key()) {
                 (NamedKey::ArrowRight, true) => self.ws.cycle_tab(1),
                 (NamedKey::ArrowLeft, true) => self.ws.cycle_tab(-1),
@@ -2584,14 +2592,14 @@ impl State {
         let mut groups = Vec::new();
         for g in saved.groups {
             let mut tabs = Vec::new();
-            for tab in g.tabs {
+            for mut tab in g.tabs {
                 let id = self.next_id;
                 // Suspendido: no arranca nada, solo vuelve su vista previa.
                 let mut t = match tab.screen {
                     Some(screen) => {
                         self.next_id += 1;
                         let mut t = Terminal::frozen(id, self.layout().grid_size(), self.proxy.clone(), Frozen { cwd: tab.cwd.clone(), screen, command: tab.command.clone() });
-                        if let Some(session) = &tab.claude {
+                        if let Some(session) = tab.claude.as_ref().filter(|s| claude_session_exists(s)) {
                             t.agent.session_id = Some(session.clone());
                             t.agent.cwd = tab.cwd.as_ref().map(|c| c.display().to_string());
                             t.agent.set_state(AgentState::Idle);
@@ -2601,8 +2609,10 @@ impl State {
                     None => {
                         let Some(id) = self.spawn_term_in(tab.cwd.as_deref()) else { continue };
                         let mut t = self.terms.remove(&id).unwrap();
-                        if let Some(session) = &tab.claude {
-                            resume_claude(&mut t, session, tab.cwd.as_deref());
+                        let claude = tab.claude.as_ref().is_some_and(|s| resume_claude(&mut t, s, tab.cwd.as_deref()));
+                        // Era un Claude sin conversación: el título que puso Claude ya no corresponde.
+                        if tab.claude.is_some() && !claude {
+                            tab.title = None;
                         }
                         t
                     }
@@ -2855,9 +2865,33 @@ impl State {
     }
 }
 
-/// Notificación de macOS (sin bundle de app todavía, vía osascript).
-/// Retoma en `t` (recién abierto) la sesión de Claude `session`.
-fn resume_claude(t: &mut Terminal, session: &str, cwd: Option<&Path>) {
+/// La sesión de Claude `session` tiene conversación guardada y se puede retomar.
+///
+/// Claude Code avisa su `session_id` al abrirse (hook SessionStart), pero su archivo
+/// (`~/.claude/projects/<carpeta>/<id>.jsonl`) recién aparece con el primer mensaje. Un
+/// Claude abierto sin escribirle nada deja un id sin conversación: `claude --resume`
+/// fallaría con «No conversation found».
+fn claude_session_exists(session: &str) -> bool {
+    if session.is_empty() || session.contains(['/', '.']) {
+        return false;
+    }
+    let base = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")));
+    let Some(projects) = base.map(|b| b.join("projects")) else { return false };
+    let file = format!("{session}.jsonl");
+    std::fs::read_dir(projects)
+        .map(|dirs| dirs.flatten().any(|d| d.path().join(&file).is_file()))
+        .unwrap_or(false)
+}
+
+/// Retoma en `t` (recién abierto) la sesión de Claude `session`, si tiene conversación;
+/// si no, el tab queda en la shell. Devuelve si la retomó.
+fn resume_claude(t: &mut Terminal, session: &str, cwd: Option<&Path>) -> bool {
+    if !claude_session_exists(session) {
+        log::info!("la sesión de Claude {session} no tiene conversación: el tab abre en la shell");
+        return false;
+    }
     // La shell todavía arranca: lo escrito queda en el buffer del PTY y se ejecuta al estar lista.
     t.write(format!("claude --resume {session}\r").into_bytes());
     // Ya cuenta como tab de Claude aunque su hook SessionStart aún no llegue:
@@ -2865,8 +2899,10 @@ fn resume_claude(t: &mut Terminal, session: &str, cwd: Option<&Path>) {
     t.agent.session_id = Some(session.to_string());
     t.agent.cwd = cwd.map(|c| c.display().to_string());
     t.agent.set_state(AgentState::Idle);
+    true
 }
 
+/// Notificación de macOS (sin bundle de app todavía, vía osascript).
 fn notify_macos(title: &str, body: &str) {
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!("display notification \"{}\" with title \"Telar\" subtitle \"{}\"", esc(body), esc(title));

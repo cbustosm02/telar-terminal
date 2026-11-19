@@ -254,7 +254,13 @@ impl Terminal {
 
     /// Nombre a mostrar: el del usuario, el título del programa o el proceso.
     pub fn label(&self) -> Option<&str> {
-        self.name.as_deref().or(self.title.as_deref()).or(self.process.as_deref())
+        fn set(s: &Option<String>) -> Option<&str> {
+            s.as_deref().filter(|s| !s.trim().is_empty())
+        }
+        // Claude Code empieza su título con un símbolo («✳ Claude Code», o uno que gira
+        // mientras trabaja): el tab ya muestra el logo de Claude, así que se quita.
+        let title = set(&self.title).map(|t| if self.agent.state != AgentState::None { strip_symbol_prefix(t) } else { t });
+        set(&self.name).or(title.filter(|t| !t.is_empty())).or(self.process.as_deref())
     }
 
     /// Marca el tab como usado ahora.
@@ -333,6 +339,11 @@ impl Terminal {
     }
 }
 
+/// Quita los símbolos y espacios del comienzo de un título («✳ Claude Code» → «Claude Code»).
+pub fn strip_symbol_prefix(title: &str) -> &str {
+    title.trim_start_matches(|c: char| !c.is_alphanumeric())
+}
+
 /// Texto de las últimas `lines` líneas lógicas de `term` (pantalla y scrollback).
 pub fn grid_text<L: EventListener>(term: &Term<L>, lines: usize) -> String {
     {
@@ -389,6 +400,17 @@ impl Drop for Terminal {
 
 #[cfg(test)]
 mod tests {
+    use super::strip_symbol_prefix;
+
+    #[test]
+    fn titulo_de_claude_sin_simbolo() {
+        assert_eq!(strip_symbol_prefix("✳ Claude Code"), "Claude Code");
+        assert_eq!(strip_symbol_prefix("⠂ Revisar el login"), "Revisar el login");
+        assert_eq!(strip_symbol_prefix("✻  Plan"), "Plan");
+        assert_eq!(strip_symbol_prefix("Claude Code"), "Claude Code");
+        assert_eq!(strip_symbol_prefix("✳"), "");
+    }
+
     use alacritty_terminal::event::VoidListener;
 
     use super::*;

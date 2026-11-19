@@ -197,3 +197,10 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - «Elegir carpeta…» cerraba la app de golpe. `NSOpenPanel runModal` abre su propio ciclo de eventos; abierto dentro del manejador del clic de winit, a winit le llegaban eventos de la ventana mientras todavía atendía el clic y abortaba («tried to handle event while another event is currently being handled», un `panic!` con `panic = "abort"`). Ahora los paneles se abren con `appicon::later_on_main` (`dispatch_async_f` a la cola principal), cuando winit ya terminó con el clic, y lo elegido vuelve como `UserEvent::Picked`. «Elegir archivo…» del ícono tenía el mismo problema.
 - La ruta elegida salía vacía: el `NSString` de `path` se soltaba antes de copiar su `UTF8String` (era un temporal de la misma expresión). `url_path` lo mantiene vivo hasta copiar el texto, y una ruta vacía o relativa no se guarda.
 - Lo probó el usuario con la app antes de publicar; las capturas del modo `TELAR_SNAPSHOT` no hacen clics reales y no lo habían detectado.
+
+## ⌘⌫, sesiones de Claude sin conversación y títulos (2026-11-19)
+
+- ⌘⌫ manda Ctrl+U (borra la línea hasta el cursor), como Terminal.app e iTerm. Sirve en zsh, bash y en el prompt de Claude Code.
+- Claude Code avisa su `session_id` al abrirse (SessionStart), pero su archivo (`~/.claude/projects/<carpeta>/<id>.jsonl`) recién aparece con el primer mensaje. Un Claude abierto sin escribirle dejaba un id sin conversación y, al reabrir Telar, `claude --resume` fallaba con «No conversation found». Ahora `claude_session_exists` busca el archivo (respeta `CLAUDE_CONFIG_DIR`) antes de retomar, al restaurar y al reanudar un tab suspendido; si no está, el tab abre la shell en su carpeta y se descarta el título viejo de Claude.
+- Claude deja el título vacío al salir: un título vacío cuenta como sin título y el tab muestra el proceso (`zsh`).
+- En los tabs con Claude se quitan los símbolos del comienzo del título (`✳`, el indicador que gira): el tab ya muestra el logo de Claude. Los nombres puestos por el usuario no se tocan.

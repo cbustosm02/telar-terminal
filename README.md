@@ -153,6 +153,7 @@ Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina so
 | ⌘S | Suspender o reanudar el tab activo (Enter también reanuda) |
 | ⌘⇧S | Suspender o reanudar el grupo activo |
 | ⌘⇧C | Despierto: no → siempre → mientras Claude trabaja |
+| ⌘⌫ | Borrar la línea desde el cursor hacia atrás (Ctrl+U), en la shell y en Claude |
 | ⌘, | Configuración (carpeta de inicio, tema, fuente, ícono, límites, inactividad) |
 | ⌘P | Buscar un tab o grupo por nombre (↑↓ elige, Enter va, Esc cierra) |
 | ⌘N | Nuevo grupo |
