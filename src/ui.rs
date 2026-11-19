@@ -506,15 +506,20 @@ pub fn draw(out: &mut Vec<Quad>, fg: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layo
         ime_cell = draw_terminal(out, fg, fonts, l, &term, v);
     }
     out.append(fg);
-    let suspended = active.is_some_and(Terminal::is_suspended);
     let mut k = Kit::new(out, fonts, l.s);
-    if suspended {
-        draw_suspended(&mut k, l);
+    if let Some(f) = active.and_then(|t| t.frozen.as_ref()) {
+        let claude = active.is_some_and(|t| t.agent.session_id.is_some() && t.agent.state != crate::terminal::AgentState::None);
+        let sub = match &f.command {
+            Some(cmd) => format!("Al reanudar se vuelve a ejecutar: {cmd}"),
+            None if claude => "Al reanudar, Claude retoma la misma sesión".to_string(),
+            None => "Al reanudar se abre la shell en su carpeta".to_string(),
+        };
+        draw_suspended(&mut k, l, &sub);
     }
     if let Some(m) = v.menu {
         draw_menu(&mut k, m);
     }
-    if suspended { None } else { ime_cell }
+    if active.is_some_and(Terminal::is_suspended) { None } else { ime_cell }
 }
 
 fn draw_menu(k: &mut Kit, m: &Menu) {
@@ -543,7 +548,7 @@ fn draw_menu(k: &mut Kit, m: &Menu) {
 }
 
 /// Vista previa de un tab suspendido: su última pantalla, atenuada, con un aviso abajo.
-fn draw_suspended(k: &mut Kit, l: &Layout) {
+fn draw_suspended(k: &mut Kit, l: &Layout, sub: &str) {
     let s = l.s;
     let th = theme::t();
     let x0 = l.sidebar_w();
@@ -559,7 +564,7 @@ fn draw_suspended(k: &mut Kit, l: &Layout) {
     k.icon(icon_box.x + icon_box.w / 2.0, icon_box.y + icon_box.h / 2.0, icons::MOON, 17.0, th.text);
     let tx = icon_box.x + icon_box.w + 12.0 * s;
     k.text(tx, r.y + 13.0 * s, "Tab suspendido", Text::label(), r.w - 200.0 * s);
-    k.text(tx, r.y + 33.0 * s, "La sesión se retoma al reanudar", Text::small(), r.w - 200.0 * s);
+    k.text(tx, r.y + 33.0 * s, sub, Text::small(), r.w - 200.0 * s);
     let right = r.x + r.w - 14.0 * s;
     let x = k.kbd(right, r.y + 22.0 * s, &["↩"]);
     let tw = k.measure("Reanudar", Text::small());

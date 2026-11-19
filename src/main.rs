@@ -538,12 +538,15 @@ impl State {
         // Con Claude, su carpeta es donde se inició la sesión (la necesita --resume).
         let cwd = if claude { old.agent.cwd.as_ref().map(PathBuf::from).or_else(|| old.cwd()) } else { old.cwd() };
         let screen = screen::to_ansi(&old.term.lock());
+        // Otra cosa que la shell o Claude en primer plano (una TUI, un servidor): se
+        // vuelve a ejecutar al reanudar, como Claude con --resume.
+        let command = if claude { None } else { old.foreground_command() };
         let title = old.title.take();
         let name = old.name.take();
         let mut agent = std::mem::take(&mut old.agent);
         let size = old.size();
         let last_used = old.last_used.get();
-        let mut t = Terminal::frozen(id, size, self.proxy.clone(), Frozen { cwd, screen });
+        let mut t = Terminal::frozen(id, size, self.proxy.clone(), Frozen { cwd, screen, command });
         t.last_used.set(last_used);
         t.title = title;
         t.name = name;
@@ -563,6 +566,7 @@ impl State {
         let Some(old) = self.terms.get(&id) else { return false };
         let Some(frozen) = &old.frozen else { return false };
         let cwd = frozen.cwd.clone();
+        let command = frozen.command.clone();
         let session = old.agent.session_id.clone().filter(|_| old.agent.state != AgentState::None);
         let (title, name) = (old.title.clone(), old.name.clone());
         let Some(mut t) = self.spawn_with_id(id, cwd.as_deref()) else { return false };
@@ -570,6 +574,8 @@ impl State {
         t.name = name;
         if let Some(session) = session {
             resume_claude(&mut t, &session, cwd.as_deref());
+        } else if let Some(command) = command {
+            t.write(format!("{command}\r").into_bytes());
         }
         self.terms.insert(id, t);
         self.window.request_redraw();
@@ -1916,7 +1922,7 @@ impl State {
                     waiting: state == AgentState::NeedsYou,
                     running: !t.is_suspended()
                         && state == AgentState::None
-                        && t.process.as_deref().is_some_and(|p| !idle::is_shell(p)),
+                        && !t.process.as_deref().is_some_and(proc::is_shell),
                 });
             }
         }
@@ -2339,7 +2345,8 @@ impl State {
                         } else {
                             t.cwd()
                         };
-                        SavedTab { title: t.title.clone(), name: t.name.clone(), cwd, claude, screen }
+                        let command = t.frozen.as_ref().and_then(|f| f.command.clone());
+                        SavedTab { title: t.title.clone(), name: t.name.clone(), cwd, claude, screen, command }
                     })
                     .collect(),
             })
@@ -2370,7 +2377,7 @@ impl State {
                 let mut t = match tab.screen {
                     Some(screen) => {
                         self.next_id += 1;
-                        let mut t = Terminal::frozen(id, self.layout().grid_size(), self.proxy.clone(), Frozen { cwd: tab.cwd.clone(), screen });
+                        let mut t = Terminal::frozen(id, self.layout().grid_size(), self.proxy.clone(), Frozen { cwd: tab.cwd.clone(), screen, command: tab.command.clone() });
                         if let Some(session) = &tab.claude {
                             t.agent.session_id = Some(session.clone());
                             t.agent.cwd = tab.cwd.as_ref().map(|c| c.display().to_string());

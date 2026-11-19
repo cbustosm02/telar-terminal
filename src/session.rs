@@ -17,6 +17,8 @@ pub struct SavedTab {
     pub claude: Option<String>,
     /// Pantalla (texto ANSI) si el tab estaba suspendido: al reabrir sigue suspendido.
     pub screen: Option<String>,
+    /// Comando a volver a ejecutar al reanudarlo (una TUI, un servidor…).
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +68,7 @@ impl Saved {
                     "cwd": t.cwd,
                     "claude_session": t.claude,
                     "suspended_screen": t.screen,
+                    "suspended_command": t.command,
                 })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         })
@@ -85,6 +88,7 @@ impl Saved {
                         cwd: t["cwd"].as_str().map(PathBuf::from),
                         claude: t["claude_session"].as_str().map(String::from),
                         screen: t["suspended_screen"].as_str().map(String::from),
+                        command: t["suspended_command"].as_str().map(String::from),
                     })
                     .collect();
                 (!tabs.is_empty()).then(|| SavedGroup {
@@ -140,11 +144,11 @@ mod tests {
                     idle_exempt: true,
                     active: 1,
                     tabs: vec![
-                        SavedTab { title: Some("✳ Refactor".into()), name: None, cwd: Some("/Users/x/telar".into()), claude: Some("ses-1".into()), screen: None },
-                        SavedTab { title: None, name: Some("logs".into()), cwd: Some("/tmp".into()), claude: None, screen: Some("\x1b[31mhola".into()) },
+                        SavedTab { title: Some("✳ Refactor".into()), name: None, cwd: Some("/Users/x/telar".into()), claude: Some("ses-1".into()), screen: None, command: None },
+                        SavedTab { title: None, name: Some("logs".into()), cwd: Some("/tmp".into()), claude: None, screen: Some("\x1b[31mhola".into()), command: Some("htop -d 10".into()) },
                     ],
                 },
-                SavedGroup { name: "Grupo 2".into(), dir: None, ram_limit_mb: 0, idle_exempt: false, active: 0, tabs: vec![SavedTab { title: None, name: None, cwd: None, claude: None, screen: None }] },
+                SavedGroup { name: "Grupo 2".into(), dir: None, ram_limit_mb: 0, idle_exempt: false, active: 0, tabs: vec![SavedTab { title: None, name: None, cwd: None, claude: None, screen: None, command: None }] },
             ],
         }
     }

@@ -90,6 +90,7 @@ Para tener muchas sesiones a la vista sin que consuman recursos:
 - **⌘S** suspende el tab activo (o lo reanuda). **⌘⇧S** suspende el grupo entero; si ya está todo suspendido, lo reanuda.
 - Suspender cierra la shell y Claude (lo que más memoria usa) y guarda la última pantalla con sus colores. El tab queda con una ☾ y, al abrirlo, se ve esa pantalla atenuada. `telar read` también funciona sobre ella.
 - **Enter** en un tab suspendido lo reanuda: abre una shell en su carpeta y, si tenía Claude, ejecuta `claude --resume` con la misma sesión.
+- Si corría otra cosa (una TUI, un servidor, `ssh`, `vim`, `top`), Telar guarda su comando con sus argumentos y lo vuelve a ejecutar al reanudar, en la misma carpeta; la vista del tab suspendido dice qué va a ejecutar. Un pipeline se rearma entero (`tail -f log | grep error`), salvo que su primera parte ya hubiera terminado (`cat x | less`): ahí queda la shell. Lo que el programa tenía en memoria (un buffer sin guardar, el historial de `top`) no vuelve.
 - Al suspender un grupo se saltan los tabs donde Claude está trabajando o esperando un permiso (por CLI, `--force` los incluye).
 - Los tabs suspendidos siguen suspendidos al reabrir Telar, sin arrancar nada; reabrir con muchas sesiones dormidas es instantáneo.
 

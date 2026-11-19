@@ -40,7 +40,139 @@ pub fn display_name(name: String) -> String {
 }
 
 pub fn is_shell(name: &str) -> bool {
-    matches!(name.trim_start_matches('-'), "zsh" | "bash" | "fish" | "sh" | "login")
+    matches!(name.trim_start_matches('-'), "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "login")
+}
+
+/// `PROC_PGRP_ONLY` de `<libproc.h>` (no está en el crate libc).
+const PROC_PGRP_ONLY: u32 = 2;
+
+/// Padre y grupo de procesos de `pid`.
+fn bsd_info(pid: i32) -> Option<(i32, i32)> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let read = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut c_void, size) };
+    (read == size).then_some((info.pbi_ppid as i32, info.pbi_pgid as i32))
+}
+
+/// Padre y línea de comando según `ps`, que puede leer procesos de root (`top`, que
+/// es setuid, no deja leer sus datos con `proc_pidinfo` ni `KERN_PROCARGS2`).
+fn ps(pid: i32) -> Option<(i32, String)> {
+    let out = std::process::Command::new("/bin/ps").args(["-o", "ppid=,args=", "-p", &pid.to_string()]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (ppid, args) = text.trim().split_once(char::is_whitespace)?;
+    Some((ppid.trim().parse().ok()?, args.trim().to_string()))
+}
+
+/// Proceso padre de `pid`.
+fn parent(pid: i32) -> Option<i32> {
+    bsd_info(pid).map(|i| i.0).or_else(|| ps(pid).map(|p| p.0))
+}
+
+/// Línea de comando de `pid`, lista para volver a ejecutarla.
+fn command_of(pid: i32) -> Option<String> {
+    argv(pid).map(|a| command_line(&a)).or_else(|| ps(pid).map(|p| p.1)).filter(|c| !c.is_empty())
+}
+
+/// Procesos del grupo `pgrp`.
+fn pgrp_members(pgrp: i32) -> Vec<i32> {
+    let mut buf = vec![0i32; 512];
+    let bytes = unsafe {
+        libc::proc_listpids(PROC_PGRP_ONLY, pgrp as u32, buf.as_mut_ptr() as *mut c_void, (buf.len() * 4) as i32)
+    };
+    buf.truncate((bytes.max(0) / 4) as usize);
+    buf.retain(|p| *p > 0);
+    buf
+}
+
+/// Argumentos con los que se ejecutó `pid` (`KERN_PROCARGS2`: argc, la ruta del
+/// ejecutable, relleno de ceros, argv y después el entorno).
+pub fn argv(pid: i32) -> Option<Vec<String>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size: libc::size_t = 0;
+    unsafe {
+        if libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) != 0 {
+            return None;
+        }
+    }
+    let mut buf = vec![0u8; size];
+    unsafe {
+        if libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr() as *mut c_void, &mut size, std::ptr::null_mut(), 0) != 0 {
+            return None;
+        }
+    }
+    buf.truncate(size);
+    parse_procargs(&buf)
+}
+
+fn parse_procargs(buf: &[u8]) -> Option<Vec<String>> {
+    let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?) as usize;
+    let rest = &buf[4..];
+    // Saltar la ruta del ejecutable y los ceros que la siguen.
+    let exec_end = rest.iter().position(|b| *b == 0)?;
+    let start = exec_end + rest[exec_end..].iter().position(|b| *b != 0)?;
+    let args: Vec<String> = rest[start..].split(|b| *b == 0).take(argc).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    (args.len() == argc && argc > 0).then_some(args)
+}
+
+/// Un argumento listo para la shell: tal cual si no tiene caracteres especiales; si no,
+/// entre comillas simples.
+fn quote(arg: &str) -> String {
+    let plain = !arg.is_empty() && arg.bytes().all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-~".contains(&b));
+    if plain { arg.to_string() } else { format!("'{}'", arg.replace('\'', "'\\''")) }
+}
+
+/// Línea de comando de un proceso. Si lo lanzó un intérprete por el shebang de un
+/// programa instalado (`node /opt/homebrew/bin/npm run dev`), queda el programa
+/// (`/opt/homebrew/bin/npm run dev`).
+pub fn command_line(args: &[String]) -> String {
+    const INTERPRETERS: &[&str] = &["node", "python", "python3", "ruby", "perl", "bun", "deno", "bash", "sh", "zsh"];
+    let base = |s: &str| s.rsplit('/').next().unwrap_or(s).to_string();
+    let skip = args.len() > 1 && INTERPRETERS.contains(&base(&args[0]).as_str()) && args[1].starts_with('/') && args[1].contains("/bin/");
+    let args = if skip { &args[1..] } else { args };
+    args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
+}
+
+/// Partes de lo que corre en el grupo de procesos `pgrp` (sus procesos cuyo padre no es
+/// del grupo: cada comando de un pipeline, sin sus subprocesos) y la shell que las lanzó.
+/// El líder del grupo puede ya no existir (en `cat x | less`, `cat` termina enseguida).
+fn top_level(pgrp: i32) -> (Option<i32>, Vec<i32>) {
+    let mut members = pgrp_members(pgrp);
+    if members.is_empty() {
+        members.push(pgrp);
+    }
+    let parents: Vec<(i32, Option<i32>)> = members.iter().map(|p| (*p, parent(*p))).collect();
+    let outside = |pp: &Option<i32>| pp.is_none_or(|pp| !members.contains(&pp));
+    let mut parts: Vec<i32> = parents.iter().filter(|(_, pp)| outside(pp)).map(|(p, _)| *p).collect();
+    parts.sort_unstable();
+    let shell = parents.iter().filter_map(|(_, pp)| *pp).find(|pp| !members.contains(pp));
+    (shell, parts)
+}
+
+/// La shell de una terminal cuyo grupo en primer plano es `pgrp`.
+pub fn shell_of(pgrp: i32) -> Option<i32> {
+    top_level(pgrp).0.filter(|s| name(*s).is_some_and(|n| is_shell(&n)))
+}
+
+/// Lo que corre en primer plano en una terminal cuyo grupo de procesos en primer plano
+/// es `pgrp`, para volver a ejecutarlo: `None` si es la shell o un pipeline incompleto.
+/// Un pipeline entero (`tail -f log | grep x`) se vuelve a armar con sus partes.
+pub fn foreground_command(pgrp: i32) -> Option<String> {
+    let (_, parts) = top_level(pgrp);
+    // El primero de un pipeline ya terminó (`cat x | less`): sin él no se puede volver a
+    // armar igual, y `less` solo no tendría qué mostrar. Mejor no ejecutar nada.
+    if !parts.contains(&pgrp) && command_of(pgrp).is_none() {
+        return None;
+    }
+    let cmds: Vec<String> = parts.iter().filter_map(|p| command_of(*p)).collect();
+    let first = cmds.first()?;
+    let first_name = parts.first().and_then(|p| name(*p)).unwrap_or_else(|| {
+        let w = first.split_whitespace().next().unwrap_or_default();
+        w.rsplit('/').next().unwrap_or(w).to_string()
+    });
+    if is_shell(&first_name) {
+        return None;
+    }
+    Some(cmds.join(" | "))
 }
 
 #[cfg(test)]
@@ -68,6 +200,36 @@ mod tests {
         for n in ["claude", "node", "vim", "zshx"] {
             assert!(!is_shell(n), "{n}");
         }
+    }
+
+    #[test]
+    fn linea_de_comando() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(command_line(&v(&["htop"])), "htop");
+        assert_eq!(command_line(&v(&["vim", "mi archivo.txt"])), "vim 'mi archivo.txt'");
+        assert_eq!(command_line(&v(&["echo", "it's"])), "echo 'it'\\''s'");
+        assert_eq!(command_line(&v(&["node", "/opt/homebrew/bin/npm", "run", "dev"])), "/opt/homebrew/bin/npm run dev");
+        assert_eq!(command_line(&v(&["python3", "manage.py", "runserver"])), "python3 manage.py runserver");
+        assert_eq!(command_line(&v(&["ssh", "-p", "22", "user@host"])), "ssh -p 22 user@host");
+    }
+
+    #[test]
+    fn argumentos_de_procargs2() {
+        let mut buf = 2i32.to_ne_bytes().to_vec();
+        buf.extend(b"/usr/bin/vim\0\0\0\0vim\0a.txt\0HOME=/x\0");
+        assert_eq!(parse_procargs(&buf), Some(vec!["vim".to_string(), "a.txt".to_string()]));
+        assert_eq!(parse_procargs(&[1, 0]), None);
+    }
+
+    /// Un proceso hijo propio: se leen sus argumentos y, como no es una shell, su comando.
+    #[test]
+    fn comando_de_un_proceso_real() {
+        let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(argv(pid), Some(vec!["/bin/sleep".to_string(), "30".to_string()]));
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     /// El proceso de la prueba sí existe: tiene nombre y carpeta.

@@ -56,6 +56,9 @@ pub struct Frozen {
     pub cwd: Option<PathBuf>,
     /// Pantalla como texto ANSI (también se guarda en la sesión).
     pub screen: String,
+    /// Lo que corría en primer plano (que no era la shell ni Claude): se vuelve a
+    /// ejecutar al reanudar. Ver `proc::foreground_command`.
+    pub command: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -159,6 +162,9 @@ pub struct Terminal {
     pub agent: Agent,
     /// Nombre del proceso en primer plano (se refresca cada pocos segundos).
     pub process: Option<String>,
+    /// Pid de la shell del tab (se anota cuando está en primer plano). Sirve para saber
+    /// la carpeta cuando lo que corre no se deja leer (p. ej. `top`, que es de root).
+    shell_pid: Option<i32>,
     /// Copia del descriptor del PTY, para preguntar por el proceso en primer plano.
     pty: Option<OwnedFd>,
     size: GridSize,
@@ -215,6 +221,7 @@ impl Terminal {
             attention: false,
             agent: Agent::default(),
             process: None,
+            shell_pid: None,
             pty: pty_fd,
             size,
             last_used: Cell::new(Instant::now()),
@@ -238,6 +245,7 @@ impl Terminal {
             attention: false,
             agent: Agent::default(),
             process: None,
+            shell_pid: None,
             pty: None,
             size,
             last_used: Cell::new(Instant::now()),
@@ -288,7 +296,8 @@ impl Terminal {
         if let Some(f) = &self.frozen {
             return f.cwd.clone();
         }
-        self.foreground().and_then(crate::proc::cwd)
+        let fg = self.foreground();
+        fg.and_then(crate::proc::cwd).or_else(|| self.shell_pid.filter(|s| Some(*s) != fg).and_then(crate::proc::cwd))
     }
 
     /// Proceso en primer plano del tab (su grupo de procesos). Para saber qué procesos
@@ -297,8 +306,20 @@ impl Terminal {
         self.foreground()
     }
 
+    /// Comando que corre en primer plano, si no es la shell (para volver a ejecutarlo).
+    pub fn foreground_command(&self) -> Option<String> {
+        self.foreground().and_then(crate::proc::foreground_command)
+    }
+
     pub fn refresh_process(&mut self) {
-        self.process = self.foreground().and_then(crate::proc::name);
+        let fg = self.foreground();
+        self.process = fg.and_then(crate::proc::name);
+        if self.process.as_deref().is_some_and(crate::proc::is_shell) {
+            self.shell_pid = fg;
+        } else if self.shell_pid.is_none() {
+            // Arrancó con un comando y la shell nunca estuvo en primer plano.
+            self.shell_pid = fg.and_then(crate::proc::shell_of);
+        }
     }
 
     /// Texto de las últimas `lines` líneas lógicas (las líneas partidas por ancho se unen).

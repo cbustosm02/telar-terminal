@@ -112,11 +112,6 @@ pub fn pick(rules: &Rules, tabs: &[Tab], groups: &[Group]) -> Vec<u64> {
         .collect()
 }
 
-/// Shells conocidas: con una de ellas en primer plano el tab no tiene un comando corriendo.
-pub fn is_shell(process: &str) -> bool {
-    matches!(process.trim_start_matches('-'), "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "login")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,11 +174,5 @@ mod tests {
         // Con regla de tab y de grupo: el 1 está en el grupo abierto y se usó hace poco.
         let both = Rules { tab_min: 100, group_min: 0, ..rules };
         assert_eq!(pick(&both, &tabs, &groups), vec![3]);
-    }
-
-    #[test]
-    fn shells() {
-        assert!(is_shell("zsh") && is_shell("-zsh") && is_shell("bash"));
-        assert!(!is_shell("node") && !is_shell("claude") && !is_shell("ssh"));
     }
 }

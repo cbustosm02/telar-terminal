@@ -152,3 +152,11 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - Llevar un grupo más allá de la vista desplaza la lista. Al soltar se guarda la sesión y se recalculan los límites por grupo, que se indican por índice. Si la ventana pierde el foco, el arrastre termina.
 - `TELAR_SNAPSHOT_DRAG=group|tab|tab-to-group|tab-to-group-drop` simula un arrastre en el modo captura, por el mismo código que el mouse.
 - Los tabs están en la barra de título (ventana con contenido a pantalla completa y título transparente), y macOS arrastraba la ventana entera desde ahí antes de que Telar viera el movimiento: los grupos se podían reordenar y los tabs no. Ahora, en cada clic, la ventana es movible (`NSWindow setMovable:`) solo si el clic cae en una zona vacía de la barra; sobre un tab no lo es y el arrastre llega a Telar.
+
+## Reanudar lo que corría en un tab suspendido (2026-11-18)
+
+- Suspender cierra el proceso. Claude volvía con `claude --resume`, pero cualquier otro programa en primer plano se perdía y el tab quedaba en la shell. Ahora, al suspender, se guarda su línea de comando (`Frozen::command`, también en `sesion.json` como `suspended_command`) y al reanudar se escribe en la shell nueva, como `claude --resume`.
+- La línea sale de los procesos del grupo en primer plano (`proc_listpids` con `PROC_PGRP_ONLY`, que no está en el crate libc: vale 2) que no son hijos de otro del grupo: cada parte de un pipeline, sin sus subprocesos. Los argumentos se leen con `KERN_PROCARGS2` y se citan para la shell. Un programa lanzado por shebang (`node /opt/homebrew/bin/npm run dev`) queda como `/opt/homebrew/bin/npm run dev`.
+- `top` es setuid root: `proc_pidinfo` y `KERN_PROCARGS2` fallan con él. Se usa `ps -o ppid=,args=` (que es setuid) como respaldo, y su carpeta es la de la shell del tab, cuyo pid se anota (`Terminal::shell_pid`).
+- Si el líder del grupo ya terminó (`cat x | less`: `cat` sale enseguida), el pipeline no se puede rearmar igual y `less` solo no tendría entrada: no se ejecuta nada. Las variables de entorno puestas en la línea (`FOO=1 cmd`) no se recuperan.
+- Probado de punta a punta por la CLI (`new`, `suspend`, `resume`, `read`): `top`, `vim -R`, `tail -f | grep` volvieron en su carpeta; `cat | less` dejó la shell.
