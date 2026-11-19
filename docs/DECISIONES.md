@@ -74,3 +74,12 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - `caffeinate -dims -w <pid>` como proceso hijo: `-w` lo termina si Telar muere, incluso con `kill -9` (probado).
 - El modo «Claude» lo enciende mientras algún tab está en `working`; se reevalúa con cada mensaje del socket (los hooks) y cada 5 s.
 - El emoji ☕ no se usó en la barra lateral: la fuente de respaldo da su glifo de texto, que se ve diminuto.
+
+## Menú contextual, ⌘K y emoji (2026-11-18)
+
+- El menú contextual se dibuja con el mismo renderer (no es un NSMenu nativo): así no hacen falta dependencias de Objective-C y se ve igual que el resto. Se cierra con Esc, con un clic fuera o al cambiar de app; se maneja también con flechas y Enter.
+- Renombrar un tab le pone un nombre propio (`Terminal::name`) que gana al título que pone el programa (Claude cambia el suyo a cada rato). Se guarda en la sesión; vacío vuelve al automático.
+- ⌘K: `ClearMode::All` lleva la pantalla al scrollback y `ClearMode::Saved` lo vacía. Después se manda Ctrl-L si en primer plano hay una shell o Claude, para que redibujen su prompt; a otros programas no se les manda nada.
+- Los caracteres con presentación de emoji por defecto (☕ ⚡ ✅ ❌ ⭐…, `font::emoji_presentation`) van primero a Apple Color Emoji. Antes ganaba el glifo de texto de Menlo o Apple Symbols y se veían como símbolos chicos.
+- Modo captura: la ventana se abre sin activarse (`with_active(false)`) e ignora el teclado. Antes tomaba el foco y lo que el usuario escribía en otra app terminaba en la ventana de prueba.
+- El completado de `ng` escribe «Error: This command is not available when running the Angular CLI outside a workspace» al presionar Tab fuera de un proyecto. Es del script de Angular, no de Telar; en el `.zshrc` del usuario se envolvió la función para descartar su stderr.

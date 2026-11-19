@@ -86,7 +86,8 @@ fn fs(i: VsOut) -> @location(0) vec4<f32> {
     if (kind < 1.5) {
         return vec4(i.color.rgb, i.color.a * t.a);
     }
-    return t;
+    // Emoji: sus propios colores; el alfa del quad permite atenuarlo.
+    return vec4(t.rgb, t.a * i.color.a);
 }
 "#;
 

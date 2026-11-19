@@ -151,6 +151,8 @@ pub struct Terminal {
     pub generation: u64,
     pub frozen: Option<Frozen>,
     pub title: Option<String>,
+    /// Nombre puesto por el usuario (gana sobre el título que pone el programa).
+    pub name: Option<String>,
     /// Sonó la campana mientras el tab no estaba visible.
     pub attention: bool,
     pub agent: Agent,
@@ -206,6 +208,7 @@ impl Terminal {
             generation: listener_generation,
             frozen: None,
             title: None,
+            name: None,
             attention: false,
             agent: Agent::default(),
             process: None,
@@ -227,12 +230,18 @@ impl Terminal {
             generation,
             frozen: Some(frozen),
             title: None,
+            name: None,
             attention: false,
             agent: Agent::default(),
             process: None,
             pty: None,
             size,
         }
+    }
+
+    /// Nombre a mostrar: el del usuario, el título del programa o el proceso.
+    pub fn label(&self) -> Option<&str> {
+        self.name.as_deref().or(self.title.as_deref()).or(self.process.as_deref())
     }
 
     pub fn is_suspended(&self) -> bool {

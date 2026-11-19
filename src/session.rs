@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedTab {
     pub title: Option<String>,
+    /// Nombre puesto por el usuario.
+    pub name: Option<String>,
     pub cwd: Option<PathBuf>,
     /// `session_id` de Claude Code si en el tab había una sesión abierta.
     pub claude: Option<String>,
@@ -54,6 +56,7 @@ impl Saved {
                 "active": g.active,
                 "tabs": g.tabs.iter().map(|t| json!({
                     "title": t.title,
+                    "name": t.name,
                     "cwd": t.cwd,
                     "claude_session": t.claude,
                     "suspended_screen": t.screen,
@@ -72,6 +75,7 @@ impl Saved {
                     .iter()
                     .map(|t| SavedTab {
                         title: t["title"].as_str().map(String::from),
+                        name: t["name"].as_str().map(String::from),
                         cwd: t["cwd"].as_str().map(PathBuf::from),
                         claude: t["claude_session"].as_str().map(String::from),
                         screen: t["suspended_screen"].as_str().map(String::from),

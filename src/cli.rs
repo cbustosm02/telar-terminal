@@ -27,6 +27,7 @@ Sin comando abre la terminal. Comandos (dentro de Telar):
                                      suspende: cierra la shell y Claude y deja la última pantalla
                                      a la vista (no suspende tabs que trabajan, salvo --force)
   resume <tab> | --group G           reanuda (Claude retoma la misma sesión)
+  clear <tab>                        borra la pantalla y el scrollback del tab (como ⌘K)
   awake [on|off|auto]                mantener el Mac despierto (caffeinate -dims): siempre,
                                      nunca, o solo mientras algún Claude trabaja
   wait <tab> [--state S] [--timeout SEG]
@@ -180,6 +181,11 @@ pub fn run(cmd: &str, raw: &[String]) -> Result<String, String> {
                 ("suspend", _) => format!("Suspendidos: {}", v["changed"]),
                 _ => format!("Reanudados: {}", v["changed"]),
             })
+        }
+        "clear" => {
+            let tab = raw.first().ok_or("falta <tab>")?;
+            call(json!({ "cmd": "clear", "tab": tab_spec(tab) }))?;
+            Ok(String::new())
         }
         "awake" => {
             let v = call(json!({ "cmd": "awake", "mode": raw.first() }))?;

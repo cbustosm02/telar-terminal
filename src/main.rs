@@ -25,7 +25,7 @@ use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::color::COUNT;
 use alacritty_terminal::term::TermMode;
-use alacritty_terminal::vte::ansi::Rgb;
+use alacritty_terminal::vte::ansi::{ClearMode, Handler, Rgb};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -40,7 +40,7 @@ use crate::font::Fonts;
 use crate::renderer::{Quad, Renderer};
 use crate::terminal::{AgentState, Frozen, Terminal};
 use crate::theme::Rgba;
-use crate::ui::{Hit, Layout, View};
+use crate::ui::{Action, Edit, Hit, Layout, Menu, MenuItem, View};
 use crate::session::{Saved, SavedGroup, SavedTab};
 use crate::workspace::{Group, Workspace};
 
@@ -110,7 +110,9 @@ struct State {
     mouse_button: Option<u8>,
     scroll_px: f32,
     clicks: (Instant, Hit, u8),
-    editing: Option<(usize, String)>,
+    editing: Option<(Edit, String)>,
+    /// Menú contextual abierto (clic derecho en un tab o grupo).
+    menu: Option<Menu>,
     preedit: String,
     focused: bool,
     clipboard: Option<arboard::Clipboard>,
@@ -147,7 +149,9 @@ impl ApplicationHandler<UserEvent> for App {
             .with_min_inner_size(LogicalSize::new(520.0, 300.0))
             .with_titlebar_transparent(true)
             .with_fullsize_content_view(true)
-            .with_title_hidden(true);
+            .with_title_hidden(true)
+            // Modo captura: la ventana de prueba no le quita el foco a lo que estés usando.
+            .with_active(std::env::var_os("TELAR_SNAPSHOT").is_none());
         let window = Arc::new(event_loop.create_window(attrs).expect("ventana"));
         window.set_ime_allowed(true);
         let renderer = pollster::block_on(Renderer::new(window.clone()));
@@ -170,6 +174,7 @@ impl ApplicationHandler<UserEvent> for App {
             scroll_px: 0.0,
             clicks: (Instant::now(), Hit::None, 0),
             editing: None,
+            menu: None,
             preedit: String::new(),
             focused: true,
             clipboard: arboard::Clipboard::new().ok(),
@@ -338,12 +343,18 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ScaleFactorChanged { .. } => st.apply_font_size(),
             WindowEvent::Focused(focused) => {
                 st.focused = focused;
+                // Al cambiar de app, el menú se cierra (salvo en modo captura, sin foco).
+                if !focused && st.snapshot.is_none() {
+                    st.menu = None;
+                }
                 if focused {
                     st.mark_seen();
                 }
                 st.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => st.mods = m.state(),
+            // En modo captura se ignora el teclado: lo que se escriba es de otra ventana.
+            WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_) if st.snapshot.is_some() => {}
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed && st.on_key(&event) {
                     event_loop.exit();
@@ -403,10 +414,12 @@ impl State {
         let cwd = if claude { old.agent.cwd.as_ref().map(PathBuf::from).or_else(|| old.cwd()) } else { old.cwd() };
         let screen = screen::to_ansi(&old.term.lock());
         let title = old.title.take();
+        let name = old.name.take();
         let mut agent = std::mem::take(&mut old.agent);
         let size = old.size();
         let mut t = Terminal::frozen(id, size, self.proxy.clone(), Frozen { cwd, screen });
         t.title = title;
+        t.name = name;
         if claude {
             agent.set_state(AgentState::Idle);
             agent.message = None;
@@ -424,9 +437,10 @@ impl State {
         let Some(frozen) = &old.frozen else { return false };
         let cwd = frozen.cwd.clone();
         let session = old.agent.session_id.clone().filter(|_| old.agent.state != AgentState::None);
-        let title = old.title.clone();
+        let (title, name) = (old.title.clone(), old.name.clone());
         let Some(mut t) = self.spawn_with_id(id, cwd.as_deref()) else { return false };
         t.title = title;
+        t.name = name;
         if let Some(session) = session {
             resume_claude(&mut t, &session, cwd.as_deref());
         }
@@ -462,8 +476,7 @@ impl State {
 
     /// ⌘⇧S: suspende el grupo activo (salvo los tabs que trabajan); si ya está todo
     /// suspendido, lo reanuda entero.
-    fn toggle_suspend_group(&mut self) {
-        let gi = self.ws.active;
+    fn toggle_suspend_group(&mut self, gi: usize) {
         let awake = self.suspendable(gi);
         if awake.is_empty() {
             let tabs = self.ws.groups.get(gi).map(|g| g.tabs.clone()).unwrap_or_default();
@@ -600,24 +613,161 @@ impl State {
 
     fn start_rename(&mut self, group: usize) {
         if let Some(g) = self.ws.groups.get(group) {
-            self.editing = Some((group, g.name.clone()));
+            self.editing = Some((Edit::Group(group), g.name.clone()));
             self.window.request_redraw();
         }
+    }
+
+    /// Renombrar un tab: se edita en la barra de tabs (el tab pasa a estar visible).
+    fn start_rename_tab(&mut self, id: u64) {
+        self.show_tab(id);
+        if let Some(t) = self.terms.get(&id) {
+            self.editing = Some((Edit::Tab(id), t.label().unwrap_or_default().to_string()));
+            self.window.request_redraw();
+        }
+    }
+
+    /// Lleva a la vista el tab `id` (su grupo y su posición).
+    fn show_tab(&mut self, id: u64) {
+        let Some(gi) = self.ws.group_of(id) else { return };
+        let ti = self.ws.groups[gi].tabs.iter().position(|t| *t == id).unwrap_or(0);
+        self.ws.select_group(gi);
+        self.ws.select_tab(ti);
+        self.after_switch();
+    }
+
+    /// ⌘K: borra la pantalla y el scrollback. Si en primer plano hay una shell o Claude,
+    /// se le manda Ctrl-L para que vuelva a dibujar su prompt arriba.
+    fn clear_terminal(&mut self, id: u64) {
+        let Some(t) = self.terms.get(&id).filter(|t| !t.is_suspended()) else { return };
+        {
+            let mut term = t.term.lock();
+            term.scroll_display(Scroll::Bottom);
+            // All lleva la pantalla al scrollback; Saved vacía el scrollback.
+            term.clear_screen(ClearMode::All);
+            term.clear_screen(ClearMode::Saved);
+            term.selection = None;
+        }
+        let redraw = t.process.as_deref().is_none_or(|p| proc::is_shell(p) || p == "claude");
+        if redraw {
+            t.write(b"\x0c".to_vec());
+        }
+        self.window.request_redraw();
+    }
+
+    /// Abre el menú contextual de un tab (`tab`) o de un grupo, en la posición del puntero.
+    fn open_menu(&mut self, tab: Option<u64>, group: usize) {
+        let suspended = |id: &u64| self.terms.get(id).is_some_and(Terminal::is_suspended);
+        let group_asleep = self.suspendable(group).is_empty();
+        let mut items = Vec::new();
+        if let Some(id) = tab {
+            if self.ws.active_term() != Some(id) {
+                items.push(MenuItem::new("Mostrar", "", Action::Show));
+            }
+            if suspended(&id) {
+                items.push(MenuItem::new("Reanudar", "↩", Action::Resume));
+            } else {
+                items.push(MenuItem::new("Suspender", "⌘S", Action::Suspend));
+                items.push(MenuItem::new("Limpiar", "⌘K", Action::Clear));
+            }
+            items.push(MenuItem::new("Renombrar tab", "", Action::RenameTab));
+            items.push(MenuItem::new("Cerrar tab", "⌘W", Action::CloseTab));
+            items.push(MenuItem::separator());
+        } else {
+            items.push(MenuItem::new("Nuevo tab", "⌘T", Action::NewTab));
+            items.push(MenuItem::new("Nuevo agente (claude)", "⌘⇧T", Action::NewAgent));
+            items.push(MenuItem::separator());
+        }
+        items.push(MenuItem::new("Renombrar grupo", "⌘⇧R", Action::RenameGroup));
+        if group_asleep {
+            items.push(MenuItem::new("Reanudar grupo", "⌘⇧S", Action::ResumeGroup));
+        } else {
+            items.push(MenuItem::new("Suspender grupo", "⌘⇧S", Action::SuspendGroup));
+        }
+        let l = self.layout();
+        self.menu = Some(Menu::new(self.cursor.0, self.cursor.1, tab, group, items, &l));
+        self.editing = None;
+        self.window.set_cursor(CursorIcon::Default);
+        self.window.request_redraw();
+    }
+
+    fn run_menu(&mut self, action: Action) {
+        let Some(menu) = self.menu.take() else { return };
+        let (tab, gi) = (menu.tab, menu.group);
+        match (action, tab) {
+            (Action::Show, Some(id)) => self.show_tab(id),
+            (Action::Suspend, Some(id)) => {
+                self.suspend(id);
+            }
+            (Action::Resume, Some(id)) => {
+                self.resume(id);
+            }
+            (Action::Clear, Some(id)) => self.clear_terminal(id),
+            (Action::RenameTab, Some(id)) => self.start_rename_tab(id),
+            (Action::CloseTab, Some(id)) => {
+                if self.close_term(id) {
+                    // Era el último tab: Telar empieza de nuevo con un grupo vacío en lugar de cerrarse.
+                    self.new_group();
+                }
+                self.resize_terms();
+            }
+            (Action::NewTab | Action::NewAgent, _) => {
+                self.ws.select_group(gi);
+                if action == Action::NewAgent {
+                    self.new_agent();
+                } else {
+                    self.new_tab();
+                }
+                self.after_switch();
+            }
+            (Action::RenameGroup, _) => self.start_rename(gi),
+            (Action::SuspendGroup | Action::ResumeGroup, _) => self.toggle_suspend_group(gi),
+            _ => {}
+        }
+        self.window.request_redraw();
+    }
+
+    /// Teclas con el menú abierto: flechas, Enter y Esc. Cualquier otra lo cierra.
+    fn menu_key(&mut self, event: &KeyEvent) {
+        let Some(menu) = self.menu.as_mut() else { return };
+        match &event.logical_key {
+            Key::Named(NamedKey::ArrowDown) => menu.step(1),
+            Key::Named(NamedKey::ArrowUp) => menu.step(-1),
+            Key::Named(NamedKey::Enter) => {
+                if let Some(action) = menu.hover.and_then(|i| menu.items[i].action) {
+                    self.run_menu(action);
+                }
+            }
+            _ => self.menu = None,
+        }
+        self.window.request_redraw();
     }
 
     /// Devuelve `true` si hay que cerrar la app.
     fn on_key(&mut self, event: &KeyEvent) -> bool {
         let m = self.mods;
 
-        // Renombrando un grupo: el teclado edita el nombre.
-        if let Some((gi, buf)) = self.editing.as_mut() {
+        if self.menu.is_some() {
+            self.menu_key(event);
+            return false;
+        }
+
+        // Renombrando un grupo o un tab: el teclado edita el nombre.
+        if let Some((target, buf)) = self.editing.as_mut() {
             match &event.logical_key {
                 Key::Named(NamedKey::Enter) => {
                     let name = buf.trim().to_string();
-                    let gi = *gi;
-                    if !name.is_empty() {
-                        if let Some(g) = self.ws.groups.get_mut(gi) {
-                            g.name = name;
+                    match *target {
+                        Edit::Group(gi) => {
+                            if let Some(g) = self.ws.groups.get_mut(gi).filter(|_| !name.is_empty()) {
+                                g.name = name;
+                            }
+                        }
+                        // Vacío: vuelve el título automático.
+                        Edit::Tab(id) => {
+                            if let Some(t) = self.terms.get_mut(&id) {
+                                t.name = (!name.is_empty()).then_some(name);
+                            }
                         }
                     }
                     self.editing = None;
@@ -696,7 +846,12 @@ impl State {
             "c" => self.copy_selection(),
             "v" => self.paste(),
             "r" if m.shift_key() => self.start_rename(self.ws.active),
-            "s" if m.shift_key() => self.toggle_suspend_group(),
+            "s" if m.shift_key() => self.toggle_suspend_group(self.ws.active),
+            "k" => {
+                if let Some(id) = self.ws.active_term() {
+                    self.clear_terminal(id);
+                }
+            }
             "s" => self.toggle_suspend_tab(),
             "=" | "+" => {
                 self.font_pt = (self.font_pt + 1.0).min(36.0);
@@ -752,6 +907,15 @@ impl State {
     fn on_cursor_moved(&mut self, pos: PhysicalPosition<f64>) {
         self.cursor = (pos.x as f32, pos.y as f32);
         let l = self.layout();
+        if let Some(menu) = self.menu.as_mut() {
+            let hover = menu.item_at(self.cursor.0, self.cursor.1, self.window.scale_factor() as f32);
+            if hover != menu.hover {
+                menu.hover = hover;
+                self.window.set_cursor(if hover.is_some() { CursorIcon::Pointer } else { CursorIcon::Default });
+                self.window.request_redraw();
+            }
+            return;
+        }
         let n_tabs = self.ws.group().map_or(0, |g| g.tabs.len());
         let hit = l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs);
         if hit != self.hover {
@@ -792,6 +956,20 @@ impl State {
         let hit = l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs);
         let pressed = state == ElementState::Pressed;
 
+        // Menú abierto: un clic elige una opción o lo cierra; no llega a lo de abajo.
+        if let Some(menu) = &self.menu {
+            if pressed {
+                let item = menu.item_at(self.cursor.0, self.cursor.1, l.s());
+                match item.and_then(|i| menu.items[i].action) {
+                    Some(action) if button == MouseButton::Left => self.run_menu(action),
+                    _ => self.menu = None,
+                }
+                self.on_cursor_moved(PhysicalPosition::new(self.cursor.0 as f64, self.cursor.1 as f64));
+                self.window.request_redraw();
+            }
+            return;
+        }
+
         if !pressed {
             if let Some(b) = self.mouse_button.take() {
                 let (col, row, _) = l.cell_at(self.cursor.0, self.cursor.1);
@@ -807,7 +985,12 @@ impl State {
         self.clicks = (now, hit, count);
 
         if hit != Hit::Terminal && button == MouseButton::Left {
-            if !matches!(hit, Hit::Group(i) if self.editing.as_ref().is_some_and(|(g, _)| *g == i)) {
+            let edited = match (hit, self.editing.as_ref().map(|(e, _)| *e)) {
+                (Hit::Group(i), Some(Edit::Group(g))) => i == g,
+                (Hit::Tab(i), Some(Edit::Tab(id))) => self.ws.group().and_then(|g| g.tabs.get(i)) == Some(&id),
+                _ => false,
+            };
+            if !edited {
                 self.editing = None;
             }
         }
@@ -825,9 +1008,22 @@ impl State {
                 self.new_group();
             }
             (Hit::Tab(i), MouseButton::Left) => {
-                self.ws.select_tab(i);
-                self.after_switch();
+                let id = self.ws.group().and_then(|g| g.tabs.get(i).copied());
+                if count >= 2 {
+                    if let Some(id) = id {
+                        self.start_rename_tab(id);
+                    }
+                } else {
+                    self.ws.select_tab(i);
+                    self.after_switch();
+                }
             }
+            (Hit::Tab(i) | Hit::CloseTab(i), MouseButton::Right) => {
+                if let Some(id) = self.ws.group().and_then(|g| g.tabs.get(i).copied()) {
+                    self.open_menu(Some(id), self.ws.active);
+                }
+            }
+            (Hit::Group(i), MouseButton::Right) => self.open_menu(None, i),
             (Hit::Tab(i), MouseButton::Middle) | (Hit::CloseTab(i), MouseButton::Left) => {
                 if let Some(id) = self.ws.group().and_then(|g| g.tabs.get(i).copied()) {
                     self.close_term(id);
@@ -1022,6 +1218,13 @@ impl State {
             },
             Some("new") => self.ipc_new(body),
             Some("group") => self.ipc_group(body),
+            Some("clear") => match self.resolve_tab(&body["tab"]) {
+                Ok(id) => {
+                    self.clear_terminal(id);
+                    json!({ "ok": true, "id": id })
+                }
+                Err(e) => json!({ "ok": false, "error": e }),
+            },
             Some("awake") => {
                 if let Some(s) = body["mode"].as_str() {
                     let Some(mode) = awake::Mode::parse(s) else {
@@ -1058,7 +1261,7 @@ impl State {
         let matches: Vec<u64> = self
             .terms
             .iter()
-            .filter(|(_, t)| t.title.as_deref().is_some_and(|title| title.to_lowercase().contains(&lower)))
+            .filter(|(_, t)| [&t.name, &t.title].iter().any(|v| v.as_deref().is_some_and(|v| v.to_lowercase().contains(&lower))))
             .map(|(id, _)| *id)
             .collect();
         match matches.as_slice() {
@@ -1199,6 +1402,7 @@ impl State {
             "id": id,
             "group": group,
             "title": t.title,
+            "name": t.name,
             "process": t.process,
             "state": t.agent.state.name(),
             "suspended": t.is_suspended(),
@@ -1259,7 +1463,7 @@ impl State {
                         } else {
                             t.cwd()
                         };
-                        SavedTab { title: t.title.clone(), cwd, claude, screen }
+                        SavedTab { title: t.title.clone(), name: t.name.clone(), cwd, claude, screen }
                     })
                     .collect(),
             })
@@ -1308,6 +1512,7 @@ impl State {
                     }
                 };
                 t.title = tab.title;
+                t.name = tab.name;
                 self.terms.insert(id, t);
                 tabs.push(id);
             }
@@ -1396,6 +1601,24 @@ impl State {
             let text = text.replace("\\n", "\r");
             self.send_input(text.into_bytes());
         }
+        // TELAR_SNAPSHOT_MENU=tab|group: captura con el menú contextual abierto.
+        match std::env::var("TELAR_SNAPSHOT_MENU").as_deref() {
+            Ok("tab") => {
+                let s = self.window.scale_factor() as f32;
+                self.cursor = (500.0 * s, 24.0 * s);
+                let id = self.ws.active_term();
+                self.open_menu(id, self.ws.active);
+                if let Some(m) = self.menu.as_mut() {
+                    m.hover = Some(1);
+                }
+            }
+            Ok("group") => {
+                let s = self.window.scale_factor() as f32;
+                self.cursor = (60.0 * s, 125.0 * s);
+                self.open_menu(None, 1);
+            }
+            _ => {}
+        }
     }
 
     fn draw(&mut self) {
@@ -1404,12 +1627,13 @@ impl State {
             ws: &self.ws,
             terms: &self.terms,
             hover: self.hover,
-            editing: self.editing.as_ref().map(|(g, s)| (*g, s.as_str())),
+            editing: self.editing.as_ref().map(|(e, s)| (*e, s.as_str())),
             preedit: &self.preedit,
             focused: self.focused,
             palette: &self.palette,
             time: self.started.elapsed().as_secs_f32(),
             awake: (self.awake.mode, self.awake.active()),
+            menu: self.menu.as_ref(),
         };
         let ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
         if let Some((col, row)) = ime_cell {

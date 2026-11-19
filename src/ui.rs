@@ -90,6 +90,11 @@ impl Layout {
         Self { s, w, h, tab_w, cell_w: fonts.cell_w, cell_h: fonts.cell_h, grid_x, grid_y, cols, rows }
     }
 
+    /// Factor de escala (píxeles por punto).
+    pub fn s(&self) -> f32 {
+        self.s
+    }
+
     pub fn grid_size(&self) -> GridSize {
         GridSize { cols: self.cols, rows: self.rows, cell_w: self.cell_w as u16, cell_h: self.cell_h as u16 }
     }
@@ -123,10 +128,11 @@ impl Layout {
         Rect { w: NEW_TAB_W * self.s, ..r }
     }
 
-    /// Fila de «Despierto», al pie de la barra lateral.
+    /// Bloque de «Despierto», al pie de la barra lateral (dos líneas).
     fn awake_rect(&self) -> Rect {
         let s = self.s;
-        Rect { x: 8.0 * s, y: self.h - (GROUP_ROW_H + 8.0) * s, w: (SIDEBAR_W - 16.0) * s, h: (GROUP_ROW_H - 2.0) * s }
+        let h = 2.0 * self.cell_h + 16.0 * s;
+        Rect { x: 8.0 * s, y: self.h - h - 8.0 * s, w: (SIDEBAR_W - 16.0) * s, h }
     }
 
     pub fn hit(&self, x: f32, y: f32, n_groups: usize, n_tabs: usize) -> Hit {
@@ -175,11 +181,112 @@ impl Layout {
     }
 }
 
+/// Qué se está renombrando.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edit {
+    Group(usize),
+    Tab(u64),
+}
+
+/// Acciones del menú contextual.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Show,
+    Suspend,
+    Resume,
+    RenameTab,
+    Clear,
+    CloseTab,
+    NewTab,
+    NewAgent,
+    RenameGroup,
+    SuspendGroup,
+    ResumeGroup,
+}
+
+pub struct MenuItem {
+    pub label: &'static str,
+    /// Atajo de teclado, a la derecha.
+    pub hint: &'static str,
+    /// `None`: separador.
+    pub action: Option<Action>,
+}
+
+impl MenuItem {
+    pub fn new(label: &'static str, hint: &'static str, action: Action) -> Self {
+        Self { label, hint, action: Some(action) }
+    }
+
+    pub fn separator() -> Self {
+        Self { label: "", hint: "", action: None }
+    }
+}
+
+/// Menú contextual (clic derecho en un tab o un grupo), dibujado sobre todo lo demás.
+pub struct Menu {
+    pub x: f32,
+    pub y: f32,
+    /// Tab sobre el que se abrió (si fue sobre un tab).
+    pub tab: Option<u64>,
+    pub group: usize,
+    pub items: Vec<MenuItem>,
+    pub hover: Option<usize>,
+}
+
+const MENU_W: f32 = 250.0;
+const MENU_ITEM_H: f32 = 26.0;
+const MENU_SEP_H: f32 = 9.0;
+const MENU_PAD: f32 = 5.0;
+
+impl Menu {
+    /// Abre el menú en (x, y), corrido para que no se salga de la ventana.
+    pub fn new(x: f32, y: f32, tab: Option<u64>, group: usize, items: Vec<MenuItem>, l: &Layout) -> Self {
+        let mut m = Self { x, y, tab, group, items, hover: None };
+        let b = m.bounds(l.s);
+        m.x = m.x.min(l.w - b.w - 4.0 * l.s).max(0.0);
+        m.y = m.y.min(l.h - b.h - 4.0 * l.s).max(0.0);
+        m
+    }
+
+    pub fn bounds(&self, s: f32) -> Rect {
+        let h: f32 = self.items.iter().map(|i| if i.action.is_some() { MENU_ITEM_H } else { MENU_SEP_H }).sum();
+        Rect { x: self.x, y: self.y, w: MENU_W * s, h: (h + 2.0 * MENU_PAD) * s }
+    }
+
+    fn rows(&self, s: f32) -> impl Iterator<Item = (usize, Rect)> + '_ {
+        let mut y = self.y + MENU_PAD * s;
+        self.items.iter().enumerate().map(move |(i, item)| {
+            let h = if item.action.is_some() { MENU_ITEM_H } else { MENU_SEP_H } * s;
+            let r = Rect { x: self.x + MENU_PAD * s, y, w: (MENU_W - 2.0 * MENU_PAD) * s, h };
+            y += h;
+            (i, r)
+        })
+    }
+
+    /// Opción bajo el puntero (los separadores no cuentan).
+    pub fn item_at(&self, x: f32, y: f32, s: f32) -> Option<usize> {
+        self.rows(s).find(|(i, r)| self.items[*i].action.is_some() && r.contains(x, y)).map(|(i, _)| i)
+    }
+
+    /// Mueve la selección con el teclado (`delta` = ±1), saltando separadores.
+    pub fn step(&mut self, delta: isize) {
+        let n = self.items.len() as isize;
+        let mut i = self.hover.map_or(if delta > 0 { -1 } else { n }, |h| h as isize);
+        for _ in 0..n {
+            i = (i + delta).rem_euclid(n);
+            if self.items[i as usize].action.is_some() {
+                self.hover = Some(i as usize);
+                return;
+            }
+        }
+    }
+}
+
 pub struct View<'a> {
     pub ws: &'a Workspace,
     pub terms: &'a HashMap<u64, Terminal>,
     pub hover: Hit,
-    pub editing: Option<(usize, &'a str)>,
+    pub editing: Option<(Edit, &'a str)>,
     pub preedit: &'a str,
     pub focused: bool,
     pub palette: &'a [Rgba; COUNT],
@@ -187,6 +294,7 @@ pub struct View<'a> {
     pub time: f32,
     /// Modo de `caffeinate` y si está corriendo ahora.
     pub awake: (awake::Mode, bool),
+    pub menu: Option<&'a Menu>,
 }
 
 /// Prioridad y color del indicador de un tab (None = sin indicador).
@@ -261,11 +369,38 @@ pub fn draw(out: &mut Vec<Quad>, fg: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layo
         ime_cell = draw_terminal(out, fg, fonts, l, &term, v);
     }
     out.append(fg);
-    if active.is_some_and(Terminal::is_suspended) {
+    let suspended = active.is_some_and(Terminal::is_suspended);
+    if suspended {
         draw_suspended(out, fonts, l);
-        return None;
     }
-    ime_cell
+    if let Some(m) = v.menu {
+        draw_menu(out, fonts, l, m);
+    }
+    if suspended { None } else { ime_cell }
+}
+
+fn draw_menu(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, m: &Menu) {
+    let s = l.s;
+    let b = m.bounds(s);
+    // Sombra suave, borde y fondo.
+    out.push(Quad::rounded(b.x - 2.0 * s, b.y + 1.0 * s, b.w + 4.0 * s, b.h + 4.0 * s, 10.0 * s, [0.0, 0.0, 0.0, 0.35]));
+    out.push(Quad::rounded(b.x - s, b.y - s, b.w + 2.0 * s, b.h + 2.0 * s, 9.0 * s, theme::BORDER));
+    out.push(Quad::rounded(b.x, b.y, b.w, b.h, 8.0 * s, theme::CHROME_BG));
+    let ch = fonts.cell_h;
+    for (i, r) in m.rows(s) {
+        let item = &m.items[i];
+        if item.action.is_none() {
+            out.push(Quad::rect(r.x + 6.0 * s, r.y + r.h / 2.0, r.w - 12.0 * s, s, theme::BORDER));
+            continue;
+        }
+        if m.hover == Some(i) {
+            out.push(Quad::rounded(r.x, r.y, r.w, r.h, 5.0 * s, theme::ITEM_ACTIVE));
+        }
+        let ty = r.y + (r.h - ch) / 2.0;
+        let hint_w = item.hint.chars().count() as f32 * fonts.cell_w;
+        text(out, fonts, r.x + 10.0 * s, ty, item.label, theme::TEXT, r.w - hint_w - 30.0 * s);
+        text(out, fonts, r.x + r.w - 10.0 * s - hint_w, ty, item.hint, theme::TEXT_DIM, hint_w + 1.0);
+    }
 }
 
 /// Marca de tab suspendido (en lugar del punto de estado).
@@ -316,7 +451,7 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
         let name_w = r.w - 24.0 * s - badge_w - 8.0 * s;
 
         match v.editing {
-            Some((gi, buf)) if gi == i => {
+            Some((Edit::Group(gi), buf)) if gi == i => {
                 let w = text(out, fonts, tx, ty, buf, theme::TEXT, name_w);
                 out.push(Quad::rect(tx + w + s, ty + 2.0 * s, 2.0 * s, ch - 4.0 * s, theme::ACCENT));
             }
@@ -344,20 +479,41 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
     let color = if hovered { theme::TEXT } else { theme::TEXT_DIM };
     text(out, fonts, r.x + 12.0 * s, r.y + (r.h - ch) / 2.0, "+ Nuevo grupo", color, r.w - 24.0 * s);
 
-    // Pie: «Despierto» (caffeinate). Punto azul mientras está corriendo.
+    // Pie: «Despierto» (caffeinate). Taza a color con círculo verde si está corriendo;
+    // atenuada y con círculo gris si no.
     let r = l.awake_rect();
     let hovered = v.hover == Hit::Awake;
     if hovered {
         out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_HOVER));
     }
     let (mode, running) = v.awake;
-    let color = if hovered || mode != awake::Mode::Off { theme::TEXT } else { theme::TEXT_DIM };
-    let ty = r.y + (r.h - ch) / 2.0;
-    text(out, fonts, r.x + 12.0 * s, ty, mode.label(), color, r.w - 40.0 * s);
-    if running {
-        let d = 7.0 * s;
-        dot(out, r.x + r.w - 12.0 * s - d, r.y + r.h / 2.0, d, theme::ACCENT);
+    let on = mode != awake::Mode::Off;
+    let x = r.x + 10.0 * s;
+    let y1 = r.y + 6.0 * s;
+    let y2 = y1 + ch + 4.0 * s;
+    // Taza del alto de las dos líneas.
+    let icon = 26.0 * s;
+    let iy = r.y + (r.h - icon) / 2.0;
+    if let Some(g) = fonts.glyph('☕', font::REGULAR) {
+        let alpha = if running { 1.0 } else if on { 0.75 } else { 0.35 };
+        let k = icon / g.uv[2].max(g.uv[3]);
+        let (w, h) = (g.uv[2] * k, g.uv[3] * k);
+        let kind = if g.color { KIND_COLOR } else { KIND_MASK };
+        let color = if g.color { [1.0, 1.0, 1.0, alpha] } else { theme::TEXT_DIM };
+        out.push(Quad { rect: [x + (icon - w) / 2.0, iy + (icon - h) / 2.0, w, h], uv: g.uv, color, params: [kind, 0.0, 0.0, 0.0] });
     }
+    // Círculo de estado, abajo a la derecha de la taza.
+    let d = 9.0 * s;
+    let (cx, cy) = (x + icon - d / 2.0, iy + icon - d / 2.0);
+    let bg = if hovered { theme::ITEM_HOVER } else { theme::CHROME_BG };
+    // Anillo del color del fondo, para separar el círculo de la taza.
+    let ring = d + 3.0 * s;
+    out.push(Quad::rounded(cx - ring / 2.0, cy - ring / 2.0, ring, ring, ring / 2.0, bg));
+    dot(out, cx - d / 2.0, cy, d, if running { theme::DONE } else { theme::MUTED });
+    let color = if hovered || on { theme::TEXT } else { theme::TEXT_DIM };
+    let tx = x + icon + 10.0 * s;
+    text(out, fonts, tx, y1, mode.label(), color, r.x + r.w - tx - 6.0 * s);
+    text(out, fonts, tx, y2, "⌘⇧C para cambiar", theme::TEXT_DIM, r.x + r.w - tx - 6.0 * s);
 }
 
 fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> Option<()> {
@@ -378,11 +534,7 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
             out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_HOVER));
         }
         let fallback = format!("Tab {}", i + 1);
-        let title = v
-            .terms
-            .get(id)
-            .and_then(|t| t.title.as_deref().or(t.process.as_deref()))
-            .unwrap_or(&fallback);
+        let title = v.terms.get(id).and_then(Terminal::label).unwrap_or(&fallback);
         let close = l.tab_close_rect(i);
         let suspended = v.terms.get(id).is_some_and(Terminal::is_suspended);
         let color = if active && !suspended { theme::TEXT } else { theme::TEXT_DIM };
@@ -396,7 +548,15 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
             dot(out, tx, r.y + r.h / 2.0, d, color);
             tx += d + 7.0 * s;
         }
-        text(out, fonts, tx, ty, title, color, close.x - tx - 4.0 * s);
+        match v.editing {
+            Some((Edit::Tab(e), buf)) if e == *id => {
+                let w = text(out, fonts, tx, ty, buf, theme::TEXT, close.x - tx - 8.0 * s);
+                out.push(Quad::rect(tx + w + s, ty + 2.0 * s, 2.0 * s, ch - 4.0 * s, theme::ACCENT));
+            }
+            _ => {
+                text(out, fonts, tx, ty, title, color, close.x - tx - 4.0 * s);
+            }
+        }
         if active || hovered {
             if v.hover == Hit::CloseTab(i) {
                 out.push(Quad::rounded(close.x, close.y, close.w, close.h, 4.0 * s, theme::BORDER));

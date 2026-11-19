@@ -52,6 +52,7 @@ telar group [--group G] [--dir DIR] [--name N]             # ver o cambiar la ca
 telar suspend <tab> | --group G [--force]                  # suspender (ver abajo)
 telar resume <tab> | --group G                             # reanudar
 telar awake [on|off|auto]                                  # mantener el Mac despierto
+telar clear <tab>                                          # limpiar pantalla y scrollback (como ⌘K)
 ```
 
 `<tab>` puede ser el id, `self`, `grupo/n` (n desde 1) o parte del título.
@@ -70,7 +71,7 @@ Para tener muchas sesiones a la vista sin que consuman recursos:
 
 ## Mantener el Mac despierto
 
-Abajo en la barra lateral, **Despierto** (clic o **⌘⇧C**) alterna entre:
+Abajo en la barra lateral, **Despierto** (clic o **⌘⇧C**) alterna entre los modos. La taza se ve a color con un círculo verde mientras `caffeinate` corre, y atenuada con un círculo gris si no:
 
 | Modo | Efecto |
 |---|---|
@@ -78,7 +79,7 @@ Abajo en la barra lateral, **Despierto** (clic o **⌘⇧C**) alterna entre:
 | siempre | `caffeinate -dims` mientras Telar esté abierto |
 | Claude | solo mientras algún Claude esté trabajando |
 
-El punto azul indica que `caffeinate` está corriendo. Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina solo. El modo se guarda en la sesión.
+Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina solo. El modo se guarda en la sesión.
 
 ## Modelo
 
@@ -94,6 +95,9 @@ El punto azul indica que `caffeinate` está corriendo. Va con `-w <pid de Telar>
 |---|---|
 | ⌘T | Nuevo tab en el grupo activo (en la carpeta del grupo) |
 | ⌘⇧T | Nuevo agente: tab que arranca `claude` |
+| ⌘K | Limpiar la pantalla y el scrollback |
+| Clic derecho en un tab o grupo | Menú: suspender/reanudar, limpiar, renombrar, cerrar, nuevo tab o agente |
+| Doble clic en un tab | Renombrar el tab (vacío: vuelve el título automático) |
 | ⌘S | Suspender o reanudar el tab activo (Enter también reanuda) |
 | ⌘⇧S | Suspender o reanudar el grupo activo |
 | ⌘⇧C | Despierto: no → siempre → mientras Claude trabaja |

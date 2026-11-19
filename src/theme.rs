@@ -23,6 +23,8 @@ pub const TEXT: Rgba = hex(0xd6dae3);
 pub const TEXT_DIM: Rgba = hex(0x7d8390);
 pub const ATTENTION: Rgba = hex(0xe6b450);
 pub const DONE: Rgba = hex(0x9ccf7e);
+/// Gris de un indicador apagado.
+pub const MUTED: Rgba = hex(0x50555f);
 pub const SELECTION: Rgba = hex(0x2f4a6e);
 
 // Terminal.

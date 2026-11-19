@@ -48,7 +48,7 @@ impl Mode {
     pub fn label(self) -> &'static str {
         match self {
             Mode::Off => "Despierto: no",
-            Mode::On => "Despierto: siempre",
+            Mode::On => "Despierto: sí",
             Mode::Auto => "Despierto: Claude",
         }
     }
