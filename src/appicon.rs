@@ -168,6 +168,23 @@ pub fn apply(id: &str, persist: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Hace que macOS no mueva la ventana al arrastrar en la barra de título. Los tabs viven
+/// ahí: sin esto, arrastrar un tab movía la ventana entera en vez de reordenarlo. La
+/// ventana se sigue moviendo desde las zonas vacías de la barra (`Window::drag_window`,
+/// que usa `performWindowDragWithEvent:` y funciona aunque la ventana no sea movible).
+pub fn set_window_movable(window: &winit::window::Window, movable: bool) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    unsafe {
+        let view = h.ns_view.as_ptr() as *const AnyObject;
+        let ns_window: Option<Retained<AnyObject>> = msg_send![&*view, window];
+        if let Some(w) = ns_window {
+            let _: () = msg_send![&*w, setMovable: movable];
+        }
+    }
+}
+
 /// Selector de archivos de macOS para elegir una imagen. Bloquea hasta que se cierra.
 pub fn pick_file() -> Option<PathBuf> {
     unsafe {

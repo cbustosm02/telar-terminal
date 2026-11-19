@@ -212,6 +212,7 @@ impl ApplicationHandler<UserEvent> for App {
             .with_active(std::env::var_os("TELAR_SNAPSHOT").is_none());
         let window = Arc::new(event_loop.create_window(attrs).expect("ventana"));
         window.set_ime_allowed(true);
+        appicon::set_window_movable(&window, false);
         let renderer = pollster::block_on(Renderer::new(window.clone()));
         let scale = window.scale_factor() as f32;
         let config = config::Config::load();
@@ -1291,6 +1292,12 @@ impl State {
             }
             self.selecting = false;
             return;
+        }
+
+        // macOS mueve la ventana al arrastrar en la barra de título, donde están los tabs:
+        // solo se permite desde sus zonas vacías, así arrastrar un tab lo reordena.
+        if button == MouseButton::Left {
+            appicon::set_window_movable(&self.window, hit == Hit::Drag);
         }
 
         // Conteo de clics para doble/triple clic.
