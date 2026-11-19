@@ -2132,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "telar"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "alacritty_terminal",
  "arboard",
