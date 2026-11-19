@@ -1038,6 +1038,12 @@ fn draw_update(k: &mut Kit, l: &Layout, v: &View) {
         k.rounded(r, 7.0, th.hover);
     }
     let bg = if hovered { th.hover } else { th.chrome };
+    // Versión nueva: un solo botón a todo el ancho con la versión, que si no, no cabe.
+    if let Status::Available(rel) = v.update {
+        let b = Rect { x: r.x + 4.0 * s, y: r.y + (r.h - 32.0 * s) / 2.0, w: r.w - 8.0 * s, h: 32.0 * s };
+        k.button(b, &format!("Actualizar a {}", rel.version), Some(icons::DOWNLOAD), Variant::Primary, hovered);
+        return;
+    }
     let pct;
     let (icon, icon_color, desc): (char, Rgba, &str) = match v.update {
         Status::Idle => (icons::TERMINAL, th.text_dim, "Buscar versión"),

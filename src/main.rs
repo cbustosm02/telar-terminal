@@ -3049,6 +3049,10 @@ impl State {
             self.claude_use.insert("persona@ejemplo.com|".into(), claude_usage::parse(&v));
             self.claude_account = Some(claude_usage::Account { email: Some("persona@ejemplo.com".into()), plan: Some("Max".into()) });
         }
+        // TELAR_SNAPSHOT_UPDATE=X.Y.Z: captura con esa versión disponible.
+        if let Ok(version) = std::env::var("TELAR_SNAPSHOT_UPDATE") {
+            self.update = update::Status::Available(update::Release { version, url: String::new(), sha_url: String::new(), size: 0 });
+        }
         // TELAR_SNAPSHOT_DELETE=n: captura con la confirmación de eliminar el grupo n.
         if let Some(gi) = std::env::var("TELAR_SNAPSHOT_DELETE").ok().and_then(|v| v.parse().ok()) {
             self.ask_delete_group(gi);

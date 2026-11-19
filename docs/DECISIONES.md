@@ -236,3 +236,7 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - **Frecuencia:** la activa al abrir, cada minuto y al terminar una respuesta de Claude (al menos 20 s entre consultas); las demás solo al abrir el menú de cuentas (no se usan; así se renuevan menos tokens).
 - **Bloques ocultos:** con el uso de Claude oculto no se consulta nada; con los medidores ocultos el muestreo de CPU/RAM/GPU se detiene, salvo que haya un límite de memoria o estén abiertos el detalle o la sección Rendimiento. La suspensión por inactividad pasó al reloj de `periodic` (antes iba con cada muestra).
 - Menú: los ítems pueden llevar un texto a la derecha (el uso) y una ✕ con su propia acción (quitar la cuenta), para distinguir dos cuentas con el mismo correo.
+
+## Botón de actualizar con la versión (2026-11-19)
+
+- El botón decía solo «Actualizar»: con el título y el ícono al lado, «Actualizar a X.Y.Z» no cabía en el ancho de la barra lateral. Con una versión disponible, el bloque es ahora un solo botón a todo el ancho, «Actualizar a X.Y.Z», con el ícono de descarga. `TELAR_SNAPSHOT_UPDATE=X.Y.Z` lo simula en el modo captura.
