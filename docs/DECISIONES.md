@@ -204,3 +204,10 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - Claude Code avisa su `session_id` al abrirse (SessionStart), pero su archivo (`~/.claude/projects/<carpeta>/<id>.jsonl`) recién aparece con el primer mensaje. Un Claude abierto sin escribirle dejaba un id sin conversación y, al reabrir Telar, `claude --resume` fallaba con «No conversation found». Ahora `claude_session_exists` busca el archivo (respeta `CLAUDE_CONFIG_DIR`) antes de retomar, al restaurar y al reanudar un tab suspendido; si no está, el tab abre la shell en su carpeta y se descarta el título viejo de Claude.
 - Claude deja el título vacío al salir: un título vacío cuenta como sin título y el tab muestra el proceso (`zsh`).
 - En los tabs con Claude se quitan los símbolos del comienzo del título (`✳`, el indicador que gira): el tab ya muestra el logo de Claude. Los nombres puestos por el usuario no se tocan.
+
+## Enlaces dentro de Claude, ⌘←/⌘→ y siempre la última versión (2026-11-19)
+
+- Los enlaces no se abrían dentro de Claude Code: activa el modo mouse (`?1000h`, `?1006h`) y Telar le pasaba el clic solo a él (hacía falta ⌘ + clic). Ahora un clic simple sobre un enlace lo abre en cualquier modo; si la app pidió el mouse, el clic le llega igual. Para distinguirlo de una selección se mira cuánto se movió el puntero (menos de 4 pt) y no si la selección quedó vacía: un temblor dentro de la misma letra cambia el lado de la celda y dejaba una selección de una letra.
+- Los enlaces se pintan con el azul brillante del tema (ANSI 12); el que está bajo el puntero, con el acento.
+- ⌘← y ⌘→ mandan Ctrl+A y Ctrl+E (inicio y final de la línea), como ⌘⌫ manda Ctrl+U.
+- Actualizaciones: Telar buscaba solo al abrirse y guardaba lo encontrado; si salía otra versión, «Actualizar» instalaba la vieja y había que repetir. Ahora `update::install` vuelve a consultar antes de descargar e instala la más nueva, y cada hora se busca en segundo plano (`check_quietly`: sin «Buscando…» y sin avisar errores de red). Un resultado tardío no pisa una instalación en curso.

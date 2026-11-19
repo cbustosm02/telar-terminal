@@ -996,7 +996,7 @@ fn draw_terminal(
     let x0 = l.sidebar_w();
     out.push(Quad::rect(x0, l.titlebar_h(), l.w - x0, l.h - l.titlebar_h(), default_bg));
 
-    // Enlaces: subrayados; el que está bajo el puntero, además, con el color de acento.
+    // Enlaces: subrayados y en azul (el del tema); el que está bajo el puntero, con el acento.
     let links = crate::links::scan(term);
     let link_at = |col: usize, row: usize| links.iter().position(|k| k.contains(col, row));
     let hovered_link = v.link_cell.and_then(|(c, r)| link_at(c, r));
@@ -1032,8 +1032,8 @@ fn draw_terminal(
             cbg = theme::t().selection;
         }
         let link = if links.is_empty() { None } else { link_at(p.column.0, row as usize) };
-        if link.is_some() && link == hovered_link {
-            cfg = theme::t().accent;
+        if link.is_some() {
+            cfg = if link == hovered_link { theme::t().accent } else { v.palette[NamedColor::BrightBlue as usize] };
         }
         if block_cursor && p == cursor.point {
             cbg = cursor_color;

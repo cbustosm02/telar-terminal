@@ -32,6 +32,7 @@ Al pie de la barra lateral se ve la versión. Telar busca una nueva al abrirse (
 
 - Las versiones salen de los releases de GitHub del repo. Se publican con `scripts/release.sh X.Y.Z`: sube la versión, hace commit y empuja el tag; el workflow `Release` corre las pruebas, compila un binario universal (Apple Silicon e Intel) y publica el paquete con su SHA-256.
 - La descarga va a una carpeta temporal junto al binario. Se verifica el SHA-256 y que el binario nuevo arranque con la versión anunciada; luego reemplaza al actual de forma atómica. **La carpeta temporal se borra siempre**, salga bien o mal, y al abrir se limpian restos de una actualización interrumpida. No se guardan versiones viejas.
+- Además de al abrirse, busca cada hora en segundo plano. Al actualizar vuelve a consultar y, si salió otra versión después de la que mostraba, instala la última: no hace falta actualizar dos veces.
 - Desde la terminal: `telar update --check` (solo busca) y `telar update`.
 - Una compilación de desarrollo (`target/…`) no se actualiza sola: se actualiza con `git pull` y `cargo build`.
 
@@ -146,13 +147,14 @@ Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina so
 | ⌘⇧T | Nuevo agente: tab que arranca `claude` |
 | ⌘K | Limpiar la pantalla y el scrollback |
 | Arrastrar un grupo o un tab | Reordenarlo; un tab soltado sobre otro grupo de la barra lateral pasa a ese grupo |
-| Clic en un enlace | Lo abre en el navegador (`https://…`, `http://localhost:4200/`, `file://…` y los hipervínculos OSC 8). Si el programa usa el mouse (vim, htop), ⌘ + clic |
+| Clic en un enlace | Lo abre en el navegador (`https://…`, `http://localhost:4200/`, `file://…` y los hipervínculos OSC 8), también dentro de Claude Code. Los enlaces se ven en azul y subrayados |
 | Clic derecho en un tab o grupo | Menú: suspender/reanudar, limpiar, renombrar, cerrar, nuevo tab o agente, eliminar grupo |
 | ✕ en la fila de un grupo (abierto o bajo el puntero) | Eliminar el grupo con todos sus tabs, después de confirmar |
 | Doble clic en un tab | Renombrar el tab (vacío: vuelve el título automático) |
 | ⌘S | Suspender o reanudar el tab activo (Enter también reanuda) |
 | ⌘⇧S | Suspender o reanudar el grupo activo |
 | ⌘⇧C | Despierto: no → siempre → mientras Claude trabaja |
+| ⌘← / ⌘→ | Ir al inicio / al final de la línea (Ctrl+A / Ctrl+E) |
 | ⌘⌫ | Borrar la línea desde el cursor hacia atrás (Ctrl+U), en la shell y en Claude |
 | ⌘, | Configuración (carpeta de inicio, tema, fuente, ícono, límites, inactividad) |
 | ⌘P | Buscar un tab o grupo por nombre (↑↓ elige, Enter va, Esc cierra) |

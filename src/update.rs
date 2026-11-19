@@ -148,9 +148,26 @@ pub fn cleanup_leftovers() {
     }
 }
 
-/// Descarga y aplica `release` (en un hilo, informando el progreso).
+/// Búsqueda en segundo plano (cada hora): no muestra «Buscando…» y, si falla (sin red),
+/// no avisa nada; solo informa el resultado si lo hay.
+pub fn check_quietly(proxy: EventLoopProxy<UserEvent>) {
+    std::thread::spawn(move || {
+        if let Ok(status) = latest() {
+            send(&proxy, status);
+        }
+    });
+}
+
+/// Descarga y aplica la última versión publicada (en un hilo, informando el progreso).
+/// `release` es la que se mostró; si mientras tanto salió otra más nueva, se instala esa:
+/// así no hay que actualizar dos veces.
 pub fn install(proxy: EventLoopProxy<UserEvent>, release: Release) {
     std::thread::spawn(move || {
+        let release = match latest() {
+            Ok(Status::Available(newest)) if is_newer(&newest.version, &release.version) => newest,
+            _ => release,
+        };
+        send(&proxy, Status::Downloading(release.version.clone(), 0, release.size));
         let result = install_sync(&release, &|s| send(&proxy, s));
         send(&proxy, match result {
             Ok(()) => Status::Ready(release.version.clone()),

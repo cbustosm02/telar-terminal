@@ -62,6 +62,8 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 const SPINNER_TICK: Duration = Duration::from_millis(80);
 /// Cada cuánto se refrescan procesos/carpetas y se guarda la sesión (si cambió).
+/// Cada cuánto se busca en segundo plano una versión nueva.
+const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 const SAVE_TICK: Duration = Duration::from_secs(5);
 
 pub enum UserEvent {
@@ -166,7 +168,7 @@ struct State {
     /// Enlace bajo el puntero que se abriría con un clic (su celda, para resaltarlo) y el
     /// enlace donde empezó el clic: se abre al soltar si no se arrastró para seleccionar.
     link_cell: Option<(usize, usize)>,
-    link_press: Option<links::Link>,
+    link_press: Option<(links::Link, (f32, f32))>,
     /// Lo que muestran los medidores: solo se repinta si cambia.
     meters_shown: String,
     /// Primera fila visible de la lista de la barra lateral, y píxeles acumulados del
@@ -185,6 +187,8 @@ struct State {
     update: update::Status,
     /// La búsqueda automática al abrir no muestra errores (p. ej. sin conexión).
     update_quiet: bool,
+    /// Próxima búsqueda de versión nueva en segundo plano.
+    next_update_check: Instant,
     /// Pedido de salir desde fuera del teclado (p. ej. «Reiniciar» tras actualizar).
     quit: bool,
 }
@@ -300,6 +304,7 @@ impl ApplicationHandler<UserEvent> for App {
             awake: awake::Awake::default(),
             update: update::Status::Idle,
             update_quiet: true,
+            next_update_check: Instant::now() + UPDATE_CHECK_EVERY,
             quit: false,
         };
         if let Some(server) = &state.server {
@@ -350,6 +355,11 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::Update(status) => {
+                // Una búsqueda en segundo plano que llega tarde no pisa una instalación en curso.
+                let installing = matches!(st.update, update::Status::Downloading(..) | update::Status::Applying(_) | update::Status::Ready(_));
+                if installing && matches!(status, update::Status::Available(_) | update::Status::UpToDate) {
+                    return;
+                }
                 // La búsqueda automática no molesta con errores; la pedida con clic sí los muestra.
                 st.update = match status {
                     update::Status::Error(_) if st.update_quiet => update::Status::Idle,
@@ -1170,11 +1180,18 @@ impl State {
     fn shortcut(&mut self, event: &KeyEvent) -> bool {
         let m = self.mods;
         if let Key::Named(named) = &event.logical_key {
-            // ⌘⌫: borra la línea hasta el cursor (Ctrl+U), como en Terminal.app e iTerm.
-            // Funciona en zsh, bash y en el prompt de Claude Code.
-            if *named == NamedKey::Backspace && !m.shift_key() {
+            // ⌘⌫ borra la línea hasta el cursor (Ctrl+U); ⌘← y ⌘→ van al inicio y al final
+            // de la línea (Ctrl+A y Ctrl+E), como en Terminal.app e iTerm. Funcionan en zsh,
+            // bash y en el prompt de Claude Code.
+            let line_key = match named {
+                NamedKey::Backspace => Some(0x15),
+                NamedKey::ArrowLeft => Some(0x01),
+                NamedKey::ArrowRight => Some(0x05),
+                _ => None,
+            };
+            if let Some(byte) = line_key.filter(|_| !m.shift_key()) {
                 if self.active().is_some_and(|t| !t.is_suspended()) {
-                    self.send_input(vec![0x15]);
+                    self.send_input(vec![byte]);
                 }
                 return false;
             }
@@ -1444,8 +1461,8 @@ impl State {
                 self.mouse_report(b, false, col, row, self.active_mode());
             }
             self.selecting = false;
-            if let Some(link) = self.link_press.take().filter(|_| button == MouseButton::Left) {
-                self.release_on_link(&l, link);
+            if let Some((link, from)) = self.link_press.take().filter(|_| button == MouseButton::Left) {
+                self.release_on_link(&l, link, from);
             }
             return;
         }
@@ -1635,8 +1652,9 @@ impl State {
             MouseButton::Right => 2,
             _ => return,
         };
-        // Clic en un enlace: con ⌘ se abre ya (también si la app pidió el mouse); sin ⌘, al
-        // soltar, si no se arrastró para seleccionar.
+        // Clic en un enlace: con ⌘ se abre ya; sin ⌘, al soltar, si el puntero casi no se
+        // movió (no se arrastró para seleccionar). Vale también si la app pidió el mouse
+        // (Claude Code lo hace): el clic le llega igual y además se abre el enlace.
         self.link_press = None;
         if button == MouseButton::Left && count == 1 {
             if let Some(link) = self.clickable_link(col, row) {
@@ -1644,7 +1662,7 @@ impl State {
                     links::open(&link.url);
                     return;
                 }
-                self.link_press = Some(link);
+                self.link_press = Some((link, self.cursor));
             }
         }
         // La app pidió el mouse (vim, htop…): se le reporta. Shift fuerza selección local.
@@ -1685,27 +1703,25 @@ impl State {
         }
     }
 
-    /// Enlace en la celda (columna, fila) del tab visible que se abriría con un clic: con
-    /// ⌘ siempre; sin ⌘, solo si la app no pidió el mouse (si no, el clic es suyo).
+    /// Enlace en la celda (columna, fila) del tab visible que se abre con un clic.
     fn clickable_link(&self, col: usize, row: usize) -> Option<links::Link> {
         let t = self.active().filter(|t| !t.is_suspended())?;
         let term = t.term.lock();
-        if term.mode().intersects(TermMode::MOUSE_MODE) && !self.mods.super_key() && !self.mods.shift_key() {
-            return None;
-        }
         links::scan(&*term).into_iter().find(|k| k.contains(col, row) && links::openable(&k.url))
     }
 
-    /// Se soltó el clic que empezó en `link`: si no hubo selección y sigue sobre él, se abre.
-    fn release_on_link(&mut self, l: &Layout, link: links::Link) {
+    /// Se soltó el clic que empezó en `link` (con el puntero en `from`): si el puntero casi
+    /// no se movió y sigue sobre el enlace, se abre. Un temblor dentro de la misma letra
+    /// no cuenta como selección.
+    fn release_on_link(&mut self, l: &Layout, link: links::Link, from: (f32, f32)) {
         let (col, row, _) = l.cell_at(self.cursor.0, self.cursor.1);
-        let Some(t) = self.active() else { return };
-        let mut term = t.term.lock();
-        if term.selection.as_ref().is_some_and(|s| !s.is_empty()) || !link.contains(col, row) {
+        let moved = (self.cursor.0 - from.0).hypot(self.cursor.1 - from.1);
+        if moved > 4.0 * l.s() || !link.contains(col, row) {
             return;
         }
-        term.selection = None;
-        drop(term);
+        if let Some(t) = self.active() {
+            t.term.lock().selection = None;
+        }
         links::open(&link.url);
         self.window.request_redraw();
     }
@@ -2517,6 +2533,14 @@ impl State {
 
     /// Cada pocos segundos: nombre del proceso de cada tab y guardado de la sesión.
     fn periodic(&mut self) {
+        // Cada hora se vuelve a buscar una versión nueva: si salió otra después de la que
+        // se muestra, el pie ya ofrece la última.
+        if Instant::now() >= self.next_update_check && self.snapshot.is_none() {
+            self.next_update_check = Instant::now() + UPDATE_CHECK_EVERY;
+            if matches!(self.update, update::Status::Idle | update::Status::UpToDate | update::Status::Available(_)) {
+                update::check_quietly(self.proxy.clone());
+            }
+        }
         let mut changed = false;
         for t in self.terms.values_mut() {
             let before = t.process.clone();
