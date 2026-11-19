@@ -148,6 +148,12 @@ struct State {
     stats_detail: Option<statsview::Detail>,
     /// Lo que muestran los medidores: solo se repinta si cambia.
     meters_shown: String,
+    /// Primera fila visible de la lista de la barra lateral, y píxeles acumulados del
+    /// trackpad hasta completar una fila.
+    list_scroll: usize,
+    list_scroll_px: f32,
+    /// Buscador de la barra lateral abierto (⌘P): texto y resultado elegido.
+    search: Option<(String, usize)>,
     update: update::Status,
     /// La búsqueda automática al abrir no muestra errores (p. ej. sin conexión).
     update_quiet: bool,
@@ -193,6 +199,9 @@ impl ApplicationHandler<UserEvent> for App {
             stats: None,
             stats_detail: None,
             meters_shown: String::new(),
+            list_scroll: 0,
+            list_scroll_px: 0.0,
+            search: None,
             palette: theme::t().palette(),
             window,
             renderer,
@@ -441,7 +450,10 @@ impl State {
     fn layout(&self) -> Layout {
         let size = self.window.inner_size();
         let n_tabs = self.ws.group().map_or(0, |g| g.tabs.len());
-        Layout::new(size.width as f32, size.height as f32, self.window.scale_factor() as f32, &self.fonts, n_tabs)
+        let mut l = Layout::new(size.width as f32, size.height as f32, self.window.scale_factor() as f32, &self.fonts, n_tabs);
+        l.list_scroll = self.list_scroll;
+        l.new_row = !self.searching();
+        l
     }
 
     /// Abre una terminal nueva en la carpeta del tab activo.
@@ -556,8 +568,112 @@ impl State {
     fn new_group(&mut self) -> Option<u64> {
         let id = self.spawn_term()?;
         self.ws.add_group(id);
+        self.reveal_active_group();
         self.window.request_redraw();
         Some(id)
+    }
+
+    /// Hay texto en el buscador: la lista muestra resultados.
+    fn searching(&self) -> bool {
+        self.search.as_ref().is_some_and(|(q, _)| !q.trim().is_empty())
+    }
+
+    fn search_results(&self) -> Vec<ui::Found> {
+        self.search.as_ref().map(|(q, _)| ui::search(&self.ws, &self.terms, q)).unwrap_or_default()
+    }
+
+    /// Filas de la lista: grupos + «Nuevo grupo», o los resultados de la búsqueda.
+    fn list_len(&self) -> usize {
+        if self.searching() { self.search_results().len() } else { self.ws.groups.len() + 1 }
+    }
+
+    /// Desplaza la lista para que se vea la fila `i`.
+    fn reveal_row(&mut self, i: usize) {
+        let rows = self.layout().list_rows();
+        if i < self.list_scroll {
+            self.list_scroll = i;
+        } else if i >= self.list_scroll + rows {
+            self.list_scroll = i + 1 - rows;
+        }
+    }
+
+    fn reveal_active_group(&mut self) {
+        if !self.searching() {
+            self.reveal_row(self.ws.active);
+        }
+    }
+
+    /// ⌘P o clic en el buscador.
+    fn open_search(&mut self) {
+        if self.search.is_none() {
+            self.search = Some((String::new(), 0));
+        }
+        self.editing = None;
+        self.menu = None;
+        self.window.request_redraw();
+    }
+
+    fn close_search(&mut self) {
+        self.search = None;
+        self.list_scroll = 0;
+        self.reveal_active_group();
+        self.window.request_redraw();
+    }
+
+    /// Va al resultado `i` de la búsqueda (grupo, y tab si lo hay) y cierra el buscador.
+    fn go_to_result(&mut self, i: usize) {
+        let Some(f) = self.search_results().get(i).copied() else { return };
+        self.ws.select_group(f.group);
+        if let Some(ti) = f.tab {
+            self.ws.select_tab(ti);
+        }
+        self.close_search();
+        self.after_switch();
+    }
+
+    /// Teclado con el buscador abierto.
+    fn search_key(&mut self, event: &KeyEvent) {
+        let n = self.search_results().len();
+        let cmd = self.mods.super_key();
+        let Some((query, selected)) = self.search.as_mut() else { return };
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => return self.close_search(),
+            Key::Named(NamedKey::Enter) => {
+                let i = *selected;
+                return self.go_to_result(i);
+            }
+            Key::Named(NamedKey::ArrowDown) if n > 0 => *selected = (*selected + 1).min(n - 1),
+            Key::Named(NamedKey::ArrowUp) => *selected = selected.saturating_sub(1),
+            Key::Named(NamedKey::Backspace) => {
+                query.pop();
+                *selected = 0;
+            }
+            _ if cmd => match event.key_without_modifiers() {
+                Key::Character(c) if c.as_str() == "p" => return self.close_search(),
+                Key::Character(c) if c.as_str() == "v" => {
+                    if let Some(text) = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) {
+                        if let Some((query, selected)) = self.search.as_mut() {
+                            query.extend(text.chars().filter(|c| !c.is_control()));
+                            *selected = 0;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {
+                if let Some(t) = &event.text {
+                    query.extend(t.chars().filter(|c| !c.is_control()));
+                    *selected = 0;
+                }
+            }
+        }
+        // La lista muestra los resultados desde arriba y sigue al elegido.
+        let sel = self.search.as_ref().map_or(0, |(_, s)| *s);
+        if sel == 0 {
+            self.list_scroll = 0;
+        }
+        self.reveal_row(sel);
+        self.window.request_redraw();
     }
 
     /// Carpeta de un tab nuevo en el grupo activo: la del grupo, o si no tiene, la del tab activo.
@@ -818,6 +934,10 @@ impl State {
             self.settings_key(event);
             return false;
         }
+        if self.search.is_some() {
+            self.search_key(event);
+            return false;
+        }
         if self.stats_detail.is_some() {
             let close = event.logical_key == Key::Named(NamedKey::Escape)
                 || (self.mods.super_key() && matches!(event.key_without_modifiers(), Key::Character(ref c) if c.as_str() == "w"));
@@ -941,6 +1061,7 @@ impl State {
                 self.apply_font_size();
             }
             "," => self.toggle_settings(),
+            "p" => self.open_search(),
             d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
                 let n = (d.as_bytes()[0] - b'0') as usize;
                 if n > 0 {
@@ -956,6 +1077,7 @@ impl State {
     /// Al cambiar de tab o grupo: el tamaño puede haber cambiado (nº de tabs) y hay que repintar.
     fn after_switch(&mut self) {
         self.editing = None;
+        self.reveal_active_group();
         self.mark_seen();
         self.resize_terms();
         self.window.request_redraw();
@@ -1106,6 +1228,28 @@ impl State {
         let count = if self.clicks.1 == hit && now - self.clicks.0 < DOUBLE_CLICK { self.clicks.2 % 3 + 1 } else { 1 };
         self.clicks = (now, hit, count);
 
+        // Buscador: un clic fuera de él y de sus resultados lo cierra.
+        if self.search.is_some() && !matches!(hit, Hit::Search | Hit::Group(_)) {
+            self.close_search();
+        }
+        // Con resultados a la vista, las filas de la lista son resultados.
+        if self.searching() {
+            if let Hit::Group(i) = hit {
+                match button {
+                    MouseButton::Left => self.go_to_result(i),
+                    MouseButton::Right => {
+                        if let Some(f) = self.search_results().get(i).copied() {
+                            let id = f.tab.and_then(|ti| self.ws.groups[f.group].tabs.get(ti).copied());
+                            self.open_menu(id, f.group);
+                        }
+                    }
+                    _ => {}
+                }
+                self.window.request_redraw();
+                return;
+            }
+        }
+
         if hit != Hit::Terminal && button == MouseButton::Left {
             let edited = match (hit, self.editing.as_ref().map(|(e, _)| *e)) {
                 (Hit::Group(i), Some(Edit::Group(g))) => i == g,
@@ -1146,6 +1290,7 @@ impl State {
                 }
             }
             (Hit::Group(i), MouseButton::Right) => self.open_menu(None, i),
+            (Hit::Search, MouseButton::Left) => self.open_search(),
             (Hit::Tab(i), MouseButton::Middle) | (Hit::CloseTab(i), MouseButton::Left) => {
                 if let Some(id) = self.ws.group().and_then(|g| g.tabs.get(i).copied()) {
                     self.close_term(id);
@@ -1223,6 +1368,23 @@ impl State {
 
     fn on_scroll(&mut self, delta: MouseScrollDelta) {
         let l = self.layout();
+        // Sobre la barra lateral: desplaza la lista de grupos (o de resultados).
+        if self.cursor.0 < l.sidebar_w() && self.settings.is_none() && self.stats_detail.is_none() {
+            let row = 32.0 * l.s();
+            let px = match delta {
+                MouseScrollDelta::LineDelta(_, y) => -y * row,
+                MouseScrollDelta::PixelDelta(p) => -p.y as f32,
+            };
+            self.list_scroll_px += px;
+            let rows = (self.list_scroll_px / row).trunc();
+            if rows != 0.0 {
+                self.list_scroll_px -= rows * row;
+                let max = self.list_len().saturating_sub(l.list_rows());
+                self.list_scroll = (self.list_scroll as isize + rows as isize).clamp(0, max as isize) as usize;
+                self.window.request_redraw();
+            }
+            return;
+        }
         if self.stats_detail.is_some() {
             let rows = match delta {
                 MouseScrollDelta::LineDelta(_, y) => -y.round() as isize,
@@ -1940,6 +2102,10 @@ impl State {
             let text = text.replace("\\n", "\r");
             self.send_input(text.into_bytes());
         }
+        // TELAR_SNAPSHOT_SEARCH=texto: captura con el buscador abierto.
+        if let Some(q) = std::env::var("TELAR_SNAPSHOT_SEARCH").ok().filter(|q| !q.is_empty()) {
+            self.search = Some((q, 0));
+        }
         // TELAR_SNAPSHOT_STATS=1: captura con el detalle de uso abierto.
         if std::env::var_os("TELAR_SNAPSHOT_STATS").is_some() {
             self.toggle_stats();
@@ -1969,7 +2135,11 @@ impl State {
     }
 
     fn draw(&mut self) {
+        // Si se borraron grupos o la ventana se achicó, la lista no queda desplazada de más.
+        let max = self.list_len().saturating_sub(self.layout().list_rows());
+        self.list_scroll = self.list_scroll.min(max);
         let l = self.layout();
+        let results = self.search_results();
         let view = View {
             ws: &self.ws,
             terms: &self.terms,
@@ -1983,6 +2153,7 @@ impl State {
             menu: self.menu.as_ref(),
             update: &self.update,
             stats: self.stats.as_ref(),
+            search: self.search.as_ref().map(|(q, sel)| (q.as_str(), *sel, results.as_slice())),
         };
         let mut ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
         if let Some(st) = &self.settings {

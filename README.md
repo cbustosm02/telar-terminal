@@ -112,7 +112,8 @@ Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina so
 
 ## Modelo
 
-- La barra lateral lista los grupos. Al crear un grupo, se crea con un tab.
+- La barra lateral lista los grupos. Al crear un grupo (+ junto a «GRUPOS», o «Nuevo grupo» al final), se crea con un tab. Si no caben, la lista se desplaza con la rueda o el trackpad, sin pasar bajo los medidores.
+- El buscador (⌘P) filtra grupos y tabs por nombre, título o proceso.
 - Cada grupo puede tener una carpeta de proyecto: sus tabs nuevos abren ahí. La toma sola de la primera sesión de Claude que se abre en él (y, si se llamaba «Grupo N», también el nombre de esa carpeta). Se cambia con `telar group --dir`.
 - La barra de arriba muestra los tabs del grupo activo.
 - Al cerrar el último tab de un grupo, el grupo se elimina. Al cerrar el último grupo, se cierra la app.
@@ -130,7 +131,8 @@ Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina so
 | ⌘S | Suspender o reanudar el tab activo (Enter también reanuda) |
 | ⌘⇧S | Suspender o reanudar el grupo activo |
 | ⌘⇧C | Despierto: no → siempre → mientras Claude trabaja |
-| ⌘, | Configuración (fuente y tamaño) |
+| ⌘, | Configuración (tema, fuente, tamaño) |
+| ⌘P | Buscar un tab o grupo por nombre (↑↓ elige, Enter va, Esc cierra) |
 | ⌘N | Nuevo grupo |
 | ⌘W | Cerrar tab |
 | ⌘J | Ir al siguiente tab que te necesita |

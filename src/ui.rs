@@ -29,7 +29,11 @@ use crate::workspace::Workspace;
 // Medidas en puntos lógicos (se multiplican por el factor de escala).
 const SIDEBAR_W: f32 = 210.0;
 const TITLEBAR_H: f32 = 40.0;
-const LIST_TOP: f32 = 76.0;
+/// Fila de «GRUPOS» (con + y ⚙), buscador y comienzo de la lista.
+const HEADER_Y: f32 = 44.0;
+const SEARCH_Y: f32 = 74.0;
+const SEARCH_H: f32 = 28.0;
+const LIST_TOP: f32 = 112.0;
 const GROUP_ROW_H: f32 = 32.0;
 const PAD_X: f32 = 10.0;
 const PAD_Y: f32 = 6.0;
@@ -69,6 +73,8 @@ pub enum Hit {
     Settings,
     /// Medidores de uso: abren el detalle.
     Stats,
+    /// Campo de búsqueda de tabs y grupos.
+    Search,
     /// Zona vacía de la barra de título: arrastra la ventana.
     Drag,
     Terminal,
@@ -85,6 +91,10 @@ pub struct Layout {
     pub grid_y: f32,
     pub cols: usize,
     pub rows: usize,
+    /// Primera fila visible de la lista de grupos (o de resultados).
+    pub list_scroll: usize,
+    /// La lista termina con la fila «Nuevo grupo» (no durante una búsqueda).
+    pub new_row: bool,
 }
 
 impl Layout {
@@ -101,7 +111,7 @@ impl Layout {
         let avail = w - (SIDEBAR_W + 8.0 + NEW_TAB_W + 8.0) * s;
         let n = n_tabs.max(1) as f32;
         let tab_w = (avail / n - TAB_GAP * s).clamp(TAB_MIN_W * s, TAB_MAX_W * s);
-        Self { s, w, h, tab_w, cell_w, cell_h, grid_x, grid_y, cols, rows }
+        Self { s, w, h, tab_w, cell_w, cell_h, grid_x, grid_y, cols, rows, list_scroll: 0, new_row: true }
     }
 
     /// Factor de escala (píxeles por punto).
@@ -121,14 +131,35 @@ impl Layout {
     /// Engranaje de configuración, a la derecha de «GRUPOS».
     fn settings_rect(&self) -> Rect {
         let s = self.s;
-        Rect { x: (SIDEBAR_W - 36.0) * s, y: (LIST_TOP - 32.0) * s, w: 26.0 * s, h: 24.0 * s }
+        Rect { x: (SIDEBAR_W - 36.0) * s, y: HEADER_Y * s, w: 26.0 * s, h: 24.0 * s }
+    }
+
+    /// «+» fijo junto a «GRUPOS»: grupo nuevo sin bajar hasta el final de la lista.
+    fn new_group_button(&self) -> Rect {
+        Rect { x: self.settings_rect().x - 28.0 * self.s, ..self.settings_rect() }
+    }
+
+    pub fn search_rect(&self) -> Rect {
+        let s = self.s;
+        Rect { x: 8.0 * s, y: SEARCH_Y * s, w: (SIDEBAR_W - 16.0) * s, h: SEARCH_H * s }
+    }
+
+    /// Filas de la lista que caben entre el buscador y los medidores.
+    pub fn list_rows(&self) -> usize {
+        let bottom = self.meters_rect().y - 6.0 * self.s;
+        (((bottom - LIST_TOP * self.s) / (GROUP_ROW_H * self.s)).floor() as usize).max(1)
+    }
+
+    /// La fila `i` de la lista está a la vista.
+    pub fn row_visible(&self, i: usize) -> bool {
+        i >= self.list_scroll && i < self.list_scroll + self.list_rows()
     }
 
     pub fn grid_size(&self) -> GridSize {
         GridSize { cols: self.cols, rows: self.rows, cell_w: self.cell_w as u16, cell_h: self.cell_h as u16 }
     }
 
-    fn sidebar_w(&self) -> f32 {
+    pub fn sidebar_w(&self) -> f32 {
         SIDEBAR_W * self.s
     }
 
@@ -136,9 +167,11 @@ impl Layout {
         TITLEBAR_H * self.s
     }
 
+    /// Fila `i` de la lista (contando desde la primera, no desde la visible).
     pub fn group_rect(&self, i: usize) -> Rect {
         let s = self.s;
-        Rect { x: 8.0 * s, y: (LIST_TOP + i as f32 * GROUP_ROW_H) * s, w: (SIDEBAR_W - 16.0) * s, h: (GROUP_ROW_H - 2.0) * s }
+        let row = i as f32 - self.list_scroll as f32;
+        Rect { x: 8.0 * s, y: (LIST_TOP + row * GROUP_ROW_H) * s, w: (SIDEBAR_W - 16.0) * s, h: (GROUP_ROW_H - 2.0) * s }
     }
 
     pub fn tab_rect(&self, i: usize) -> Rect {
@@ -189,10 +222,16 @@ impl Layout {
             if self.meters_rect().contains(x, y) {
                 return Hit::Stats;
             }
-            if let Some(i) = (0..n_groups).find(|i| self.group_rect(*i).contains(x, y)) {
+            if self.new_group_button().contains(x, y) {
+                return Hit::NewGroup;
+            }
+            if self.search_rect().contains(x, y) {
+                return Hit::Search;
+            }
+            if let Some(i) = (0..n_groups).find(|i| self.row_visible(*i) && self.group_rect(*i).contains(x, y)) {
                 return Hit::Group(i);
             }
-            if self.group_rect(n_groups).contains(x, y) {
+            if self.new_row && self.row_visible(n_groups) && self.group_rect(n_groups).contains(x, y) {
                 return Hit::NewGroup;
             }
             return if y < self.titlebar_h() { Hit::Drag } else { Hit::None };
@@ -347,6 +386,38 @@ pub struct View<'a> {
     pub menu: Option<&'a Menu>,
     pub update: &'a Status,
     pub stats: Option<&'a crate::stats::Sample>,
+    /// Búsqueda abierta: texto, resultado elegido y resultados.
+    pub search: Option<(&'a str, usize, &'a [Found])>,
+}
+
+/// Resultado de buscar en la barra lateral: un grupo, o un tab de un grupo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub group: usize,
+    pub tab: Option<usize>,
+}
+
+/// Grupos y tabs cuyo nombre contiene `query` (sin distinguir mayúsculas). El grupo va
+/// antes que sus tabs; un tab que coincide trae su grupo aunque el grupo no coincida.
+pub fn search(ws: &Workspace, terms: &HashMap<u64, Terminal>, query: &str) -> Vec<Found> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (gi, g) in ws.groups.iter().enumerate() {
+        if g.name.to_lowercase().contains(&q) {
+            out.push(Found { group: gi, tab: None });
+        }
+        for (ti, id) in g.tabs.iter().enumerate() {
+            let t = terms.get(id);
+            let names = [t.and_then(|t| t.name.as_deref()), t.and_then(|t| t.title.as_deref()), t.and_then(|t| t.process.as_deref())];
+            if names.iter().flatten().any(|n| n.to_lowercase().contains(&q)) {
+                out.push(Found { group: gi, tab: Some(ti) });
+            }
+        }
+    }
+    out
 }
 
 /// Prioridad y color del indicador de un tab (None = sin indicador).
@@ -491,8 +562,65 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
     let g = l.settings_rect();
     k.text_in(g, 18.0 * s, "GRUPOS", Text::caption());
     k.icon_button(g, icons::SETTINGS, 15.0, v.hover == Hit::Settings);
+    k.icon_button(l.new_group_button(), icons::PLUS, 15.0, v.hover == Hit::NewGroup);
+
+    // Buscador: con la búsqueda cerrada muestra el atajo.
+    let sr = l.search_rect();
+    match v.search {
+        Some((query, ..)) => k.input(sr, query, "Buscar tab o grupo", Some(icons::SEARCH), true),
+        None => {
+            k.input(sr, "", "Buscar", Some(icons::SEARCH), false);
+            k.kbd(sr.x + sr.w - 6.0 * s, sr.y + sr.h / 2.0, &["⌘", "P"]);
+        }
+    }
+
+    // Resultados de la búsqueda en lugar de la lista.
+    if let Some((query, selected, results)) = v.search.filter(|(q, ..)| !q.trim().is_empty()) {
+        if results.is_empty() {
+            k.text(l.group_rect(0).x + 12.0 * s, l.group_rect(0).y + 7.0 * s, &format!("Nada coincide con «{}»", query.trim()), Text::small(), sr.w - 20.0 * s);
+        }
+        for (i, f) in results.iter().enumerate() {
+            if !l.row_visible(i) {
+                continue;
+            }
+            let r = l.group_rect(i);
+            if i == selected {
+                k.rounded(r, 6.0, th.active);
+            } else if v.hover == Hit::Group(i) {
+                k.rounded(r, 6.0, th.hover);
+            }
+            let Some(grp) = v.ws.groups.get(f.group) else { continue };
+            let cy = r.y + r.h / 2.0;
+            match f.tab {
+                None => {
+                    k.icon(r.x + 18.0 * s, cy, icons::FOLDER, 14.0, th.text_dim);
+                    k.text_in(r, r.x + 32.0 * s, &grp.name, Text::label());
+                }
+                Some(ti) => {
+                    let t = grp.tabs.get(ti).and_then(|id| v.terms.get(id));
+                    let icon = match t {
+                        Some(t) if t.is_suspended() => icons::MOON,
+                        Some(t) if t.agent.state != AgentState::None => icons::SPARKLES,
+                        _ => icons::TERMINAL,
+                    };
+                    k.icon(r.x + 18.0 * s, cy, icon, 14.0, th.text_dim);
+                    let fallback = format!("Tab {}", ti + 1);
+                    let label = t.and_then(Terminal::label).unwrap_or(&fallback);
+                    let gw = k.measure(&grp.name, Text::small()).min(70.0 * s);
+                    k.text_in(Rect { w: r.w - gw - 12.0 * s, ..r }, r.x + 32.0 * s, label, Text::body());
+                    k.text_in(r, r.x + r.w - gw - 8.0 * s, &grp.name, Text::small());
+                }
+            }
+        }
+        scrollbar(&mut k, l, results.len());
+        draw_footer(&mut k, l, v);
+        return;
+    }
 
     for (i, grp) in v.ws.groups.iter().enumerate() {
+        if !l.row_visible(i) {
+            continue;
+        }
         let r = l.group_rect(i);
         let active = i == v.ws.active;
         if active {
@@ -530,21 +658,44 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
         }
     }
 
-    let r = l.group_rect(v.ws.groups.len());
-    let hovered = v.hover == Hit::NewGroup;
-    if hovered {
-        k.rounded(r, 6.0, th.hover);
+    let n = v.ws.groups.len();
+    if l.row_visible(n) {
+        let r = l.group_rect(n);
+        let hovered = v.hover == Hit::NewGroup;
+        if hovered {
+            k.rounded(r, 6.0, th.hover);
+        }
+        let color = if hovered { th.text } else { th.text_dim };
+        k.icon(r.x + 18.0 * s, r.y + r.h / 2.0, icons::PLUS, 14.0, color);
+        k.text_in(r, r.x + 32.0 * s, "Nuevo grupo", Text::body().color(color));
     }
-    let color = if hovered { th.text } else { th.text_dim };
-    k.icon(r.x + 18.0 * s, r.y + r.h / 2.0, icons::PLUS, 14.0, color);
-    k.text_in(r, r.x + 32.0 * s, "Nuevo grupo", Text::body().color(color));
+    scrollbar(&mut k, l, n + 1);
+    draw_footer(&mut k, l, v);
+}
 
-    // Pie: medidores, línea, Despierto y versión.
-    draw_meters(&mut k, l, v);
+/// Barrita de desplazamiento de la lista, si no cabe entera.
+fn scrollbar(k: &mut Kit, l: &Layout, total: usize) {
+    let rows = l.list_rows();
+    if total <= rows {
+        return;
+    }
+    let s = l.s;
+    let top = LIST_TOP * s;
+    let track_h = rows as f32 * GROUP_ROW_H * s;
+    let h = (track_h * rows as f32 / total as f32).max(20.0 * s);
+    let y = top + (track_h - h) * l.list_scroll as f32 / (total - rows) as f32;
+    k.rounded(Rect { x: l.sidebar_w() - 5.0 * s, y, w: 3.0 * s, h }, 1.5, theme::t().border);
+}
+
+/// Pie de la barra lateral: medidores, línea, Despierto y versión.
+fn draw_footer(k: &mut Kit, l: &Layout, v: &View) {
+    let s = l.s;
+    let th = theme::t();
+    draw_meters(k, l, v);
     let top = l.awake_rect().y - 8.0 * s;
     k.rect(Rect { x: 12.0 * s, y: top, w: l.sidebar_w() - 24.0 * s, h: s }, th.border);
-    draw_awake(&mut k, l, v);
-    draw_update(&mut k, l, v);
+    draw_awake(k, l, v);
+    draw_update(k, l, v);
 }
 
 /// Medidores compactos de Telar completo: CPU y GPU en % de la máquina, RAM en GB.
@@ -925,6 +1076,21 @@ mod tests {
             MenuItem::new('c', "c", &[], Action::CloseTab),
         ];
         Menu::new(x, y, Some(1), 0, items, l)
+    }
+
+    #[test]
+    fn lista_con_desplazamiento() {
+        let mut l = Layout::with_cell(1200.0, 780.0, 1.0, 8.0, 16.0, 1);
+        let rows = l.list_rows();
+        assert!(rows >= 5 && l.group_rect(rows - 1).y + l.group_rect(rows - 1).h <= l.meters_rect().y, "la lista no pisa los medidores");
+        assert!(l.row_visible(0) && !l.row_visible(rows));
+        l.list_scroll = 3;
+        assert!(!l.row_visible(2) && l.row_visible(3));
+        assert_eq!(l.group_rect(3).y, l.group_rect(0).y + 3.0 * GROUP_ROW_H, "la fila 3 queda arriba");
+        assert_eq!(l.group_rect(3).y, LIST_TOP);
+        // Con 17 grupos, la fila «Nuevo grupo» (17) solo responde si está a la vista.
+        assert_eq!(l.hit(20.0, l.group_rect(3).y + 5.0, 17, 1), Hit::Group(3));
+        assert_eq!(l.hit(20.0, l.search_rect().y + 5.0, 17, 1), Hit::Search);
     }
 
     #[test]
