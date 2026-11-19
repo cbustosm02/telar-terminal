@@ -208,6 +208,14 @@ impl<'a> Kit<'a> {
         self.out.push(Quad { rect: [r.x, r.y, r.w, r.h], uv: g.uv, color: [1.0; 4], params: [KIND_COLOR, 0.0, 0.0, 0.0] });
     }
 
+    /// Logo de Claude de `size` puntos centrado en (cx, cy) (ver `logo.rs`).
+    pub fn claude_logo(&mut self, cx: f32, cy: f32, size: f32) {
+        let px = self.px(size).round().max(1.0) as u32;
+        let Some(g) = self.fonts.image(&format!("logo:claude:{px}"), || Some((crate::logo::claude(px), px, px))) else { return };
+        let (w, h) = (g.uv[2], g.uv[3]);
+        self.image(Rect { x: (cx - w / 2.0).round(), y: (cy - h / 2.0).round(), w, h }, g);
+    }
+
     /// Ícono de `size` puntos centrado en (cx, cy).
     pub fn icon(&mut self, cx: f32, cy: f32, icon: char, size: f32, color: Rgba) {
         let Some(g) = self.fonts.icon(icon, self.px(size)) else { return };

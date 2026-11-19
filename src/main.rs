@@ -13,6 +13,7 @@ mod input;
 mod kit;
 mod limits;
 mod links;
+mod logo;
 mod ipc;
 mod proc;
 mod renderer;

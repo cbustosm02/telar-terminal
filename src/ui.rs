@@ -933,7 +933,7 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
             tx += 18.0 * s;
         } else {
             if term.is_some_and(|t| t.agent.state != AgentState::None) {
-                k.icon(tx + 6.0 * s, cy, icons::SPARKLES, 13.0, theme::CLAUDE);
+                k.claude_logo(tx + 6.0 * s, cy, 13.0);
                 tx += 18.0 * s;
             }
             if let Some((_, color)) = term.and_then(|t| status(t, v.time)) {

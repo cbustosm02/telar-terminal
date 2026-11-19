@@ -189,5 +189,5 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 ## Prefijos del tab: Claude y SSH (2026-11-19)
 
 - Pedido del usuario: un tab con Claude abierto lleva su ícono, y una sesión SSH, la etiqueta «SSH» en verde. Los pone Telar, antes del nombre: no son parte del nombre ni se editan al renombrar.
-- El ícono es `sparkles` de Lucide (el mismo de «Nuevo agente») en el naranja de Claude (`theme::CLAUDE`, igual en todos los temas); el logo de Claude no está en Lucide. El estado (trabajando, te necesita, listo) sigue en el punto de color de al lado.
+- El ícono es el logo de Claude (el destello naranja). No está en Lucide, así que `logo.rs` lo dibuja por código al tamaño exacto en píxeles (12 rayos de punta redondeada, con 4×4 muestras por píxel) y lo sube al atlas como imagen: no hace falta incluir un archivo y se ve nítido en cualquier escala. Color: `theme::CLAUDE` (#D97757), igual en todos los temas. Vista previa: `TELAR_LOGO_PNG=x.png cargo test logo -- --ignored`. El estado (trabajando, te necesita, listo) sigue en el punto de color de al lado.
 - SSH: el proceso en primer plano es `ssh`, `mosh-client` o `autossh` (`Terminal::is_remote`). Se refresca con el proceso del tab, cada pocos segundos.
