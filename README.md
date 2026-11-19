@@ -20,7 +20,8 @@ cargo build --release
 
 **⌘,** (o el engranaje ⚙ junto a «GRUPOS») abre la configuración. Los cambios se aplican al instante (la terminal de atrás sirve de vista previa) y se guardan solos en `~/.config/telar/config.json`.
 
-- **Apariencia:** la fuente de la terminal y la interfaz, y su tamaño. La lista muestra JetBrains Mono (incluida en Telar; es la que usan Ghostty y cmux por defecto) y las fuentes monoespaciadas instaladas en el Mac. Escribe para filtrar; ↑↓ cambian la fuente; − y + el tamaño (⌘0 vuelve a ese tamaño).
+- **Apariencia · Tema:** 10 temas predefinidos (Telar, Tokyo Night, Catppuccin Mocha y Latte, Dracula, Nord, Gruvbox Dark, One Dark, Rosé Pine y GitHub Light). Cambian la interfaz y los colores de la terminal. ←/→ los recorre.
+- **Apariencia · Fuente:** la fuente de la terminal y su tamaño (la interfaz usa SF Pro). La lista muestra JetBrains Mono (incluida en Telar; es la que usan Ghostty y cmux por defecto) y las fuentes monoespaciadas instaladas en el Mac. Escribe para filtrar; ↑↓ cambian la fuente; − y + el tamaño (⌘0 vuelve a ese tamaño).
 - Los íconos de prompts (Nerd Fonts) se ven con cualquier fuente: Telar incluye «Symbols Nerd Font» como respaldo.
 
 ## Actualizaciones

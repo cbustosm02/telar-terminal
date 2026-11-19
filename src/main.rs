@@ -7,6 +7,7 @@ mod font;
 mod fontlist;
 mod hooks;
 mod input;
+mod kit;
 mod ipc;
 mod proc;
 mod renderer;
@@ -44,6 +45,7 @@ use crate::font::Fonts;
 use crate::renderer::{Quad, Renderer};
 use crate::terminal::{AgentState, Frozen, Terminal};
 use crate::theme::Rgba;
+use crate::kit::icons;
 use crate::ui::{Action, Edit, Hit, Layout, Menu, MenuItem, View};
 use crate::session::{Saved, SavedGroup, SavedTab};
 use crate::workspace::{Group, Workspace};
@@ -171,12 +173,15 @@ impl ApplicationHandler<UserEvent> for App {
         let renderer = pollster::block_on(Renderer::new(window.clone()));
         let scale = window.scale_factor() as f32;
         let config = config::Config::load();
+        if !theme::set(&config.theme) {
+            theme::set(theme::DEFAULT);
+        }
         let mut state = State {
             fonts: Fonts::new(&config.font_family, config.font_size * scale),
             font_pt: config.font_size,
             config,
             settings: None,
-            palette: theme::palette(),
+            palette: theme::t().palette(),
             window,
             renderer,
             proxy: self.proxy.clone(),
@@ -703,27 +708,27 @@ impl State {
         let mut items = Vec::new();
         if let Some(id) = tab {
             if self.ws.active_term() != Some(id) {
-                items.push(MenuItem::new("Mostrar", "", Action::Show));
+                items.push(MenuItem::new(icons::EYE, "Mostrar", &[], Action::Show));
             }
             if suspended(&id) {
-                items.push(MenuItem::new("Reanudar", "↩", Action::Resume));
+                items.push(MenuItem::new(icons::PLAY, "Reanudar", &["↩"], Action::Resume));
             } else {
-                items.push(MenuItem::new("Suspender", "⌘S", Action::Suspend));
-                items.push(MenuItem::new("Limpiar", "⌘K", Action::Clear));
+                items.push(MenuItem::new(icons::MOON, "Suspender", &["⌘", "S"], Action::Suspend));
+                items.push(MenuItem::new(icons::ERASER, "Limpiar", &["⌘", "K"], Action::Clear));
             }
-            items.push(MenuItem::new("Renombrar tab", "", Action::RenameTab));
-            items.push(MenuItem::new("Cerrar tab", "⌘W", Action::CloseTab));
+            items.push(MenuItem::new(icons::PENCIL, "Renombrar tab", &[], Action::RenameTab));
+            items.push(MenuItem::new(icons::X, "Cerrar tab", &["⌘", "W"], Action::CloseTab));
             items.push(MenuItem::separator());
         } else {
-            items.push(MenuItem::new("Nuevo tab", "⌘T", Action::NewTab));
-            items.push(MenuItem::new("Nuevo agente (claude)", "⌘⇧T", Action::NewAgent));
+            items.push(MenuItem::new(icons::TERMINAL, "Nuevo tab", &["⌘", "T"], Action::NewTab));
+            items.push(MenuItem::new(icons::SPARKLES, "Nuevo agente", &["⌘", "⇧", "T"], Action::NewAgent));
             items.push(MenuItem::separator());
         }
-        items.push(MenuItem::new("Renombrar grupo", "⌘⇧R", Action::RenameGroup));
+        items.push(MenuItem::new(icons::SQUARE_PEN, "Renombrar grupo", &["⌘", "⇧", "R"], Action::RenameGroup));
         if group_asleep {
-            items.push(MenuItem::new("Reanudar grupo", "⌘⇧S", Action::ResumeGroup));
+            items.push(MenuItem::new(icons::PLAY, "Reanudar grupo", &["⌘", "⇧", "S"], Action::ResumeGroup));
         } else {
-            items.push(MenuItem::new("Suspender grupo", "⌘⇧S", Action::SuspendGroup));
+            items.push(MenuItem::new(icons::MOON, "Suspender grupo", &["⌘", "⇧", "S"], Action::SuspendGroup));
         }
         let l = self.layout();
         self.menu = Some(Menu::new(self.cursor.0, self.cursor.1, tab, group, items, &l));
@@ -1483,6 +1488,25 @@ impl State {
         self.window.request_redraw();
     }
 
+    /// Cambia el tema (interfaz y colores de la terminal) y lo guarda.
+    fn set_theme(&mut self, name: &str) {
+        if !theme::set(name) {
+            return;
+        }
+        self.palette = theme::t().palette();
+        self.config.theme = theme::t().name.to_string();
+        self.config.save();
+        self.window.request_redraw();
+    }
+
+    /// Tema anterior o siguiente de la lista (← → en la configuración).
+    fn cycle_theme(&mut self, delta: isize) {
+        let list = theme::themes();
+        let i = list.iter().position(|t| t.name == theme::t().name).unwrap_or(0) as isize;
+        let next = &list[(i + delta).rem_euclid(list.len() as isize) as usize];
+        self.set_theme(next.name);
+    }
+
     /// Tamaño desde la configuración: se aplica y queda como el de ⌘0.
     fn set_font_size(&mut self, pt: f32) {
         self.font_pt = pt.clamp(config::FONT_SIZE_MIN, config::FONT_SIZE_MAX);
@@ -1502,6 +1526,11 @@ impl State {
                 st.select(i, page);
                 let name = st.visible()[i].name.clone();
                 self.set_font_family(&name);
+            }
+            settings::Hit::Theme(i) => {
+                if let Some(t) = theme::themes().get(i) {
+                    self.set_theme(t.name);
+                }
             }
             settings::Hit::SizeDown => self.set_font_size(self.font_pt - 1.0),
             settings::Hit::SizeUp => self.set_font_size(self.font_pt + 1.0),
@@ -1537,6 +1566,14 @@ impl State {
                 apply = true;
             }
             Key::Named(NamedKey::Enter) => apply = true,
+            Key::Named(NamedKey::ArrowLeft) => {
+                self.cycle_theme(-1);
+                return;
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                self.cycle_theme(1);
+                return;
+            }
             Key::Named(NamedKey::Backspace) => {
                 st.filter.pop();
                 st.select(0, page);
@@ -1868,7 +1905,7 @@ impl State {
                 PhysicalSize::new(l.cell_w as f64, l.cell_h as f64),
             );
         }
-        let bg = theme::hex(theme::TERM_BG);
+        let bg = theme::t().bg;
         let capture = self.snapshot.as_ref().filter(|s| s.capture_now).map(|s| s.path.clone());
         self.renderer.render(&self.quads, bg, &mut self.fonts, capture.as_deref());
         if std::mem::take(&mut self.fonts.atlas_reset) {

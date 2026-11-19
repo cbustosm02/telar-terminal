@@ -43,15 +43,6 @@ impl Mode {
             Mode::Auto => Mode::Off,
         }
     }
-
-    /// Texto de la barra lateral («Claude»: mientras algún Claude trabaja).
-    pub fn label(self) -> &'static str {
-        match self {
-            Mode::Off => "Despierto: no",
-            Mode::On => "Despierto: sí",
-            Mode::Auto => "Despierto: Claude",
-        }
-    }
 }
 
 #[derive(Default)]

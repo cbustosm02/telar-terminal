@@ -7,7 +7,9 @@
 use std::collections::HashMap;
 
 use swash::scale::image::Content;
+use swash::scale::image::Image;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
+use swash::shape::ShapeContext;
 use swash::zeno::Format;
 use swash::FontRef;
 
@@ -96,6 +98,12 @@ pub struct Fonts {
     pub stroke: f32,
     cache: HashMap<(char, u8), Option<Glyph>>,
     atlas: Atlas,
+    /// Fuente de la interfaz (SF Pro, variable) e íconos (Lucide).
+    ui: FontRef<'static>,
+    icons: FontRef<'static>,
+    shaper: ShapeContext,
+    /// Glifos de la interfaz a cualquier tamaño: (fuente, glifo, tamaño ×4, peso).
+    sized: HashMap<(u8, u16, u32, u16), Option<Glyph>>,
     /// El atlas se vació en este frame: hay que volver a dibujar.
     pub atlas_reset: bool,
 }
@@ -119,7 +127,15 @@ impl Fonts {
         let emoji = fallbacks.pop();
         fallbacks.extend(FontRef::from_index(fontlist::NERD_SYMBOLS, 0));
         fallbacks.extend(emoji);
+        let ui = fontlist::map(std::path::Path::new(UI_FONT))
+            .and_then(|d| FontRef::from_index(d, 0))
+            .unwrap_or(primary[0]);
+        let icons = FontRef::from_index(ICONS, 0).expect("íconos incluidos");
         let mut fonts = Self {
+            ui,
+            icons,
+            shaper: ShapeContext::new(),
+            sized: HashMap::new(),
             family,
             primary,
             fallbacks,
@@ -153,6 +169,7 @@ impl Fonts {
 
     fn clear_atlas(&mut self) {
         self.cache.clear();
+        self.sized.clear();
         self.atlas = Atlas::new();
         self.atlas_reset = true;
     }
@@ -194,35 +211,141 @@ impl Fonts {
             .format(Format::Alpha)
             .render(&mut scaler, id)?;
 
-            let (w, h) = (image.placement.width, image.placement.height);
-            if w == 0 || h == 0 {
-                return None; // glifo vacío (espacio)
-            }
-            let color = image.content == Content::Color;
-            let data = match image.content {
-                Content::Mask => image.data.iter().flat_map(|a| [255, 255, 255, *a]).collect(),
-                Content::Color => image.data,
-                Content::SubpixelMask => image.data.chunks(4).flat_map(|p| [255, 255, 255, p[1]]).collect(),
-            };
-            let (x, y) = match self.atlas.alloc(w, h) {
-                Some(pos) => pos,
-                None => {
-                    // Atlas lleno: se vacía y se empieza de nuevo (muy raro).
-                    self.clear_atlas();
-                    self.atlas.alloc(w, h)?
-                }
-            };
-            self.atlas.uploads.push(Upload { x, y, w, h, data });
-            return Some(Glyph {
-                uv: [x as f32, y as f32, w as f32, h as f32],
-                left: image.placement.left as f32,
-                top: image.placement.top as f32,
-                color,
-            });
+            return self.upload(image);
         }
         None
     }
+
+    /// Sube la imagen de un glifo al atlas.
+    fn upload(&mut self, image: Image) -> Option<Glyph> {
+        let (w, h) = (image.placement.width, image.placement.height);
+        if w == 0 || h == 0 {
+            return None; // glifo vacío (espacio)
+        }
+        let color = image.content == Content::Color;
+        let data = match image.content {
+            Content::Mask => image.data.iter().flat_map(|a| [255, 255, 255, *a]).collect(),
+            Content::Color => image.data,
+            Content::SubpixelMask => image.data.chunks(4).flat_map(|p| [255, 255, 255, p[1]]).collect(),
+        };
+        let (x, y) = match self.atlas.alloc(w, h) {
+            Some(pos) => pos,
+            None => {
+                // Atlas lleno: se vacía y se empieza de nuevo (muy raro).
+                self.clear_atlas();
+                self.atlas.alloc(w, h)?
+            }
+        };
+        self.atlas.uploads.push(Upload { x, y, w, h, data });
+        Some(Glyph {
+            uv: [x as f32, y as f32, w as f32, h as f32],
+            left: image.placement.left as f32,
+            top: image.placement.top as f32,
+            color,
+        })
+    }
+
+    /// Fuente para la clave de caché de `sized`: 0 interfaz, 1 íconos, 2 terminal, 3.. respaldos.
+    fn font_by_key(&self, key: u8) -> FontRef<'static> {
+        match key {
+            0 => self.ui,
+            1 => self.icons,
+            2 => self.primary[0],
+            k => self.fallbacks[(k - 3) as usize],
+        }
+    }
+
+    /// Glifo `id` de la fuente `key` a `px` píxeles (con peso, si la fuente es variable).
+    fn sized_glyph(&mut self, key: u8, id: u16, px: f32, weight: u16) -> Option<Glyph> {
+        let k = (key, id, (px * 4.0).round() as u32, weight);
+        if let Some(g) = self.sized.get(&k) {
+            return *g;
+        }
+        let font = self.font_by_key(key);
+        let mut scaler = self.ctx.builder(font).size(px).hint(false).variations(&ui_axes(weight)).build();
+        let image = Render::new(&[Source::ColorOutline(0), Source::ColorBitmap(StrikeWith::BestFit), Source::Outline])
+            .format(Format::Alpha)
+            .render(&mut scaler, id);
+        let g = image.and_then(|img| self.upload(img));
+        self.sized.insert(k, g);
+        g
+    }
+
+    /// Altura de línea y distancia a la línea base de la fuente de interfaz a `px` píxeles.
+    pub fn ui_metrics(&self, px: f32) -> (f32, f32) {
+        let m = self.ui.metrics(&[]).scale(px);
+        ((m.ascent + m.descent + m.leading).ceil(), m.ascent.round())
+    }
+
+    /// Texto de interfaz: glifos posicionados (x desde el inicio, y desde la línea base)
+    /// y ancho total. SF Pro con kerning; lo que SF no tenga sale de los respaldos.
+    pub fn ui_layout(&mut self, text: &str, px: f32, weight: u16) -> (Vec<(Glyph, f32, f32)>, f32) {
+        let mut out = Vec::new();
+        let mut pen = 0.0f32;
+        let ui_cmap = self.ui.charmap();
+        let mut rest = text;
+        while let Some(c) = rest.chars().next() {
+            if ui_cmap.map(c) != 0 {
+                // Tramo que SF sabe dibujar: se da forma de una vez (kerning y ligaduras).
+                let end = rest.char_indices().find(|(_, ch)| ui_cmap.map(*ch) == 0).map_or(rest.len(), |(i, _)| i);
+                let run = &rest[..end];
+                rest = &rest[end..];
+                let mut glyphs = Vec::new();
+                let mut shaper = self.shaper.builder(self.ui).size(px).variations(&ui_axes(weight)).build();
+                shaper.add_str(run);
+                shaper.shape_with(|cluster| {
+                    for g in cluster.glyphs {
+                        glyphs.push((g.id, g.x, g.y, g.advance));
+                    }
+                });
+                for (id, gx, gy, adv) in glyphs {
+                    if let Some(g) = self.sized_glyph(0, id, px, weight) {
+                        out.push((g, pen + gx, -gy));
+                    }
+                    pen += adv;
+                }
+            } else {
+                // Un carácter de otra fuente (✳, CJK, emoji…): terminal o respaldos.
+                rest = &rest[c.len_utf8()..];
+                let keys = std::iter::once(2u8).chain((0..self.fallbacks.len() as u8).map(|i| i + 3));
+                let found = keys
+                    .map(|k| (k, self.font_by_key(k)))
+                    .find(|(_, f)| f.charmap().map(c) != 0);
+                if let Some((key, font)) = found {
+                    let id = font.charmap().map(c);
+                    let adv = font.glyph_metrics(&[]).scale(px).advance_width(id);
+                    if let Some(g) = self.sized_glyph(key, id, px, 400) {
+                        out.push((g, pen, 0.0));
+                    }
+                    pen += adv;
+                }
+            }
+        }
+        (out, pen)
+    }
+
+    /// Ícono de Lucide (`icons::*`) a `px` píxeles.
+    pub fn icon(&mut self, icon: char, px: f32) -> Option<Glyph> {
+        let id = self.icons.charmap().map(icon);
+        if id == 0 {
+            return None;
+        }
+        self.sized_glyph(1, id, px, 400)
+    }
 }
+
+/// Ejes de SF Pro para la interfaz: el peso y el tamaño óptico «Text» (17). Por
+/// defecto `opsz` vale 28 («Display», para títulos grandes) y el texto chico se ve apretado.
+/// En fuentes sin esos ejes no tienen efecto.
+fn ui_axes(weight: u16) -> [(&'static str, f32); 2] {
+    [("wght", weight as f32), ("opsz", 17.0)]
+}
+
+/// Fuente de la interfaz: SF Pro (variable, con ejes de peso y tamaño óptico).
+const UI_FONT: &str = "/System/Library/Fonts/SFNS.ttf";
+
+/// Íconos Lucide (ISC), vectoriales: se tiñen como el texto.
+static ICONS: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
 
 /// Caracteres del plano básico con presentación de emoji por defecto (Unicode `Emoji_Presentation`).
 /// Los de U+1F000 en adelante solo existen en la fuente de emoji, así que no hace falta listarlos.

@@ -2,7 +2,7 @@
 //! (las mismas del modal de configuración, ⌘,). Se guarda sola al cambiar algo.
 //!
 //! ```json
-//! { "appearance": { "font_family": "JetBrains Mono", "font_size": 13 } }
+//! { "appearance": { "theme": "Telar", "font_family": "JetBrains Mono", "font_size": 13 } }
 //! ```
 
 use std::path::PathBuf;
@@ -16,7 +16,9 @@ pub const FONT_SIZE_MAX: f32 = 36.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
-    /// Familia de la terminal y de la interfaz.
+    /// Tema de colores (ver `theme::themes`).
+    pub theme: String,
+    /// Familia de la terminal.
     pub font_family: String,
     /// Tamaño en puntos (⌘0 vuelve a este).
     pub font_size: f32,
@@ -25,7 +27,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         // Lo mismo que cmux/Ghostty por defecto.
-        Self { font_family: fontlist::DEFAULT_FAMILY.into(), font_size: 13.0 }
+        Self { theme: crate::theme::DEFAULT.into(), font_family: fontlist::DEFAULT_FAMILY.into(), font_size: 13.0 }
     }
 }
 
@@ -41,6 +43,7 @@ impl Config {
     pub fn to_json(&self) -> Value {
         json!({
             "appearance": {
+                "theme": self.theme,
                 "font_family": self.font_family,
                 "font_size": self.font_size,
             },
@@ -52,6 +55,7 @@ impl Config {
         let d = Self::default();
         let a = &v["appearance"];
         Self {
+            theme: a["theme"].as_str().filter(|s| !s.trim().is_empty()).map_or(d.theme, String::from),
             font_family: a["font_family"].as_str().filter(|s| !s.trim().is_empty()).map_or(d.font_family, String::from),
             font_size: a["font_size"].as_f64().map_or(d.font_size, |s| (s as f32).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX)),
         }
@@ -90,7 +94,7 @@ mod tests {
 
     #[test]
     fn ida_y_vuelta() {
-        let c = Config { font_family: "Menlo".into(), font_size: 15.0 };
+        let c = Config { theme: "Nord".into(), font_family: "Menlo".into(), font_size: 15.0 };
         assert_eq!(Config::from_json(&c.to_json()), c);
     }
 

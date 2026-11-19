@@ -17,6 +17,7 @@ use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 
 use crate::awake;
+use crate::kit::{Kit, Text, Variant, icons};
 use crate::update::{self, Status};
 use crate::font::{self, Fonts, Glyph};
 use crate::renderer::{Quad, KIND_COLOR, KIND_MASK};
@@ -153,18 +154,16 @@ impl Layout {
         Rect { w: NEW_TAB_W * self.s, ..r }
     }
 
-    /// Bloque de versión y actualizaciones, al pie de la barra lateral (dos líneas).
+    /// Bloque de versión y actualizaciones, al pie de la barra lateral.
     fn update_rect(&self) -> Rect {
         let s = self.s;
-        let h = 2.0 * self.cell_h + 14.0 * s;
-        Rect { x: 8.0 * s, y: self.h - h - 6.0 * s, w: (SIDEBAR_W - 16.0) * s, h }
+        Rect { x: 8.0 * s, y: self.h - 52.0 * s, w: (SIDEBAR_W - 16.0) * s, h: 46.0 * s }
     }
 
-    /// Bloque de «Despierto», encima del de la versión (dos líneas).
+    /// Bloque de «Despierto», encima del de la versión.
     fn awake_rect(&self) -> Rect {
         let s = self.s;
-        let h = 2.0 * self.cell_h + 16.0 * s;
-        Rect { x: 8.0 * s, y: self.update_rect().y - h - 4.0 * s, w: (SIDEBAR_W - 16.0) * s, h }
+        Rect { x: 8.0 * s, y: self.update_rect().y - 48.0 * s, w: (SIDEBAR_W - 16.0) * s, h: 46.0 * s }
     }
 
     pub fn hit(&self, x: f32, y: f32, n_groups: usize, n_tabs: usize) -> Hit {
@@ -243,20 +242,21 @@ pub enum Action {
 }
 
 pub struct MenuItem {
+    pub icon: char,
     pub label: &'static str,
-    /// Atajo de teclado, a la derecha.
-    pub hint: &'static str,
+    /// Atajo de teclado, a la derecha (una tecla por elemento).
+    pub keys: &'static [&'static str],
     /// `None`: separador.
     pub action: Option<Action>,
 }
 
 impl MenuItem {
-    pub fn new(label: &'static str, hint: &'static str, action: Action) -> Self {
-        Self { label, hint, action: Some(action) }
+    pub fn new(icon: char, label: &'static str, keys: &'static [&'static str], action: Action) -> Self {
+        Self { icon, label, keys, action: Some(action) }
     }
 
     pub fn separator() -> Self {
-        Self { label: "", hint: "", action: None }
+        Self { icon: ' ', label: "", keys: &[], action: None }
     }
 }
 
@@ -271,8 +271,8 @@ pub struct Menu {
     pub hover: Option<usize>,
 }
 
-const MENU_W: f32 = 250.0;
-const MENU_ITEM_H: f32 = 26.0;
+const MENU_W: f32 = 270.0;
+const MENU_ITEM_H: f32 = 28.0;
 const MENU_SEP_H: f32 = 9.0;
 const MENU_PAD: f32 = 5.0;
 
@@ -339,21 +339,17 @@ pub struct View<'a> {
 /// Prioridad y color del indicador de un tab (None = sin indicador).
 fn status(t: &Terminal, time: f32) -> Option<(u8, Rgba)> {
     match t.agent.state {
-        AgentState::NeedsYou => Some((4, theme::ATTENTION)),
-        AgentState::Done => Some((3, theme::DONE)),
-        _ if t.attention => Some((2, theme::ATTENTION)),
+        AgentState::NeedsYou => Some((4, theme::t().attention)),
+        AgentState::Done => Some((3, theme::t().done)),
+        _ if t.attention => Some((2, theme::t().attention)),
         AgentState::Working => {
             let pulse = 0.5 + 0.5 * (time * std::f32::consts::TAU * 0.9).sin();
-            let mut c = theme::ACCENT;
+            let mut c = theme::t().accent;
             c[3] = 0.3 + 0.7 * pulse;
             Some((1, c))
         }
         _ => None,
     }
-}
-
-fn dot(out: &mut Vec<Quad>, x: f32, cy: f32, d: f32, color: Rgba) {
-    out.push(Quad::rounded(x, cy - d / 2.0, d, d, d / 2.0, color));
 }
 
 fn push_glyph(out: &mut Vec<Quad>, fonts: &Fonts, g: Glyph, x: f32, y: f32, box_w: f32, color: Rgba) {
@@ -409,228 +405,246 @@ pub fn draw(out: &mut Vec<Quad>, fg: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layo
     }
     out.append(fg);
     let suspended = active.is_some_and(Terminal::is_suspended);
+    let mut k = Kit::new(out, fonts, l.s);
     if suspended {
-        draw_suspended(out, fonts, l);
+        draw_suspended(&mut k, l);
     }
     if let Some(m) = v.menu {
-        draw_menu(out, fonts, l, m);
+        draw_menu(&mut k, m);
     }
     if suspended { None } else { ime_cell }
 }
 
-fn draw_menu(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, m: &Menu) {
-    let s = l.s;
+fn draw_menu(k: &mut Kit, m: &Menu) {
+    let s = k.s;
     let b = m.bounds(s);
-    // Sombra suave, borde y fondo.
-    out.push(Quad::rounded(b.x - 2.0 * s, b.y + 1.0 * s, b.w + 4.0 * s, b.h + 4.0 * s, 10.0 * s, [0.0, 0.0, 0.0, 0.35]));
-    out.push(Quad::rounded(b.x - s, b.y - s, b.w + 2.0 * s, b.h + 2.0 * s, 9.0 * s, theme::BORDER));
-    out.push(Quad::rounded(b.x, b.y, b.w, b.h, 8.0 * s, theme::CHROME_BG));
-    let ch = fonts.cell_h;
+    k.panel(b, 8.0);
+    let th = theme::t();
     for (i, r) in m.rows(s) {
         let item = &m.items[i];
         if item.action.is_none() {
-            out.push(Quad::rect(r.x + 6.0 * s, r.y + r.h / 2.0, r.w - 12.0 * s, s, theme::BORDER));
+            k.rect(Rect { x: r.x + 6.0 * s, y: r.y + r.h / 2.0, w: r.w - 12.0 * s, h: s }, th.border);
             continue;
         }
-        if m.hover == Some(i) {
-            out.push(Quad::rounded(r.x, r.y, r.w, r.h, 5.0 * s, theme::ITEM_ACTIVE));
+        let hovered = m.hover == Some(i);
+        if hovered {
+            k.rounded(r, 5.0, th.active);
         }
-        let ty = r.y + (r.h - ch) / 2.0;
-        let hint_w = item.hint.chars().count() as f32 * fonts.cell_w;
-        text(out, fonts, r.x + 10.0 * s, ty, item.label, theme::TEXT, r.w - hint_w - 30.0 * s);
-        text(out, fonts, r.x + r.w - 10.0 * s - hint_w, ty, item.hint, theme::TEXT_DIM, hint_w + 1.0);
+        let color = if hovered { th.text } else { theme::mix(th.text, th.text_dim, 0.25) };
+        k.icon(r.x + 16.0 * s, r.y + r.h / 2.0, item.icon, 14.0, color);
+        let kw = k.kbd_width(item.keys);
+        k.text_in(Rect { w: r.w - kw - 40.0 * s, ..r }, r.x + 32.0 * s, item.label, Text::body().color(color));
+        if !item.keys.is_empty() {
+            k.kbd(r.x + r.w - 8.0 * s, r.y + r.h / 2.0, item.keys);
+        }
     }
 }
 
-/// Marca de tab suspendido (en lugar del punto de estado).
-const MOON: &str = "☾";
-
 /// Vista previa de un tab suspendido: su última pantalla, atenuada, con un aviso abajo.
-fn draw_suspended(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout) {
+fn draw_suspended(k: &mut Kit, l: &Layout) {
     let s = l.s;
+    let th = theme::t();
     let x0 = l.sidebar_w();
     let top = l.titlebar_h();
-    let mut veil = theme::CHROME_BG;
-    veil[3] = 0.55;
-    out.push(Quad::rect(x0, top, l.w - x0, l.h - top, veil));
+    k.rect(Rect { x: x0, y: top, w: l.w - x0, h: l.h - top }, theme::alpha(th.bg, 0.55));
 
-    let msg = "Suspendido · Enter para reanudar · ⌘⇧S reanuda el grupo";
-    let (cw, ch) = (fonts.cell_w, fonts.cell_h);
-    let pad = 14.0 * s;
-    let w = (msg.chars().count() as f32 * cw + 2.0 * pad).min(l.w - x0 - 24.0 * s);
-    let h = ch + 2.0 * 9.0 * s;
-    let x = x0 + (l.w - x0 - w) / 2.0;
-    let y = l.h - h - 28.0 * s;
-    out.push(Quad::rounded(x - s, y - s, w + 2.0 * s, h + 2.0 * s, 9.0 * s, theme::BORDER));
-    out.push(Quad::rounded(x, y, w, h, 8.0 * s, theme::ITEM_ACTIVE));
-    text(out, fonts, x + pad, y + (h - ch) / 2.0, msg, theme::TEXT, w - 2.0 * pad);
+    let w = (430.0 * s).min(l.w - x0 - 24.0 * s);
+    let h = 64.0 * s;
+    let r = Rect { x: x0 + (l.w - x0 - w) / 2.0, y: l.h - h - 28.0 * s, w, h };
+    k.panel(r, 10.0);
+    let icon_box = Rect { x: r.x + 14.0 * s, y: r.y + (h - 34.0 * s) / 2.0, w: 34.0 * s, h: 34.0 * s };
+    k.rounded(icon_box, 8.0, th.active);
+    k.icon(icon_box.x + icon_box.w / 2.0, icon_box.y + icon_box.h / 2.0, icons::MOON, 17.0, th.text);
+    let tx = icon_box.x + icon_box.w + 12.0 * s;
+    k.text(tx, r.y + 13.0 * s, "Tab suspendido", Text::label(), r.w - 200.0 * s);
+    k.text(tx, r.y + 33.0 * s, "La sesión se retoma al reanudar", Text::small(), r.w - 200.0 * s);
+    let right = r.x + r.w - 14.0 * s;
+    let x = k.kbd(right, r.y + 22.0 * s, &["↩"]);
+    let tw = k.measure("Reanudar", Text::small());
+    k.text(x - 6.0 * s - tw, r.y + 22.0 * s - k.line_h(Text::small()) / 2.0, "Reanudar", Text::small(), tw + 1.0);
+    let x = k.kbd(right, r.y + 44.0 * s, &["⌘", "⇧", "S"]);
+    let tw = k.measure("El grupo", Text::small());
+    k.text(x - 6.0 * s - tw, r.y + 44.0 * s - k.line_h(Text::small()) / 2.0, "El grupo", Text::small(), tw + 1.0);
 }
 
 fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
     let s = l.s;
-    let ch = fonts.cell_h;
-    out.push(Quad::rect(0.0, 0.0, l.sidebar_w(), l.h, theme::CHROME_BG));
-    out.push(Quad::rect(l.sidebar_w() - s, 0.0, s, l.h, theme::BORDER));
-    text(out, fonts, 18.0 * s, (LIST_TOP - 26.0) * s, "GRUPOS", theme::TEXT_DIM, (SIDEBAR_W - 60.0) * s);
-    let g = l.settings_rect();
-    let hovered = v.hover == Hit::Settings;
-    if hovered {
-        out.push(Quad::rounded(g.x, g.y, g.w, g.h, 5.0 * s, theme::ITEM_HOVER));
-    }
-    let color = if hovered { theme::TEXT } else { theme::TEXT_DIM };
-    text(out, fonts, g.x + (g.w - fonts.cell_w) / 2.0, g.y + (g.h - ch) / 2.0, "⚙", color, fonts.cell_w + 1.0);
+    let th = theme::t();
+    let mut k = Kit::new(out, fonts, s);
+    k.rect(Rect { x: 0.0, y: 0.0, w: l.sidebar_w(), h: l.h }, th.chrome);
+    k.rect(Rect { x: l.sidebar_w() - s, y: 0.0, w: s, h: l.h }, th.border);
 
-    for (i, g) in v.ws.groups.iter().enumerate() {
+    // Encabezado: «GRUPOS» y el engranaje de configuración.
+    let g = l.settings_rect();
+    k.text_in(g, 18.0 * s, "GRUPOS", Text::caption());
+    k.icon_button(g, icons::SETTINGS, 15.0, v.hover == Hit::Settings);
+
+    for (i, grp) in v.ws.groups.iter().enumerate() {
         let r = l.group_rect(i);
         let active = i == v.ws.active;
         if active {
-            out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_ACTIVE));
-            out.push(Quad::rounded(r.x, r.y + 7.0 * s, 3.0 * s, r.h - 14.0 * s, 1.5 * s, theme::ACCENT));
+            k.rounded(r, 6.0, th.active);
+            k.rounded(Rect { x: r.x, y: r.y + 8.0 * s, w: 3.0 * s, h: r.h - 16.0 * s }, 1.5, th.accent);
         } else if v.hover == Hit::Group(i) {
-            out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_HOVER));
+            k.rounded(r, 6.0, th.hover);
         }
-        let ty = r.y + (r.h - ch) / 2.0;
+        let asleep = grp.tabs.iter().all(|id| v.terms.get(id).is_some_and(Terminal::is_suspended));
+        let count = grp.tabs.len().to_string();
+        let cy = r.y + r.h / 2.0;
+        // A la derecha: cantidad de tabs (tag) y, antes, el estado más urgente o la luna.
+        let badge_style = Text::small().weight(510);
+        let badge_w = k.measure(&count, badge_style) + 12.0 * s;
+        let bx = r.x + r.w - 8.0 * s - badge_w;
+        k.tag(bx, cy, &count, th.text_dim, if active { th.hover } else { th.active });
+        let worst = grp.tabs.iter().filter_map(|id| v.terms.get(id)).filter_map(|t| status(t, v.time)).max_by_key(|(p, _)| *p);
+        let mut name_right = bx - 6.0 * s;
+        if let Some((_, color)) = worst {
+            k.dot(bx - 9.0 * s, cy, 7.0, color);
+            name_right -= 14.0 * s;
+        } else if asleep {
+            k.icon(bx - 10.0 * s, cy, icons::MOON, 13.0, th.text_dim);
+            name_right -= 16.0 * s;
+        }
         let tx = r.x + 12.0 * s;
-        let asleep = g.tabs.iter().all(|id| v.terms.get(id).is_some_and(Terminal::is_suspended));
-        let count = g.tabs.len().to_string();
-        let badge_w = count.len() as f32 * fonts.cell_w;
-        let name_w = r.w - 24.0 * s - badge_w - 8.0 * s;
-
         match v.editing {
             Some((Edit::Group(gi), buf)) if gi == i => {
-                let w = text(out, fonts, tx, ty, buf, theme::TEXT, name_w);
-                out.push(Quad::rect(tx + w + s, ty + 2.0 * s, 2.0 * s, ch - 4.0 * s, theme::ACCENT));
+                k.input(Rect { x: r.x + 4.0 * s, y: r.y + 3.0 * s, w: name_right - r.x - 4.0 * s, h: r.h - 6.0 * s }, buf, "Nombre del grupo", None, true);
             }
             _ => {
-                let color = if active && !asleep { theme::TEXT } else { theme::TEXT_DIM };
-                text(out, fonts, tx, ty, &g.name, color, name_w);
+                let style = if active && !asleep { Text::label() } else { Text::body().color(th.text_dim) };
+                k.text_in(Rect { w: name_right - r.x, ..r }, tx, &grp.name, style);
             }
-        }
-        text(out, fonts, r.x + r.w - 12.0 * s - badge_w, ty, &count, theme::TEXT_DIM, badge_w + 1.0);
-        // El grupo muestra el estado más urgente de sus tabs (o la luna si todos duermen).
-        let worst = g.tabs.iter().filter_map(|id| v.terms.get(id)).filter_map(|t| status(t, v.time)).max_by_key(|(p, _)| *p);
-        let d = 7.0 * s;
-        if let Some((_, color)) = worst {
-            dot(out, r.x + r.w - 12.0 * s - badge_w - d - 7.0 * s, r.y + r.h / 2.0, d, color);
-        } else if asleep {
-            text(out, fonts, r.x + r.w - 12.0 * s - badge_w - fonts.cell_w - 6.0 * s, ty, MOON, theme::TEXT_DIM, fonts.cell_w + 1.0);
         }
     }
 
     let r = l.group_rect(v.ws.groups.len());
     let hovered = v.hover == Hit::NewGroup;
     if hovered {
-        out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_HOVER));
+        k.rounded(r, 6.0, th.hover);
     }
-    let color = if hovered { theme::TEXT } else { theme::TEXT_DIM };
-    text(out, fonts, r.x + 12.0 * s, r.y + (r.h - ch) / 2.0, "+ Nuevo grupo", color, r.w - 24.0 * s);
+    let color = if hovered { th.text } else { th.text_dim };
+    k.icon(r.x + 18.0 * s, r.y + r.h / 2.0, icons::PLUS, 14.0, color);
+    k.text_in(r, r.x + 32.0 * s, "Nuevo grupo", Text::body().color(color));
 
-    // Pie: «Despierto» (caffeinate). Taza a color con círculo verde si está corriendo;
-    // atenuada y con círculo gris si no.
+    // Pie.
+    let top = l.awake_rect().y - 8.0 * s;
+    k.rect(Rect { x: 12.0 * s, y: top, w: l.sidebar_w() - 24.0 * s, h: s }, th.border);
+    draw_awake(&mut k, l, v);
+    draw_update(&mut k, l, v);
+}
+
+/// Caja de ícono de 28 pt con un círculo de estado abajo a la derecha (pie de la barra).
+fn status_icon(k: &mut Kit, r: Rect, icon: char, icon_color: Rgba, box_bg: Rgba, dot: Option<Rgba>, ring: Rgba) {
+    let s = k.s;
+    let b = Rect { x: r.x + 8.0 * s, y: r.y + (r.h - 28.0 * s) / 2.0, w: 28.0 * s, h: 28.0 * s };
+    k.rounded(b, 7.0, box_bg);
+    k.icon(b.x + b.w / 2.0, b.y + b.h / 2.0, icon, 15.0, icon_color);
+    if let Some(c) = dot {
+        let (cx, cy) = (b.x + b.w - s, b.y + b.h - s);
+        k.dot(cx, cy, 11.0, ring);
+        k.dot(cx, cy, 7.0, c);
+    }
+}
+
+/// «Despierto» (caffeinate): taza, estado y atajo.
+fn draw_awake(k: &mut Kit, l: &Layout, v: &View) {
+    let s = l.s;
+    let th = theme::t();
     let r = l.awake_rect();
     let hovered = v.hover == Hit::Awake;
     if hovered {
-        out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_HOVER));
+        k.rounded(r, 7.0, th.hover);
     }
+    let bg = if hovered { th.hover } else { th.chrome };
     let (mode, running) = v.awake;
     let on = mode != awake::Mode::Off;
-    let x = r.x + 10.0 * s;
-    let y1 = r.y + 6.0 * s;
-    let y2 = y1 + ch + 4.0 * s;
-    // Taza del alto de las dos líneas.
-    let icon = 26.0 * s;
-    let iy = r.y + (r.h - icon) / 2.0;
-    if let Some(g) = fonts.glyph('☕', font::REGULAR) {
-        let alpha = if running { 1.0 } else if on { 0.75 } else { 0.35 };
-        let k = icon / g.uv[2].max(g.uv[3]);
-        let (w, h) = (g.uv[2] * k, g.uv[3] * k);
-        let kind = if g.color { KIND_COLOR } else { KIND_MASK };
-        let color = if g.color { [1.0, 1.0, 1.0, alpha] } else { theme::TEXT_DIM };
-        out.push(Quad { rect: [x + (icon - w) / 2.0, iy + (icon - h) / 2.0, w, h], uv: g.uv, color, params: [kind, 0.0, 0.0, 0.0] });
-    }
-    // Círculo de estado, abajo a la derecha de la taza.
-    let d = 9.0 * s;
-    let (cx, cy) = (x + icon - d / 2.0, iy + icon - d / 2.0);
-    let bg = if hovered { theme::ITEM_HOVER } else { theme::CHROME_BG };
-    // Anillo del color del fondo, para separar el círculo de la taza.
-    let ring = d + 3.0 * s;
-    out.push(Quad::rounded(cx - ring / 2.0, cy - ring / 2.0, ring, ring, ring / 2.0, bg));
-    dot(out, cx - d / 2.0, cy, d, if running { theme::DONE } else { theme::MUTED });
-    let color = if hovered || on { theme::TEXT } else { theme::TEXT_DIM };
-    let tx = x + icon + 10.0 * s;
-    text(out, fonts, tx, y1, mode.label(), color, r.x + r.w - tx - 6.0 * s);
-    text(out, fonts, tx, y2, "⌘⇧C para cambiar", theme::TEXT_DIM, r.x + r.w - tx - 6.0 * s);
-
-    draw_update(out, fonts, l, v);
+    let icon_color = if running { th.done } else if on { th.text } else { th.text_dim };
+    let box_bg = if running { theme::mix(bg, th.done, 0.16) } else { th.active };
+    status_icon(k, r, icons::COFFEE, icon_color, box_bg, Some(if running { th.done } else { th.muted }), bg);
+    let tx = r.x + 46.0 * s;
+    let kw = k.kbd_width(&["⌘", "⇧", "C"]);
+    let max = r.x + r.w - tx - kw - 14.0 * s;
+    let desc = match mode {
+        awake::Mode::Off => "Apagado",
+        awake::Mode::On => "Siempre",
+        awake::Mode::Auto => "Con Claude",
+    };
+    k.text(tx, r.y + 7.0 * s, "Despierto", Text::label().color(if on { th.text } else { th.text_dim }), max);
+    k.text(tx, r.y + 25.0 * s, desc, Text::small(), max);
+    k.kbd(r.x + r.w - 8.0 * s, r.y + r.h / 2.0, &["⌘", "⇧", "C"]);
 }
 
-/// Pie: versión y, según el estado, buscar / actualizar (con progreso) / reiniciar.
-fn draw_update(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
+/// Versión y actualizaciones: ícono de estado, texto y botón según el estado.
+fn draw_update(k: &mut Kit, l: &Layout, v: &View) {
     let s = l.s;
-    let ch = fonts.cell_h;
-    let cw = fonts.cell_w;
+    let th = theme::t();
     let r = l.update_rect();
     let hovered = v.hover == Hit::Update;
-    out.push(Quad::rect(r.x + 4.0 * s, r.y - 2.0 * s, r.w - 8.0 * s, s, theme::BORDER));
     if hovered {
-        out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_HOVER));
+        k.rounded(r, 7.0, th.hover);
     }
-    let (x, y1) = (r.x + 12.0 * s, r.y + 5.0 * s);
-    let y2 = y1 + ch + 4.0 * s;
-    let inner = r.w - 24.0 * s;
-    text(out, fonts, x, y1, &format!("Telar {}", update::VERSION), theme::TEXT_DIM, inner);
-
-    // A la derecha de la primera línea: el estado en corto.
-    let link = if hovered { theme::TEXT } else { theme::TEXT_DIM };
+    let bg = if hovered { th.hover } else { th.chrome };
     let pct;
-    let (right, color): (&str, Rgba) = match v.update {
-        Status::Idle => ("Buscar ↻", link),
-        Status::Checking => ("Buscando…", theme::TEXT_DIM),
-        Status::UpToDate => ("Al día ✓", theme::DONE),
-        Status::Error(_) => ("Reintentar ↻", theme::ATTENTION),
-        Status::Available(_) => ("Nueva", theme::ACCENT),
+    let (icon, icon_color, desc): (char, Rgba, &str) = match v.update {
+        Status::Idle => (icons::TERMINAL, th.text_dim, "Buscar versión"),
+        Status::Checking => (icons::TERMINAL, th.text_dim, "Buscando…"),
+        Status::UpToDate => (icons::CIRCLE_CHECK, th.done, "Al día"),
+        Status::Available(_) => (icons::ARROW_DOWN_CIRCLE, th.accent, "Versión nueva"),
         Status::Downloading(..) => {
-            pct = format!("{:.0} %", v.update.progress().unwrap_or(0.0) * 100.0);
-            (pct.as_str(), theme::TEXT_DIM)
+            pct = format!("Descargando {:.0} %", v.update.progress().unwrap_or(0.0) * 100.0);
+            (icons::DOWNLOAD, th.accent, pct.as_str())
         }
-        Status::Applying(_) => ("Aplicando…", theme::TEXT_DIM),
-        Status::Ready(_) => ("Lista ✓", theme::DONE),
+        Status::Applying(_) => (icons::DOWNLOAD, th.accent, "Aplicando…"),
+        Status::Ready(_) => (icons::ROCKET, th.done, "Lista para usar"),
+        Status::Error(e) => (icons::CIRCLE_ALERT, th.attention, e.as_str()),
     };
-    let rw = right.chars().count() as f32 * cw;
-    text(out, fonts, r.x + r.w - 12.0 * s - rw, y1, right, color, rw + 1.0);
+    status_icon(k, r, icon, icon_color, th.active, None, bg);
+    let tx = r.x + 46.0 * s;
 
-    // Segunda línea: botón, barra de progreso o el error.
-    let button = |out: &mut Vec<Quad>, fonts: &mut Fonts, label: &str, bg: Rgba| {
-        let bh = ch + 4.0 * s;
-        out.push(Quad::rounded(x - 4.0 * s, y2 - 2.0 * s, inner + 8.0 * s, bh, 5.0 * s, bg));
-        let tw = (label.chars().count() as f32 * cw).min(inner);
-        text(out, fonts, x + (inner - tw) / 2.0, y2, label, theme::CHROME_BG, inner);
+    // Botón a la derecha (o ninguno mientras trabaja).
+    let bh = 24.0 * s;
+    let by = r.y + (r.h - bh) / 2.0;
+    let (label, variant) = match v.update {
+        Status::Available(rel) => (Some(format!("Actualizar a {}", rel.version)), Variant::Primary),
+        Status::Ready(_) => (Some("Reiniciar".to_string()), Variant::Primary),
+        _ => (None, Variant::Ghost),
     };
-    match v.update {
-        Status::Available(rel) => button(out, fonts, &format!("Actualizar a {}", rel.version), theme::ACCENT),
-        Status::Ready(ver) => button(out, fonts, &format!("Reiniciar ({ver})"), theme::DONE),
-        Status::Downloading(..) | Status::Applying(_) => {
-            let p = v.update.progress().unwrap_or(0.0);
-            let bh = 6.0 * s;
-            let by = y2 + (ch - bh) / 2.0;
-            out.push(Quad::rounded(x, by, inner, bh, bh / 2.0, theme::BORDER));
-            out.push(Quad::rounded(x, by, (inner * p).max(bh), bh, bh / 2.0, theme::ACCENT));
+    let mut right = r.x + r.w - 8.0 * s;
+    match &label {
+        Some(text) => {
+            let short = if matches!(v.update, Status::Available(_)) { "Actualizar" } else { text.as_str() };
+            let bw = k.measure(short, Text::label()) + 20.0 * s;
+            let b = Rect { x: right - bw, y: by, w: bw, h: bh };
+            k.button(b, short, None, variant, hovered);
+            right = b.x - 8.0 * s;
         }
-        Status::Error(e) => {
-            text(out, fonts, x, y2, e, theme::TEXT_DIM, inner);
+        None if matches!(v.update, Status::Idle | Status::UpToDate | Status::Error(_)) => {
+            let b = Rect { x: right - bh, y: by, w: bh, h: bh };
+            k.icon_button(b, icons::REFRESH, 14.0, hovered);
+            right = b.x - 6.0 * s;
         }
-        _ => {
-            text(out, fonts, x, y2, "Actualizaciones", theme::TEXT_DIM, inner);
-        }
+        None => {}
+    }
+    let title = match v.update {
+        Status::Available(rel) => format!("Telar {}", rel.version),
+        _ => format!("Telar {}", update::VERSION),
+    };
+    let desc = if let Status::Available(_) = v.update { format!("Tienes la {}", update::VERSION) } else { desc.to_string() };
+    k.text(tx, r.y + 7.0 * s, &title, Text::label(), right - tx);
+    k.text(tx, r.y + 25.0 * s, &desc, Text::small().color(if matches!(v.update, Status::Error(_)) { th.attention } else { th.text_dim }), right - tx);
+
+    if let Some(p) = v.update.progress() {
+        k.progress(Rect { x: tx, y: r.y + r.h - 6.0 * s, w: r.x + r.w - 8.0 * s - tx, h: 3.0 * s }, p);
     }
 }
 
 fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> Option<()> {
     let s = l.s;
-    let ch = fonts.cell_h;
+    let th = theme::t();
+    let mut k = Kit::new(out, fonts, s);
     let x0 = l.sidebar_w();
-    out.push(Quad::rect(x0, 0.0, l.w - x0, l.titlebar_h(), theme::CHROME_BG));
-    out.push(Quad::rect(x0, l.titlebar_h() - s, l.w - x0, s, theme::BORDER));
+    k.rect(Rect { x: x0, y: 0.0, w: l.w - x0, h: l.titlebar_h() }, th.chrome);
+    k.rect(Rect { x: x0, y: l.titlebar_h() - s, w: l.w - x0, h: s }, th.border);
 
     let g = v.ws.group()?;
     for (i, id) in g.tabs.iter().enumerate() {
@@ -638,48 +652,38 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
         let active = i == g.active;
         let hovered = matches!(v.hover, Hit::Tab(t) | Hit::CloseTab(t) if t == i);
         if active {
-            out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_ACTIVE));
+            k.rounded(r, 6.0, th.active);
         } else if hovered {
-            out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_HOVER));
+            k.rounded(r, 6.0, th.hover);
         }
         let fallback = format!("Tab {}", i + 1);
         let title = v.terms.get(id).and_then(Terminal::label).unwrap_or(&fallback);
         let close = l.tab_close_rect(i);
         let suspended = v.terms.get(id).is_some_and(Terminal::is_suspended);
-        let color = if active && !suspended { theme::TEXT } else { theme::TEXT_DIM };
-        let ty = r.y + (r.h - ch) / 2.0;
+        let style = if active && !suspended { Text::label() } else { Text::body().color(th.text_dim) };
+        let cy = r.y + r.h / 2.0;
         let mut tx = r.x + 10.0 * s;
         if suspended {
-            text(out, fonts, tx - 1.0 * s, ty, MOON, theme::TEXT_DIM, fonts.cell_w + 1.0);
-            tx += fonts.cell_w + 5.0 * s;
+            k.icon(tx + 6.0 * s, cy, icons::MOON, 13.0, th.text_dim);
+            tx += 18.0 * s;
         } else if let Some((_, color)) = v.terms.get(id).and_then(|t| status(t, v.time)) {
-            let d = 7.0 * s;
-            dot(out, tx, r.y + r.h / 2.0, d, color);
-            tx += d + 7.0 * s;
+            k.dot(tx + 3.5 * s, cy, 7.0, color);
+            tx += 14.0 * s;
         }
         match v.editing {
             Some((Edit::Tab(e), buf)) if e == *id => {
-                let w = text(out, fonts, tx, ty, buf, theme::TEXT, close.x - tx - 8.0 * s);
-                out.push(Quad::rect(tx + w + s, ty + 2.0 * s, 2.0 * s, ch - 4.0 * s, theme::ACCENT));
+                k.input(Rect { x: tx - 4.0 * s, y: r.y + 2.0 * s, w: close.x - tx, h: r.h - 4.0 * s }, buf, "Nombre del tab", None, true);
             }
             _ => {
-                text(out, fonts, tx, ty, title, color, close.x - tx - 4.0 * s);
+                k.text_in(Rect { w: close.x - r.x - 4.0 * s, ..r }, tx, title, style);
             }
         }
         if active || hovered {
-            if v.hover == Hit::CloseTab(i) {
-                out.push(Quad::rounded(close.x, close.y, close.w, close.h, 4.0 * s, theme::BORDER));
-            }
-            let cx = close.x + (close.w - fonts.cell_w) / 2.0;
-            text(out, fonts, cx, close.y + (close.h - ch) / 2.0, "×", theme::TEXT_DIM, fonts.cell_w + 1.0);
+            k.icon_button(close, icons::X, 13.0, v.hover == Hit::CloseTab(i));
         }
     }
     let r = l.new_tab_rect(g.tabs.len());
-    if v.hover == Hit::NewTab {
-        out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_HOVER));
-    }
-    let cx = r.x + (r.w - fonts.cell_w) / 2.0;
-    text(out, fonts, cx, r.y + (r.h - ch) / 2.0, "+", theme::TEXT_DIM, fonts.cell_w + 1.0);
+    k.icon_button(r, icons::PLUS, 15.0, v.hover == Hit::NewTab);
     Some(())
 }
 
@@ -745,7 +749,7 @@ fn draw_terminal(
             std::mem::swap(&mut cfg, &mut cbg);
         }
         if content.selection.is_some_and(|s| s.contains(p)) {
-            cbg = theme::SELECTION;
+            cbg = theme::t().selection;
         }
         if block_cursor && p == cursor.point {
             cbg = cursor_color;
@@ -800,8 +804,8 @@ fn draw_terminal(
         // Texto en composición (tecla muerta, p. ej. «´» antes de la vocal).
         let n = v.preedit.chars().count() as f32;
         fg.push(Quad::rect(x, y, n * cw, ch, default_bg));
-        text(fg, fonts, x, y, v.preedit, theme::TEXT, n * cw + 1.0);
-        fg.push(Quad::rect(x, y + ch - 2.0 * fonts.stroke, n * cw, fonts.stroke, theme::ACCENT));
+        text(fg, fonts, x, y, v.preedit, theme::t().text, n * cw + 1.0);
+        fg.push(Quad::rect(x, y + ch - 2.0 * fonts.stroke, n * cw, fonts.stroke, theme::t().accent));
     } else if show_cursor && !block_cursor {
         let t = (fonts.stroke * 2.0).max(2.0);
         match cursor.shape {
@@ -869,10 +873,10 @@ mod tests {
 
     fn menu(l: &Layout, x: f32, y: f32) -> Menu {
         let items = vec![
-            MenuItem::new("a", "", Action::Suspend),
+            MenuItem::new('a', "a", &[], Action::Suspend),
             MenuItem::separator(),
-            MenuItem::new("b", "", Action::Clear),
-            MenuItem::new("c", "", Action::CloseTab),
+            MenuItem::new('b', "b", &[], Action::Clear),
+            MenuItem::new('c', "c", &[], Action::CloseTab),
         ];
         Menu::new(x, y, Some(1), 0, items, l)
     }
