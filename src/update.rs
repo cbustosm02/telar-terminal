@@ -168,9 +168,13 @@ pub fn install_sync(release: &Release, progress: &dyn Fn(Status)) -> Result<(), 
             exe.display()
         ));
     }
+    install_to(&exe, release, progress)
+}
+
+/// Aplica `release` sobre el binario `exe`. La carpeta temporal se borra siempre.
+fn install_to(exe: &Path, release: &Release, progress: &dyn Fn(Status)) -> Result<(), String> {
     let tmp = exe.parent().unwrap_or(Path::new("/tmp")).join(format!("{TMP_PREFIX}{}", std::process::id()));
-    let result = apply(progress, release, &exe, &tmp);
-    // Siempre: la carpeta temporal no queda en el equipo.
+    let result = apply(progress, release, exe, &tmp);
     let _ = std::fs::remove_dir_all(&tmp);
     result
 }
@@ -355,6 +359,83 @@ mod tests {
         assert_eq!(app_bundle(exe), Some(Path::new("/Users/x/Applications/Telar.app")));
         assert_eq!(app_bundle(Path::new("/usr/local/bin/telar")), None);
         assert_eq!(shell_quote("a'b"), r"'a'\''b'");
+    }
+
+    /// Arma un release local (file://) cuyo «binario» es un script que informa `reports`.
+    fn release_local(dir: &Path, version: &str, reports: &str, bad_sha: bool) -> Release {
+        let pkg_dir = dir.join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        let bin = pkg_dir.join("telar");
+        std::fs::write(&bin, format!("#!/bin/sh\necho telar {reports}\n")).unwrap();
+        Command::new("/bin/chmod").arg("755").arg(&bin).status().unwrap();
+        let pkg = dir.join("telar.tar.gz");
+        assert!(Command::new("/usr/bin/tar").arg("-czf").arg(&pkg).arg("-C").arg(&pkg_dir).arg("telar").status().unwrap().success());
+        let out = Command::new("/usr/bin/shasum").args(["-a", "256"]).arg(&pkg).output().unwrap();
+        let mut sha = String::from_utf8_lossy(&out.stdout).to_string();
+        if bad_sha {
+            sha = format!("{}{}", "0".repeat(64), &sha[64..]);
+        }
+        let sha_file = dir.join("telar.tar.gz.sha256");
+        std::fs::write(&sha_file, sha).unwrap();
+        Release {
+            version: version.into(),
+            url: format!("file://{}", pkg.display()),
+            sha_url: format!("file://{}", sha_file.display()),
+            size: std::fs::metadata(&pkg).unwrap().len(),
+        }
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("telar-prueba-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("app")).unwrap();
+        d
+    }
+
+    fn leftovers(app: &Path) -> Vec<String> {
+        std::fs::read_dir(app).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(TMP_PREFIX)).collect()
+    }
+
+    #[test]
+    fn aplica_la_actualizacion_y_no_deja_basura() {
+        let dir = temp_dir("ok");
+        let exe = dir.join("app").join("telar");
+        std::fs::write(&exe, "viejo").unwrap();
+        let release = release_local(&dir, "9.9.9", "9.9.9", false);
+        let steps = std::cell::RefCell::new(Vec::new());
+        install_to(&exe, &release, &|s| steps.borrow_mut().push(s)).unwrap();
+        let out = Command::new(&exe).arg("--version").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "telar 9.9.9");
+        assert!(leftovers(&dir.join("app")).is_empty(), "no queda la carpeta temporal");
+        let steps = steps.borrow();
+        assert!(matches!(steps.first(), Some(Status::Downloading(..))));
+        assert!(matches!(steps.last(), Some(Status::Applying(_))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checksum_malo_no_toca_nada() {
+        let dir = temp_dir("sha");
+        let exe = dir.join("app").join("telar");
+        std::fs::write(&exe, "viejo").unwrap();
+        let release = release_local(&dir, "9.9.9", "9.9.9", true);
+        let err = install_to(&exe, &release, &|_| {}).unwrap_err();
+        assert!(err.contains("SHA-256"), "{err}");
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "viejo");
+        assert!(leftovers(&dir.join("app")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn binario_con_otra_version_no_se_instala() {
+        let dir = temp_dir("ver");
+        let exe = dir.join("app").join("telar");
+        std::fs::write(&exe, "viejo").unwrap();
+        let release = release_local(&dir, "9.9.9", "1.0.0", false);
+        assert!(install_to(&exe, &release, &|_| {}).unwrap_err().contains("9.9.9"));
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "viejo");
+        assert!(leftovers(&dir.join("app")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

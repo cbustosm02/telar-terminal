@@ -11,6 +11,8 @@ use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;
 use swash::FontRef;
 
+use crate::fontlist;
+
 pub const ATLAS_SIZE: u32 = 2048;
 
 /// Estilo de un glifo: índice en `primary`.
@@ -19,8 +21,10 @@ pub const BOLD: u8 = 1;
 pub const ITALIC: u8 = 2;
 pub const BOLD_ITALIC: u8 = 3;
 
-const PRIMARY: &str = "/System/Library/Fonts/Menlo.ttc";
+/// Respaldo para lo que no tenga la familia elegida. La fuente de emoji va última
+/// (`emoji_presentation` la busca ahí); los símbolos Nerd Font van justo antes.
 const FALLBACKS: &[&str] = &[
+    "/System/Library/Fonts/Menlo.ttc",
     "/System/Library/Fonts/SFNSMono.ttf",
     "/System/Library/Fonts/Apple Symbols.ttf",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
@@ -78,6 +82,8 @@ impl Atlas {
 }
 
 pub struct Fonts {
+    /// Familia en uso (la configurada, o la por defecto si no se encontró).
+    pub family: String,
     primary: [FontRef<'static>; 4],
     fallbacks: Vec<FontRef<'static>>,
     ctx: ScaleContext,
@@ -94,26 +100,27 @@ pub struct Fonts {
     pub atlas_reset: bool,
 }
 
-/// Mapea el archivo en memoria y lo deja vivo durante toda la app: las páginas
-/// solo se cargan cuando se leen, así Apple Color Emoji (~180 MB) no cuesta RAM.
-fn map(path: &str) -> Option<&'static [u8]> {
-    let file = std::fs::File::open(path).ok()?;
-    let mmap = unsafe { memmap2::Mmap::map(&file) }.ok()?;
-    let mmap: &'static memmap2::Mmap = Box::leak(Box::new(mmap));
-    Some(&mmap[..])
-}
-
 impl Fonts {
-    pub fn new(size: f32) -> Self {
-        let data = map(PRIMARY).expect("no se pudo abrir Menlo");
-        let face = |i: usize| FontRef::from_index(data, i).unwrap_or_else(|| FontRef::from_index(data, 0).unwrap());
-        let primary = [face(0), face(1), face(2), face(3)];
-        let fallbacks = FALLBACKS
+    /// Fuentes de la familia `family` (si no existe, la por defecto) a `size` píxeles.
+    pub fn new(family: &str, size: f32) -> Self {
+        let (family, primary) = match fontlist::load(family) {
+            Some(faces) => (family.to_string(), faces),
+            None => {
+                log::warn!("no se encontró la fuente «{family}»; se usa {}", fontlist::DEFAULT_FAMILY);
+                (fontlist::DEFAULT_FAMILY.to_string(), fontlist::load(fontlist::DEFAULT_FAMILY).expect("fuente incluida"))
+            }
+        };
+        // Las mapeadas se comparten entre instancias: `fontlist::map` no repite archivos.
+        let mut fallbacks: Vec<FontRef<'static>> = FALLBACKS
             .iter()
-            .filter_map(|p| map(p))
+            .filter_map(|p| fontlist::map(std::path::Path::new(p)))
             .filter_map(|d| FontRef::from_index(d, 0))
             .collect();
+        let emoji = fallbacks.pop();
+        fallbacks.extend(FontRef::from_index(fontlist::NERD_SYMBOLS, 0));
+        fallbacks.extend(emoji);
         let mut fonts = Self {
+            family,
             primary,
             fallbacks,
             ctx: ScaleContext::new(),
@@ -245,7 +252,7 @@ mod tests {
     /// Con las fuentes del sistema: celdas con tamaño, texto en máscara y emoji a color.
     #[test]
     fn glifos() {
-        let mut f = Fonts::new(26.0);
+        let mut f = Fonts::new(fontlist::DEFAULT_FAMILY, 26.0);
         assert!(f.cell_w > 10.0 && f.cell_h > f.cell_w);
         let a = f.glyph('a', REGULAR).unwrap();
         assert!(!a.color);

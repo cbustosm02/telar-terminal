@@ -2,7 +2,9 @@
 
 mod awake;
 mod cli;
+mod config;
 mod font;
+mod fontlist;
 mod hooks;
 mod input;
 mod ipc;
@@ -10,6 +12,7 @@ mod proc;
 mod renderer;
 mod screen;
 mod session;
+mod settings;
 mod terminal;
 mod theme;
 mod ui;
@@ -45,7 +48,6 @@ use crate::ui::{Action, Edit, Hit, Layout, Menu, MenuItem, View};
 use crate::session::{Saved, SavedGroup, SavedTab};
 use crate::workspace::{Group, Workspace};
 
-const FONT_PT: f32 = 13.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 const SPINNER_TICK: Duration = Duration::from_millis(80);
@@ -132,6 +134,9 @@ struct State {
     next_save: Instant,
     /// `caffeinate`: mantener el Mac despierto (⌘⇧C).
     awake: awake::Awake,
+    config: config::Config,
+    /// Modal de configuración abierto (⌘,).
+    settings: Option<settings::Settings>,
     update: update::Status,
     /// La búsqueda automática al abrir no muestra errores (p. ej. sin conexión).
     update_quiet: bool,
@@ -165,9 +170,12 @@ impl ApplicationHandler<UserEvent> for App {
         window.set_ime_allowed(true);
         let renderer = pollster::block_on(Renderer::new(window.clone()));
         let scale = window.scale_factor() as f32;
+        let config = config::Config::load();
         let mut state = State {
-            fonts: Fonts::new(FONT_PT * scale),
-            font_pt: FONT_PT,
+            fonts: Fonts::new(&config.font_family, config.font_size * scale),
+            font_pt: config.font_size,
+            config,
+            settings: None,
             palette: theme::palette(),
             window,
             renderer,
@@ -784,6 +792,10 @@ impl State {
             self.menu_key(event);
             return false;
         }
+        if self.settings.is_some() {
+            self.settings_key(event);
+            return false;
+        }
 
         // Renombrando un grupo o un tab: el teclado edita el nombre.
         if let Some((target, buf)) = self.editing.as_mut() {
@@ -895,9 +907,10 @@ impl State {
                 self.apply_font_size();
             }
             "0" => {
-                self.font_pt = FONT_PT;
+                self.font_pt = self.config.font_size;
                 self.apply_font_size();
             }
+            "," => self.toggle_settings(),
             d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
                 let n = (d.as_bytes()[0] - b'0') as usize;
                 if n > 0 {
@@ -940,6 +953,17 @@ impl State {
     fn on_cursor_moved(&mut self, pos: PhysicalPosition<f64>) {
         self.cursor = (pos.x as f32, pos.y as f32);
         let l = self.layout();
+        if let Some(st) = self.settings.as_mut() {
+            let hit = st.hit(self.cursor.0, self.cursor.1, &l, &self.fonts);
+            let hover = Some(hit);
+            if hover != st.hover {
+                st.hover = hover;
+                let pointer = matches!(hit, settings::Hit::Close | settings::Hit::Section(_) | settings::Hit::Font(_) | settings::Hit::SizeDown | settings::Hit::SizeUp);
+                self.window.set_cursor(if pointer { CursorIcon::Pointer } else { CursorIcon::Default });
+                self.window.request_redraw();
+            }
+            return;
+        }
         if let Some(menu) = self.menu.as_mut() {
             let hover = menu.item_at(self.cursor.0, self.cursor.1, self.window.scale_factor() as f32);
             if hover != menu.hover {
@@ -955,7 +979,9 @@ impl State {
             self.hover = hit;
             let icon = match hit {
                 Hit::Terminal => CursorIcon::Text,
-                Hit::Group(_) | Hit::NewGroup | Hit::Tab(_) | Hit::CloseTab(_) | Hit::NewTab | Hit::Awake | Hit::Update => CursorIcon::Pointer,
+                Hit::Group(_) | Hit::NewGroup | Hit::Tab(_) | Hit::CloseTab(_) | Hit::NewTab | Hit::Awake | Hit::Update | Hit::Settings => {
+                    CursorIcon::Pointer
+                }
                 _ => CursorIcon::Default,
             };
             self.window.set_cursor(icon);
@@ -988,6 +1014,14 @@ impl State {
         let n_tabs = self.ws.group().map_or(0, |g| g.tabs.len());
         let hit = l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs);
         let pressed = state == ElementState::Pressed;
+
+        // Configuración abierta: los clics son del modal.
+        if self.settings.is_some() {
+            if pressed && button == MouseButton::Left {
+                self.settings_click();
+            }
+            return;
+        }
 
         // Menú abierto: un clic elige una opción o lo cierra; no llega a lo de abajo.
         if let Some(menu) = &self.menu {
@@ -1068,6 +1102,7 @@ impl State {
             }
             (Hit::Awake, MouseButton::Left) => self.cycle_awake(),
             (Hit::Update, MouseButton::Left) => self.update_action(),
+            (Hit::Settings, MouseButton::Left) => self.toggle_settings(),
             (Hit::Drag, MouseButton::Left) => {
                 if count == 2 {
                     let max = self.window.is_maximized();
@@ -1132,6 +1167,16 @@ impl State {
 
     fn on_scroll(&mut self, delta: MouseScrollDelta) {
         let l = self.layout();
+        if let Some(st) = self.settings.as_mut() {
+            let rows = match delta {
+                MouseScrollDelta::LineDelta(_, y) => -y.round() as isize,
+                MouseScrollDelta::PixelDelta(p) => (-p.y as f32 / (26.0 * l.s())).round() as isize,
+            };
+            let page = st.page(&l, &self.fonts);
+            st.scroll_by(rows, page);
+            self.window.request_redraw();
+            return;
+        }
         if l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), 0) != Hit::Terminal {
             return;
         }
@@ -1414,6 +1459,120 @@ impl State {
         self.window.request_redraw();
     }
 
+    /// ⌘, o el engranaje: abre o cierra la configuración.
+    fn toggle_settings(&mut self) {
+        self.menu = None;
+        self.editing = None;
+        self.settings = match self.settings {
+            Some(_) => None,
+            None => Some(settings::Settings::open(&self.config.font_family)),
+        };
+        self.window.set_cursor(CursorIcon::Default);
+        self.window.request_redraw();
+    }
+
+    /// Cambia la familia de la terminal y la interfaz, y la guarda.
+    fn set_font_family(&mut self, family: &str) {
+        if family.eq_ignore_ascii_case(&self.fonts.family) {
+            return;
+        }
+        self.fonts = Fonts::new(family, self.font_pt * self.window.scale_factor() as f32);
+        self.config.font_family = self.fonts.family.clone();
+        self.config.save();
+        self.resize_terms();
+        self.window.request_redraw();
+    }
+
+    /// Tamaño desde la configuración: se aplica y queda como el de ⌘0.
+    fn set_font_size(&mut self, pt: f32) {
+        self.font_pt = pt.clamp(config::FONT_SIZE_MIN, config::FONT_SIZE_MAX);
+        self.config.font_size = self.font_pt;
+        self.config.save();
+        self.apply_font_size();
+    }
+
+    fn settings_click(&mut self) {
+        let l = self.layout();
+        let Some(st) = self.settings.as_mut() else { return };
+        match st.hit(self.cursor.0, self.cursor.1, &l, &self.fonts) {
+            settings::Hit::Outside | settings::Hit::Close => self.settings = None,
+            settings::Hit::Section(i) => st.section = i,
+            settings::Hit::Font(i) => {
+                let page = st.page(&l, &self.fonts);
+                st.select(i, page);
+                let name = st.visible()[i].name.clone();
+                self.set_font_family(&name);
+            }
+            settings::Hit::SizeDown => self.set_font_size(self.font_pt - 1.0),
+            settings::Hit::SizeUp => self.set_font_size(self.font_pt + 1.0),
+            settings::Hit::Inside => {}
+        }
+        self.window.request_redraw();
+    }
+
+    /// Teclado con la configuración abierta: escribir filtra, flechas eligen (y aplican),
+    /// ⌘+/⌘- cambian el tamaño, Esc o ⌘, cierran.
+    fn settings_key(&mut self, event: &KeyEvent) {
+        let l = self.layout();
+        let cmd = self.mods.super_key();
+        let Some(st) = self.settings.as_mut() else { return };
+        let page = st.page(&l, &self.fonts);
+        let mut apply = false;
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.settings = None,
+            Key::Named(NamedKey::ArrowDown) => {
+                st.select(st.selected + 1, page);
+                apply = true;
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                st.select(st.selected.saturating_sub(1), page);
+                apply = true;
+            }
+            Key::Named(NamedKey::PageDown) => {
+                st.select(st.selected + page, page);
+                apply = true;
+            }
+            Key::Named(NamedKey::PageUp) => {
+                st.select(st.selected.saturating_sub(page), page);
+                apply = true;
+            }
+            Key::Named(NamedKey::Enter) => apply = true,
+            Key::Named(NamedKey::Backspace) => {
+                st.filter.pop();
+                st.select(0, page);
+                st.scroll = 0;
+            }
+            _ if cmd => match event.key_without_modifiers() {
+                Key::Character(c) if c.as_str() == "," || c.as_str() == "w" => self.settings = None,
+                Key::Character(c) if c.as_str() == "=" || c.as_str() == "+" => self.set_font_size(self.font_pt + 1.0),
+                Key::Character(c) if c.as_str() == "-" => self.set_font_size(self.font_pt - 1.0),
+                Key::Character(c) if c.as_str() == "v" => {
+                    if let Some(text) = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) {
+                        if let Some(st) = self.settings.as_mut() {
+                            st.filter.extend(text.chars().filter(|c| !c.is_control()));
+                            st.select(0, page);
+                            st.scroll = 0;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {
+                if let Some(t) = &event.text {
+                    st.filter.extend(t.chars().filter(|c| !c.is_control()));
+                    st.select(0, page);
+                    st.scroll = 0;
+                }
+            }
+        }
+        if apply {
+            if let Some(name) = self.settings.as_ref().and_then(|st| st.visible().get(st.selected).map(|f| f.name.clone())) {
+                self.set_font_family(&name);
+            }
+        }
+        self.window.request_redraw();
+    }
+
     /// ⌘⇧C o clic abajo en la barra lateral: apagado → siempre → con Claude.
     fn cycle_awake(&mut self) {
         self.awake.mode = self.awake.mode.next();
@@ -1658,6 +1817,10 @@ impl State {
             let text = text.replace("\\n", "\r");
             self.send_input(text.into_bytes());
         }
+        // TELAR_SNAPSHOT_SETTINGS=1: captura con la configuración abierta.
+        if std::env::var_os("TELAR_SNAPSHOT_SETTINGS").is_some() {
+            self.toggle_settings();
+        }
         // TELAR_SNAPSHOT_MENU=tab|group: captura con el menú contextual abierto.
         match std::env::var("TELAR_SNAPSHOT_MENU").as_deref() {
             Ok("tab") => {
@@ -1693,7 +1856,11 @@ impl State {
             menu: self.menu.as_ref(),
             update: &self.update,
         };
-        let ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
+        let mut ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
+        if let Some(st) = &self.settings {
+            st.draw(&mut self.quads, &mut self.fonts, &l, &self.config.font_family, self.font_pt);
+            ime_cell = None;
+        }
         if let Some((col, row)) = ime_cell {
             let (x, y) = l.cell_origin(col, row);
             self.window.set_ime_cursor_area(

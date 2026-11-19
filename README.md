@@ -16,6 +16,13 @@ cargo build --release
 
 `telar uninstall` quita todo lo anterior.
 
+## Configuración
+
+**⌘,** (o el engranaje ⚙ junto a «GRUPOS») abre la configuración. Los cambios se aplican al instante (la terminal de atrás sirve de vista previa) y se guardan solos en `~/.config/telar/config.json`.
+
+- **Apariencia:** la fuente de la terminal y la interfaz, y su tamaño. La lista muestra JetBrains Mono (incluida en Telar; es la que usan Ghostty y cmux por defecto) y las fuentes monoespaciadas instaladas en el Mac. Escribe para filtrar; ↑↓ cambian la fuente; − y + el tamaño (⌘0 vuelve a ese tamaño).
+- Los íconos de prompts (Nerd Fonts) se ven con cualquier fuente: Telar incluye «Symbols Nerd Font» como respaldo.
+
 ## Actualizaciones
 
 Al pie de la barra lateral se ve la versión. Telar busca una nueva al abrirse (y con un clic en «Buscar ↻»). Si hay una, aparece **Actualizar a X.Y.Z** con una barra de progreso de la descarga y la aplicación, y luego **Reiniciar**. Al reiniciar, los grupos, tabs y sesiones de Claude se recuperan como siempre.
@@ -116,6 +123,7 @@ Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina so
 | ⌘S | Suspender o reanudar el tab activo (Enter también reanuda) |
 | ⌘⇧S | Suspender o reanudar el grupo activo |
 | ⌘⇧C | Despierto: no → siempre → mientras Claude trabaja |
+| ⌘, | Configuración (fuente y tamaño) |
 | ⌘N | Nuevo grupo |
 | ⌘W | Cerrar tab |
 | ⌘J | Ir al siguiente tab que te necesita |

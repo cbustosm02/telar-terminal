@@ -63,6 +63,8 @@ pub enum Hit {
     Awake,
     /// Versión y actualización, al pie de la barra lateral.
     Update,
+    /// Engranaje: abre la configuración.
+    Settings,
     /// Zona vacía de la barra de título: arrastra la ventana.
     Drag,
     Terminal,
@@ -101,6 +103,21 @@ impl Layout {
     /// Factor de escala (píxeles por punto).
     pub fn s(&self) -> f32 {
         self.s
+    }
+
+    /// Ancho y alto de la ventana en píxeles.
+    pub fn w(&self) -> f32 {
+        self.w
+    }
+
+    pub fn h(&self) -> f32 {
+        self.h
+    }
+
+    /// Engranaje de configuración, a la derecha de «GRUPOS».
+    fn settings_rect(&self) -> Rect {
+        let s = self.s;
+        Rect { x: (SIDEBAR_W - 36.0) * s, y: (LIST_TOP - 32.0) * s, w: 26.0 * s, h: 24.0 * s }
     }
 
     pub fn grid_size(&self) -> GridSize {
@@ -157,6 +174,9 @@ impl Layout {
             }
             if self.update_rect().contains(x, y) {
                 return Hit::Update;
+            }
+            if self.settings_rect().contains(x, y) {
+                return Hit::Settings;
             }
             if let Some(i) = (0..n_groups).find(|i| self.group_rect(*i).contains(x, y)) {
                 return Hit::Group(i);
@@ -359,7 +379,7 @@ fn push_glyph(out: &mut Vec<Quad>, fonts: &Fonts, g: Glyph, x: f32, y: f32, box_
 }
 
 /// Texto de una línea; recorta con «…» si no cabe. Devuelve el ancho usado.
-fn text(out: &mut Vec<Quad>, fonts: &mut Fonts, x: f32, y: f32, s: &str, color: Rgba, max_w: f32) -> f32 {
+pub fn text(out: &mut Vec<Quad>, fonts: &mut Fonts, x: f32, y: f32, s: &str, color: Rgba, max_w: f32) -> f32 {
     let cw = fonts.cell_w;
     let max_chars = (max_w / cw).floor().max(0.0) as usize;
     let n = s.chars().count();
@@ -451,7 +471,14 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
     let ch = fonts.cell_h;
     out.push(Quad::rect(0.0, 0.0, l.sidebar_w(), l.h, theme::CHROME_BG));
     out.push(Quad::rect(l.sidebar_w() - s, 0.0, s, l.h, theme::BORDER));
-    text(out, fonts, 18.0 * s, (LIST_TOP - 26.0) * s, "GRUPOS", theme::TEXT_DIM, (SIDEBAR_W - 30.0) * s);
+    text(out, fonts, 18.0 * s, (LIST_TOP - 26.0) * s, "GRUPOS", theme::TEXT_DIM, (SIDEBAR_W - 60.0) * s);
+    let g = l.settings_rect();
+    let hovered = v.hover == Hit::Settings;
+    if hovered {
+        out.push(Quad::rounded(g.x, g.y, g.w, g.h, 5.0 * s, theme::ITEM_HOVER));
+    }
+    let color = if hovered { theme::TEXT } else { theme::TEXT_DIM };
+    text(out, fonts, g.x + (g.w - fonts.cell_w) / 2.0, g.y + (g.h - ch) / 2.0, "⚙", color, fonts.cell_w + 1.0);
 
     for (i, g) in v.ws.groups.iter().enumerate() {
         let r = l.group_rect(i);
