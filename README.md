@@ -10,7 +10,7 @@ cargo build --release
 ```
 
 `install` deja:
-- la app en `~/Applications/Telar.app` (se abre desde Spotlight, Launchpad o el Dock);
+- la app en `/Applications/Telar.app` (se abre desde Spotlight, Launchpad o el Dock);
 - el enlace `~/.local/bin/telar` a esa app, para la CLI;
 - los hooks de Claude Code y la regla `~/.claude/rules/telar.md`.
 

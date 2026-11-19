@@ -1,6 +1,6 @@
 //! Instala o quita la integración con Claude Code:
 //! - hooks en `~/.claude/settings.json`;
-//! - la app `~/Applications/Telar.app` (copia de este binario; se actualiza sola);
+//! - la app `/Applications/Telar.app` (copia de este binario; se actualiza sola);
 //! - enlace `~/.local/bin/telar` al binario de la app;
 //! - regla `~/.claude/rules/telar.md`, para que Claude sepa usar la CLI.
 //!

@@ -1,4 +1,4 @@
-//! Actualizaciones desde los releases de GitHub, e instalación como `~/Applications/Telar.app`.
+//! Actualizaciones desde los releases de GitHub, e instalación como `/Applications/Telar.app`.
 //!
 //! Flujo: `check` consulta el último release; `install` descarga el paquete a una carpeta
 //! temporal junto al binario (mismo disco, para que el reemplazo sea un `rename` atómico),
@@ -258,12 +258,21 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-pub fn app_path() -> PathBuf {
+fn user_app_path() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     home.join("Applications").join("Telar.app")
 }
 
-/// Crea (o actualiza) `~/Applications/Telar.app` con una copia de este binario.
+/// `/Applications/Telar.app` (la ve el Finder en «Aplicaciones»); si no se puede escribir
+/// ahí (usuario sin permisos de administrador), `~/Applications/Telar.app`.
+pub fn app_path() -> PathBuf {
+    let system = Path::new("/Applications");
+    let writable = std::fs::metadata(system).is_ok_and(|m| !m.permissions().readonly())
+        && Command::new("/bin/test").arg("-w").arg(system).status().is_ok_and(|s| s.success());
+    if writable { system.join("Telar.app") } else { user_app_path() }
+}
+
+/// Crea (o actualiza) `/Applications/Telar.app` con una copia de este binario.
 /// Devuelve la ruta del binario dentro de la app.
 pub fn install_app() -> Result<PathBuf, String> {
     let exe = current_exe()?;
@@ -279,6 +288,11 @@ pub fn install_app() -> Result<PathBuf, String> {
         std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
     }
     sign(&app);
+    // Una copia de antes en ~/Applications ya no hace falta.
+    let old = user_app_path();
+    if old != app && old.exists() {
+        let _ = std::fs::remove_dir_all(&old);
+    }
     Ok(dest)
 }
 
