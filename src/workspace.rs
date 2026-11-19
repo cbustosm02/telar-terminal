@@ -136,3 +136,123 @@ impl Workspace {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Workspace con grupos de los tabs indicados; queda activo el último grupo.
+    fn ws(groups: &[&[u64]]) -> Workspace {
+        let mut w = Workspace::default();
+        for tabs in groups {
+            w.add_group(tabs[0]);
+            for id in &tabs[1..] {
+                w.add_tab(*id);
+            }
+        }
+        w
+    }
+
+    #[test]
+    fn grupos_nuevos_con_nombre_por_defecto() {
+        let w = ws(&[&[1], &[2]]);
+        assert_eq!(w.groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["Grupo 1", "Grupo 2"]);
+        assert_eq!(w.active, 1);
+        assert_eq!(w.active_term(), Some(2));
+    }
+
+    #[test]
+    fn nombre_por_defecto() {
+        assert!(is_default_name("Grupo 1"));
+        assert!(is_default_name("Grupo 42"));
+        assert!(!is_default_name("Grupo"));
+        assert!(!is_default_name("Grupo "));
+        assert!(!is_default_name("Grupo uno"));
+        assert!(!is_default_name("telar"));
+    }
+
+    #[test]
+    fn add_tab_inserta_a_la_derecha_del_activo() {
+        let mut w = ws(&[&[1, 2, 3]]);
+        w.select_tab(0);
+        w.add_tab(9);
+        assert_eq!(w.groups[0].tabs, [1, 9, 2, 3]);
+        assert_eq!(w.active_term(), Some(9));
+    }
+
+    #[test]
+    fn quitar_tab_ajusta_el_activo() {
+        let mut w = ws(&[&[1, 2, 3]]);
+        w.select_tab(2);
+        assert!(!w.remove_term(1));
+        assert_eq!(w.groups[0].tabs, [2, 3]);
+        assert_eq!(w.active_term(), Some(3), "el activo sigue siendo el mismo tab");
+        w.remove_term(3);
+        assert_eq!(w.active_term(), Some(2));
+    }
+
+    #[test]
+    fn quitar_el_ultimo_tab_elimina_el_grupo() {
+        let mut w = ws(&[&[1], &[2], &[3]]);
+        w.select_group(2);
+        assert!(!w.remove_term(2));
+        assert_eq!(w.groups.len(), 2);
+        assert_eq!(w.active_term(), Some(3), "el grupo activo no cambia aunque se borre uno anterior");
+        w.remove_term(1);
+        assert!(w.remove_term(3), "sin grupos devuelve true");
+    }
+
+    #[test]
+    fn ciclos_dan_la_vuelta() {
+        let mut w = ws(&[&[1, 2], &[3]]);
+        w.select_group(0);
+        w.select_tab(1);
+        w.cycle_tab(1);
+        assert_eq!(w.active_term(), Some(1));
+        w.cycle_tab(-1);
+        assert_eq!(w.active_term(), Some(2));
+        w.cycle_group(1);
+        assert_eq!(w.active, 1);
+        w.cycle_group(1);
+        assert_eq!(w.active, 0);
+    }
+
+    #[test]
+    fn seleccion_fuera_de_rango_no_hace_nada() {
+        let mut w = ws(&[&[1, 2]]);
+        w.select_tab(7);
+        w.select_group(7);
+        assert_eq!((w.active, w.groups[0].active), (0, 1));
+    }
+
+    #[test]
+    fn insert_tab_sin_foco_no_cambia_la_vista() {
+        let mut w = ws(&[&[1], &[2]]);
+        w.insert_tab(0, 5, false);
+        assert_eq!(w.groups[0].tabs, [1, 5]);
+        assert_eq!(w.active_term(), Some(2));
+        w.insert_tab(0, 6, true);
+        assert_eq!(w.active_term(), Some(6));
+        assert_eq!(w.group_of(6), Some(0));
+        assert_eq!(w.group_of(99), None);
+    }
+
+    #[test]
+    fn push_group_con_carpeta() {
+        let mut w = ws(&[&[1]]);
+        let gi = w.push_group("api".into(), 2, false, Some("/tmp".into()));
+        assert_eq!(gi, 1);
+        assert_eq!(w.active, 0, "sin foco no cambia el grupo activo");
+        assert_eq!(w.groups[1].dir.as_deref(), Some(std::path::Path::new("/tmp")));
+    }
+
+    #[test]
+    fn restore_acota_el_activo_y_sigue_numerando() {
+        let mut w = Workspace::default();
+        let g = |name: &str, id| Group { name: name.into(), tabs: vec![id], active: 0, dir: None };
+        w.restore(vec![g("a", 1), g("b", 2)], 9);
+        assert_eq!(w.active, 1);
+        w.add_group(3);
+        assert_eq!(w.groups[2].name, "Grupo 3");
+    }
+}

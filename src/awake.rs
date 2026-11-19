@@ -108,3 +108,43 @@ impl Drop for Awake {
         self.stop();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ciclo_de_modos() {
+        assert_eq!(Mode::Off.next(), Mode::On);
+        assert_eq!(Mode::On.next(), Mode::Auto);
+        assert_eq!(Mode::Auto.next(), Mode::Off);
+    }
+
+    #[test]
+    fn nombres_ida_y_vuelta() {
+        for m in [Mode::Off, Mode::On, Mode::Auto] {
+            assert_eq!(Mode::parse(m.name()), Some(m));
+        }
+        assert_eq!(Mode::parse("sí"), Some(Mode::On));
+        assert_eq!(Mode::parse("turbo"), None);
+    }
+
+    /// Lanza y detiene caffeinate de verdad según el modo.
+    #[test]
+    fn arranca_y_detiene_caffeinate() {
+        let mut a = Awake::default();
+        a.update(true);
+        assert!(!a.active(), "apagado no corre aunque Claude trabaje");
+        a.mode = Mode::Auto;
+        a.update(false);
+        assert!(!a.active());
+        a.update(true);
+        assert!(a.active());
+        a.update(false);
+        assert!(!a.active());
+        a.mode = Mode::On;
+        a.update(false);
+        assert!(a.active());
+        drop(a); // al soltarlo, termina
+    }
+}

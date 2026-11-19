@@ -80,14 +80,19 @@ pub struct Layout {
 
 impl Layout {
     pub fn new(w: f32, h: f32, s: f32, fonts: &Fonts, n_tabs: usize) -> Self {
+        Self::with_cell(w, h, s, fonts.cell_w, fonts.cell_h, n_tabs)
+    }
+
+    /// Layout para una ventana de `w`×`h` píxeles, escala `s` y celdas de `cell_w`×`cell_h`.
+    pub fn with_cell(w: f32, h: f32, s: f32, cell_w: f32, cell_h: f32, n_tabs: usize) -> Self {
         let grid_x = (SIDEBAR_W + PAD_X) * s;
         let grid_y = (TITLEBAR_H + PAD_Y) * s;
-        let cols = (((w - grid_x - PAD_X * s) / fonts.cell_w).floor() as usize).max(2);
-        let rows = (((h - grid_y - PAD_Y * s) / fonts.cell_h).floor() as usize).max(1);
+        let cols = (((w - grid_x - PAD_X * s) / cell_w).floor() as usize).max(2);
+        let rows = (((h - grid_y - PAD_Y * s) / cell_h).floor() as usize).max(1);
         let avail = w - (SIDEBAR_W + 8.0 + NEW_TAB_W + 8.0) * s;
         let n = n_tabs.max(1) as f32;
         let tab_w = (avail / n - TAB_GAP * s).clamp(TAB_MIN_W * s, TAB_MAX_W * s);
-        Self { s, w, h, tab_w, cell_w: fonts.cell_w, cell_h: fonts.cell_h, grid_x, grid_y, cols, rows }
+        Self { s, w, h, tab_w, cell_w, cell_h, grid_x, grid_y, cols, rows }
     }
 
     /// Factor de escala (píxeles por punto).
@@ -714,4 +719,91 @@ fn draw_terminal(
 pub fn grid_point(term: &Term<Listener>, col: usize, row: usize) -> Point {
     let offset = term.grid().display_offset() as i32;
     Point::new(Line(row as i32 - offset), Column(col))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout() -> Layout {
+        Layout::with_cell(1200.0, 780.0, 1.0, 8.0, 16.0, 3)
+    }
+
+    #[test]
+    fn grilla_descuenta_barra_lateral_y_titulo() {
+        let l = layout();
+        assert_eq!(l.cols, ((1200.0 - (SIDEBAR_W + 2.0 * PAD_X)) / 8.0) as usize);
+        assert_eq!(l.rows, ((780.0 - (TITLEBAR_H + 2.0 * PAD_Y)) / 16.0) as usize);
+    }
+
+    #[test]
+    fn zonas_de_clic() {
+        let l = layout();
+        let g = l.group_rect(1);
+        assert_eq!(l.hit(g.x + 5.0, g.y + 5.0, 3, 3), Hit::Group(1));
+        let n = l.group_rect(3);
+        assert_eq!(l.hit(n.x + 5.0, n.y + 5.0, 3, 3), Hit::NewGroup);
+        let t = l.tab_rect(2);
+        assert_eq!(l.hit(t.x + 5.0, t.y + 5.0, 3, 3), Hit::Tab(2));
+        let c = l.tab_close_rect(0);
+        assert_eq!(l.hit(c.x + 2.0, c.y + 2.0, 3, 3), Hit::CloseTab(0));
+        let a = l.awake_rect();
+        assert_eq!(l.hit(a.x + 5.0, a.y + 5.0, 3, 3), Hit::Awake);
+        assert_eq!(l.hit(600.0, 400.0, 3, 3), Hit::Terminal);
+        assert_eq!(l.hit(1100.0, 10.0, 3, 3), Hit::Drag);
+    }
+
+    #[test]
+    fn celda_bajo_el_puntero() {
+        let l = layout();
+        let (x, y) = l.cell_origin(3, 2);
+        let (col, row, side) = l.cell_at(x + 1.0, y + 1.0);
+        assert_eq!((col, row, side), (3, 2, Side::Left));
+        assert_eq!(l.cell_at(x + 7.0, y).2, Side::Right);
+        assert_eq!(l.cell_at(99999.0, 99999.0).0, l.cols - 1, "fuera de la grilla se acota");
+    }
+
+    fn menu(l: &Layout, x: f32, y: f32) -> Menu {
+        let items = vec![
+            MenuItem::new("a", "", Action::Suspend),
+            MenuItem::separator(),
+            MenuItem::new("b", "", Action::Clear),
+            MenuItem::new("c", "", Action::CloseTab),
+        ];
+        Menu::new(x, y, Some(1), 0, items, l)
+    }
+
+    #[test]
+    fn menu_no_se_sale_de_la_ventana() {
+        let l = layout();
+        let m = menu(&l, 1190.0, 770.0);
+        let b = m.bounds(1.0);
+        assert!(b.x + b.w <= 1200.0 && b.y + b.h <= 780.0);
+    }
+
+    #[test]
+    fn menu_flechas_saltan_separadores_y_dan_la_vuelta() {
+        let l = layout();
+        let mut m = menu(&l, 10.0, 10.0);
+        m.step(1);
+        assert_eq!(m.hover, Some(0));
+        m.step(1);
+        assert_eq!(m.hover, Some(2), "salta el separador");
+        m.step(1);
+        m.step(1);
+        assert_eq!(m.hover, Some(0), "vuelve al principio");
+        m.step(-1);
+        assert_eq!(m.hover, Some(3));
+    }
+
+    #[test]
+    fn menu_clic_en_separador_no_cuenta() {
+        let l = layout();
+        let m = menu(&l, 10.0, 10.0);
+        let rows: Vec<(usize, Rect)> = m.rows(1.0).collect();
+        let (_, sep) = rows[1];
+        assert_eq!(m.item_at(sep.x + 5.0, sep.y + 2.0, 1.0), None);
+        let (_, b) = rows[2];
+        assert_eq!(m.item_at(b.x + 5.0, b.y + 5.0, 1.0), Some(2));
+    }
 }

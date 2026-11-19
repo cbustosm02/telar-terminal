@@ -30,11 +30,51 @@ pub fn name(pid: i32) -> Option<String> {
     let mut buf = [0u8; 256];
     let len = unsafe { libc::proc_name(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
     let name = (len > 0).then(|| String::from_utf8_lossy(&buf[..len as usize]).into_owned())?;
-    // El binario nativo de Claude Code se llama como su versión (p. ej. «2.1.327»).
+    Some(display_name(name))
+}
+
+/// El binario nativo de Claude Code se llama como su versión (p. ej. «2.1.327»): se muestra «claude».
+pub fn display_name(name: String) -> String {
     let is_version = name.split('.').count() >= 3 && name.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
-    Some(if is_version { "claude".to_string() } else { name })
+    if is_version { "claude".to_string() } else { name }
 }
 
 pub fn is_shell(name: &str) -> bool {
     matches!(name.trim_start_matches('-'), "zsh" | "bash" | "fish" | "sh" | "login")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_de_claude_se_muestra_como_claude() {
+        assert_eq!(display_name("2.1.327".into()), "claude");
+        assert_eq!(display_name("10.0.1.4".into()), "claude");
+    }
+
+    #[test]
+    fn otros_nombres_quedan_igual() {
+        for n in ["zsh", "node", "1.2", "v2.1.3", "2..1", "python3.13"] {
+            assert_eq!(display_name(n.into()), n);
+        }
+    }
+
+    #[test]
+    fn shells() {
+        for n in ["zsh", "-zsh", "bash", "fish", "sh", "login"] {
+            assert!(is_shell(n), "{n}");
+        }
+        for n in ["claude", "node", "vim", "zshx"] {
+            assert!(!is_shell(n), "{n}");
+        }
+    }
+
+    /// El proceso de la prueba sí existe: tiene nombre y carpeta.
+    #[test]
+    fn proceso_propio() {
+        let pid = std::process::id() as i32;
+        assert!(name(pid).is_some());
+        assert_eq!(cwd(pid), std::env::current_dir().ok());
+    }
 }

@@ -227,3 +227,30 @@ fn emoji_presentation(c: char) -> bool {
         | 0x2705 | 0x270A..=0x270B | 0x2728 | 0x274C | 0x274E | 0x2753..=0x2755 | 0x2757
         | 0x2795..=0x2797 | 0x27B0 | 0x27BF | 0x2B1B..=0x2B1C | 0x2B50 | 0x2B55)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presentacion_de_emoji() {
+        for c in ['☕', '⚡', '✅', '❌', '⭐', '⌚'] {
+            assert!(emoji_presentation(c), "{c}");
+        }
+        for c in ['✓', '★', '☾', 'a', '⌘', '·'] {
+            assert!(!emoji_presentation(c), "{c}");
+        }
+    }
+
+    /// Con las fuentes del sistema: celdas con tamaño, texto en máscara y emoji a color.
+    #[test]
+    fn glifos() {
+        let mut f = Fonts::new(26.0);
+        assert!(f.cell_w > 10.0 && f.cell_h > f.cell_w);
+        let a = f.glyph('a', REGULAR).unwrap();
+        assert!(!a.color);
+        assert!(f.glyph(' ', REGULAR).is_none(), "el espacio no tiene glifo");
+        assert!(f.glyph('☕', REGULAR).unwrap().color, "☕ sale de la fuente de emoji");
+        assert!(f.glyph('日', REGULAR).is_some(), "CJK desde una fuente de respaldo");
+    }
+}

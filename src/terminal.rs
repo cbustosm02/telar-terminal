@@ -287,7 +287,13 @@ impl Terminal {
 
     /// Texto de las últimas `lines` líneas lógicas (las líneas partidas por ancho se unen).
     pub fn text(&self, lines: usize) -> String {
-        let term = self.term.lock();
+        grid_text(&self.term.lock(), lines)
+    }
+}
+
+/// Texto de las últimas `lines` líneas lógicas de `term` (pantalla y scrollback).
+pub fn grid_text<L: EventListener>(term: &Term<L>, lines: usize) -> String {
+    {
         let grid = term.grid();
         let cols = grid.columns();
         let top = grid.topmost_line().0;
@@ -336,5 +342,58 @@ impl Drop for Terminal {
         if let Some(n) = &self.notifier {
             let _ = n.0.send(Msg::Shutdown);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alacritty_terminal::event::VoidListener;
+
+    use super::*;
+
+    fn term(cols: usize, rows: usize, input: &str) -> Term<VoidListener> {
+        let size = GridSize { cols, rows, cell_w: 8, cell_h: 16 };
+        let mut t = Term::new(Config { scrolling_history: 100, ..Default::default() }, &size, VoidListener);
+        crate::screen::load(&mut t, input);
+        t
+    }
+
+    #[test]
+    fn ultimas_lineas_sin_filas_vacias_al_final() {
+        let t = term(20, 10, "uno\r\ndos\r\ntres");
+        assert_eq!(grid_text(&t, 2), "dos\ntres");
+        assert_eq!(grid_text(&t, 50), "uno\ndos\ntres");
+    }
+
+    #[test]
+    fn une_las_lineas_partidas_por_ancho() {
+        // 25 caracteres en 10 columnas: una línea lógica en tres filas.
+        let t = term(10, 6, "abcdefghijklmnopqrstuvwxy\r\nfin");
+        assert_eq!(grid_text(&t, 2), "abcdefghijklmnopqrstuvwxy\nfin");
+    }
+
+    #[test]
+    fn incluye_el_scrollback() {
+        let lines: Vec<String> = (1..=30).map(|i| i.to_string()).collect();
+        let t = term(10, 5, &lines.join("\r\n"));
+        assert_eq!(grid_text(&t, 30).lines().count(), 30);
+        assert_eq!(grid_text(&t, 3), "28\n29\n30");
+    }
+
+    #[test]
+    fn caracteres_anchos_sin_espacios_de_relleno() {
+        let t = term(20, 3, "日本語 ok");
+        assert_eq!(grid_text(&t, 1), "日本語 ok");
+    }
+
+    #[test]
+    fn estados_del_agente() {
+        let mut a = Agent::default();
+        assert_eq!(a.state.name(), "shell");
+        assert!(a.set_state(AgentState::Working));
+        assert!(!a.set_state(AgentState::Working), "mismo estado: no cuenta como cambio");
+        assert!(a.set_state(AgentState::Done));
+        assert_eq!(a.changes, 2);
+        assert_eq!(a.state.name(), "done");
     }
 }

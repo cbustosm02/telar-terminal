@@ -111,7 +111,18 @@ fn save(path: &PathBuf, root: &Value) -> Result<(), String> {
 
 pub fn install_hooks() -> Result<String, String> {
     let (path, mut root) = load()?;
-    let hooks = root.as_object_mut().unwrap().entry("hooks").or_insert_with(|| json!({}));
+    let added = add_hooks(&mut root)?;
+    if added.is_empty() {
+        return Ok(format!("Los hooks de Telar ya estaban en {}", path.display()));
+    }
+    save(&path, &root)?;
+    Ok(format!("Hooks agregados en {}: {}", path.display(), added.join(", ")))
+}
+
+/// Agrega a `root` (el settings.json) un hook de Telar por evento, sin tocar los demás.
+/// Devuelve los eventos agregados (vacío si ya estaban todos).
+fn add_hooks(root: &mut Value) -> Result<Vec<&'static str>, String> {
+    let hooks = root.as_object_mut().ok_or("settings.json no es un objeto")?.entry("hooks").or_insert_with(|| json!({}));
     let hooks = hooks.as_object_mut().ok_or("\"hooks\" no es un objeto")?;
     let mut added = Vec::new();
     for (event, matcher) in EVENTS {
@@ -127,18 +138,22 @@ pub fn install_hooks() -> Result<String, String> {
         list.push(entry);
         added.push(*event);
     }
-    if added.is_empty() {
-        return Ok(format!("Los hooks de Telar ya estaban en {}", path.display()));
-    }
-    save(&path, &root)?;
-    Ok(format!("Hooks agregados en {}: {}", path.display(), added.join(", ")))
+    Ok(added)
 }
 
 pub fn uninstall_hooks() -> Result<String, String> {
     let (path, mut root) = load()?;
-    let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
+    let removed = remove_hooks(&mut root);
+    if removed == 0 {
         return Ok("No había hooks de Telar".into());
-    };
+    }
+    save(&path, &root)?;
+    Ok(format!("Se quitaron {removed} hooks de Telar de {}", path.display()))
+}
+
+/// Quita de `root` solo los hooks de Telar; los eventos que quedan vacíos se borran.
+fn remove_hooks(root: &mut Value) -> usize {
+    let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else { return 0 };
     let mut removed = 0;
     for (_, list) in hooks.iter_mut() {
         if let Some(list) = list.as_array_mut() {
@@ -147,10 +162,62 @@ pub fn uninstall_hooks() -> Result<String, String> {
             removed += before - list.len();
         }
     }
-    hooks.retain(|_, list| list.as_array().is_none_or(|l| !l.is_empty()));
-    if removed == 0 {
-        return Ok("No había hooks de Telar".into());
+    if removed > 0 {
+        hooks.retain(|_, list| list.as_array().is_none_or(|l| !l.is_empty()));
     }
-    save(&path, &root)?;
-    Ok(format!("Se quitaron {removed} hooks de Telar de {}", path.display()))
+    removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ajeno() -> Value {
+        json!({ "hooks": [{ "type": "command", "command": "~/.claude/idioma.sh" }] })
+    }
+
+    #[test]
+    fn agrega_un_hook_por_evento_y_respeta_los_ajenos() {
+        let mut root = json!({ "model": "opus", "hooks": { "Stop": [ajeno()] } });
+        let added = add_hooks(&mut root).unwrap();
+        assert_eq!(added.len(), EVENTS.len());
+        assert_eq!(root["model"], "opus");
+        let stop = root["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2);
+        assert_eq!(stop[0], ajeno(), "el hook ajeno queda primero e intacto");
+        assert_eq!(root["hooks"]["PreToolUse"][0]["matcher"], "*");
+        assert!(root["hooks"]["Stop"][1].get("matcher").is_none());
+    }
+
+    #[test]
+    fn instalar_dos_veces_no_duplica() {
+        let mut root = json!({});
+        add_hooks(&mut root).unwrap();
+        let antes = root.clone();
+        assert!(add_hooks(&mut root).unwrap().is_empty());
+        assert_eq!(root, antes);
+    }
+
+    #[test]
+    fn quitar_deja_solo_los_ajenos() {
+        let mut root = json!({ "hooks": { "Stop": [ajeno()] } });
+        add_hooks(&mut root).unwrap();
+        assert_eq!(remove_hooks(&mut root), EVENTS.len());
+        assert_eq!(root, json!({ "hooks": { "Stop": [ajeno()] } }));
+        assert_eq!(remove_hooks(&mut root), 0);
+    }
+
+    #[test]
+    fn errores_de_formato() {
+        assert!(add_hooks(&mut json!([])).is_err());
+        assert!(add_hooks(&mut json!({ "hooks": 1 })).is_err());
+        assert!(add_hooks(&mut json!({ "hooks": { "Stop": {} } })).is_err());
+    }
+
+    /// El comando no hace nada fuera de Telar y llama al binario del tab.
+    #[test]
+    fn comando_del_hook() {
+        assert!(COMMAND.starts_with(r#"[ -z "$TELAR_SOCKET" ] ||"#));
+        assert!(COMMAND.contains(MARK));
+    }
 }

@@ -116,3 +116,25 @@ pub fn paste_bytes(text: &str, mode: TermMode) -> Vec<u8> {
         text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pegado_simple_convierte_saltos_en_enter() {
+        assert_eq!(paste_bytes("a\nb\r\nc", TermMode::empty()), b"a\rb\rc");
+    }
+
+    #[test]
+    fn pegado_con_bracketed_paste() {
+        assert_eq!(paste_bytes("ls\nrm", TermMode::BRACKETED_PASTE), b"\x1b[200~ls\nrm\x1b[201~");
+    }
+
+    /// Un ESC dentro del texto pegado podría cerrar el bracketed paste y ejecutar lo que sigue.
+    #[test]
+    fn pegado_no_deja_escapar_secuencias() {
+        let bytes = paste_bytes("x\x1b[201~; rm -rf ~", TermMode::BRACKETED_PASTE);
+        assert_eq!(bytes, b"\x1b[200~x[201~; rm -rf ~\x1b[201~");
+    }
+}

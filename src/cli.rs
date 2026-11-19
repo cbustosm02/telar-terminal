@@ -232,3 +232,46 @@ fn wait(tab: Value, target: Option<String>, timeout: Duration) -> Result<String,
         std::thread::sleep(Duration::from_millis(500));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str], with_value: &[&str]) -> Args {
+        Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>(), with_value)
+    }
+
+    #[test]
+    fn flags_y_posicionales() {
+        let a = args(&["tab1", "-n", "20", "--enter", "hola"], &["-n"]);
+        assert_eq!(a.positional, ["tab1", "hola"]);
+        assert_eq!(a.value(&["-n", "--lines"]), Some("20"));
+        assert!(a.has(&["--enter"]));
+        assert!(!a.has(&["--focus"]));
+    }
+
+    #[test]
+    fn todo_despues_de_doble_guion_es_posicional() {
+        let a = args(&["--group", "api", "--", "claude", "--resume", "x"], &["--group"]);
+        assert_eq!(a.value(&["--group", "-g"]), Some("api"));
+        assert_eq!(a.positional, ["claude", "--resume", "x"]);
+    }
+
+    #[test]
+    fn flag_con_valor_al_final_sin_valor() {
+        let a = args(&["--dir"], &["--dir"]);
+        assert!(a.has(&["--dir"]));
+        assert_eq!(a.value(&["--dir"]), None);
+    }
+
+    #[test]
+    fn tab_spec_numeros_y_texto() {
+        assert_eq!(tab_spec("telar/2"), json!("telar/2"));
+        assert_eq!(tab_spec("12"), json!("12"));
+    }
+
+    #[test]
+    fn comando_desconocido() {
+        assert!(run("nada", &[]).unwrap_err().starts_with("Comando desconocido"));
+    }
+}
