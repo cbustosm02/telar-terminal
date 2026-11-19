@@ -322,6 +322,11 @@ impl Terminal {
         }
     }
 
+    /// Lo que corre en primer plano es una sesión remota (ssh o mosh).
+    pub fn is_remote(&self) -> bool {
+        matches!(self.process.as_deref(), Some("ssh" | "mosh-client" | "autossh"))
+    }
+
     /// Texto de las últimas `lines` líneas lógicas (las líneas partidas por ancho se unen).
     pub fn text(&self, lines: usize) -> String {
         grid_text(&self.term.lock(), lines)

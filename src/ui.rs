@@ -421,6 +421,9 @@ pub struct View<'a> {
     pub over_groups: &'a [bool],
     /// Grupo sobre el que se va a soltar un tab arrastrado.
     pub drop_group: Option<usize>,
+    /// Celda de la terminal bajo el puntero (columna, fila), si al hacer clic se abriría
+    /// un enlace ahí: el enlace se resalta.
+    pub link_cell: Option<(usize, usize)>,
 }
 
 /// Resultado de buscar en la barra lateral: un grupo, o un tab de un grupo.
@@ -922,12 +925,25 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
         let style = if active && !suspended { Text::label() } else { Text::body().color(th.text_dim) };
         let cy = r.y + r.h / 2.0;
         let mut tx = r.x + 10.0 * s;
+        let term = v.terms.get(id);
+        // Prefijos que pone Telar (no son parte del nombre ni se editan): la luna si está
+        // suspendido; si no, el ícono de Claude, el estado y la etiqueta SSH.
         if suspended {
             k.icon(tx + 6.0 * s, cy, icons::MOON, 13.0, th.text_dim);
             tx += 18.0 * s;
-        } else if let Some((_, color)) = v.terms.get(id).and_then(|t| status(t, v.time)) {
-            k.dot(tx + 3.5 * s, cy, 7.0, color);
-            tx += 14.0 * s;
+        } else {
+            if term.is_some_and(|t| t.agent.state != AgentState::None) {
+                k.icon(tx + 6.0 * s, cy, icons::SPARKLES, 13.0, theme::CLAUDE);
+                tx += 18.0 * s;
+            }
+            if let Some((_, color)) = term.and_then(|t| status(t, v.time)) {
+                k.dot(tx + 3.5 * s, cy, 7.0, color);
+                tx += 14.0 * s;
+            }
+            if term.is_some_and(Terminal::is_remote) {
+                let green = th.done;
+                tx += k.tag(tx, cy, "SSH", green, theme::alpha(green, 0.16)) + 6.0 * s;
+            }
         }
         match v.editing {
             Some((Edit::Tab(e), buf)) if e == *id => {
@@ -980,6 +996,11 @@ fn draw_terminal(
     let x0 = l.sidebar_w();
     out.push(Quad::rect(x0, l.titlebar_h(), l.w - x0, l.h - l.titlebar_h(), default_bg));
 
+    // Enlaces: subrayados; el que está bajo el puntero, además, con el color de acento.
+    let links = crate::links::scan(term);
+    let link_at = |col: usize, row: usize| links.iter().position(|k| k.contains(col, row));
+    let hovered_link = v.link_cell.and_then(|(c, r)| link_at(c, r));
+
     let cursor = content.cursor;
     let show_cursor = cursor.shape != CursorShape::Hidden && content.mode.contains(TermMode::SHOW_CURSOR);
     let block_cursor = show_cursor && v.focused && cursor.shape == CursorShape::Block && v.preedit.is_empty();
@@ -1009,6 +1030,10 @@ fn draw_terminal(
         }
         if content.selection.is_some_and(|s| s.contains(p)) {
             cbg = theme::t().selection;
+        }
+        let link = if links.is_empty() { None } else { link_at(p.column.0, row as usize) };
+        if link.is_some() && link == hovered_link {
+            cfg = theme::t().accent;
         }
         if block_cursor && p == cursor.point {
             cbg = cursor_color;
@@ -1041,8 +1066,9 @@ fn draw_terminal(
                 push_glyph(fg, fonts, g, x, y, box_w, cfg);
             }
         }
-        if flags.intersects(Flags::ALL_UNDERLINES) {
-            fg.push(Quad::rect(x, y + fonts.underline, cw, fonts.stroke, cfg));
+        if flags.intersects(Flags::ALL_UNDERLINES) || link.is_some() {
+            let w = if flags.contains(Flags::WIDE_CHAR) { cw * 2.0 } else { cw };
+            fg.push(Quad::rect(x, y + fonts.underline, w, fonts.stroke, cfg));
         }
         if flags.contains(Flags::STRIKEOUT) {
             fg.push(Quad::rect(x, y + (ch / 2.0).round(), cw, fonts.stroke, cfg));

@@ -176,3 +176,18 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - Orden para un tab nuevo: la carpeta del grupo (la de su proyecto, que toma de su primera sesión de Claude o de `telar group --dir`), luego la de inicio, y si no hay ninguna, la del tab visible, como antes. Un grupo nuevo abre en la de inicio. `telar new` sin `--cwd` también. Si la carpeta ya no existe, se ignora y la sección lo marca en rojo.
 - No cambia los tabs abiertos ni los restaurados, que tienen su propia carpeta.
 - General quedó como primera sección; las teclas de la configuración (filtro de fuentes y flechas) ahora solo actúan en Apariencia: antes también cambiaban la fuente desde Rendimiento e Inactividad.
+
+## Enlaces que se abren con un clic (2026-11-19)
+
+- Pedido del usuario: que los enlaces se vean como enlaces y se abran en el navegador. `links.rs` los busca en la pantalla visible en cada dibujo: los hipervínculos OSC 8 que marca el programa (alacritty_terminal ya los guarda por celda) y las URL escritas como texto (`https://`, `http://`, `file://`). Las filas partidas por ancho (WRAPLINE) se unen, así una URL larga partida en dos se abre entera.
+- La URL termina en un espacio, comillas, `<>`, `{}`, `|` o un carácter que no es ASCII (los bordes de las cajas de Claude Code no se cuelan). Se le quita la puntuación final de la frase y el `)` o `]` que no abrió ella (Markdown, paréntesis), sin romper `…/Rust_(lenguaje)`. Sin crate de regex: un escáner simple con pruebas.
+- Se subrayan siempre; el que está bajo el puntero toma el color de acento y el cursor pasa a la mano.
+- Un clic simple lo abre al soltar, si no se arrastró para seleccionar; el doble clic sigue seleccionando la palabra. Si el programa pidió el mouse (vim, htop), el clic es suyo y el enlace se abre con ⌘ + clic, que funciona siempre.
+- Se abre con `open`, solo con esquemas http, https, file y mailto: un OSC 8 podría traer cualquier otro.
+- Una URL que el programa partió con saltos de línea propios (no por ancho) se ve como dos pedazos; no se adivina la unión.
+
+## Prefijos del tab: Claude y SSH (2026-11-19)
+
+- Pedido del usuario: un tab con Claude abierto lleva su ícono, y una sesión SSH, la etiqueta «SSH» en verde. Los pone Telar, antes del nombre: no son parte del nombre ni se editan al renombrar.
+- El ícono es `sparkles` de Lucide (el mismo de «Nuevo agente») en el naranja de Claude (`theme::CLAUDE`, igual en todos los temas); el logo de Claude no está en Lucide. El estado (trabajando, te necesita, listo) sigue en el punto de color de al lado.
+- SSH: el proceso en primer plano es `ssh`, `mosh-client` o `autossh` (`Terminal::is_remote`). Se refresca con el proceso del tab, cada pocos segundos.

@@ -12,6 +12,7 @@ mod idle;
 mod input;
 mod kit;
 mod limits;
+mod links;
 mod ipc;
 mod proc;
 mod renderer;
@@ -152,6 +153,10 @@ struct State {
     stats_detail: Option<statsview::Detail>,
     /// Diálogo de confirmación abierto (eliminar un grupo).
     confirm: Option<confirm::Confirm>,
+    /// Enlace bajo el puntero que se abriría con un clic (su celda, para resaltarlo) y el
+    /// enlace donde empezó el clic: se abre al soltar si no se arrastró para seleccionar.
+    link_cell: Option<(usize, usize)>,
+    link_press: Option<links::Link>,
     /// Lo que muestran los medidores: solo se repinta si cambia.
     meters_shown: String,
     /// Primera fila visible de la lista de la barra lateral, y píxeles acumulados del
@@ -230,6 +235,8 @@ impl ApplicationHandler<UserEvent> for App {
             stats: None,
             stats_detail: None,
             confirm: None,
+            link_cell: None,
+            link_press: None,
             meters_shown: String::new(),
             list_scroll: 0,
             list_scroll_px: 0.0,
@@ -418,6 +425,8 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(snap) = st.snapshot.as_mut() {
             if now >= snap.at {
                 snap.capture_now = true;
+                // El puntero simulado se vuelve a aplicar sobre lo que ya se escribió en la terminal.
+                st.snapshot_hover();
                 st.draw();
                 event_loop.exit();
                 return;
@@ -1296,9 +1305,24 @@ impl State {
         }
         let n_tabs = self.ws.group().map_or(0, |g| g.tabs.len());
         let hit = l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs);
+        // Sobre un enlace que se abriría con un clic: mano y resaltado.
+        let link_cell = if hit == Hit::Terminal && !self.selecting && self.mouse_button.is_none() {
+            let (col, row, _) = l.cell_at(self.cursor.0, self.cursor.1);
+            self.clickable_link(col, row).map(|_| (col, row))
+        } else {
+            None
+        };
+        if link_cell.is_some() != self.link_cell.is_some() {
+            self.window.set_cursor(if link_cell.is_some() { CursorIcon::Pointer } else { CursorIcon::Text });
+        }
+        if link_cell != self.link_cell {
+            self.link_cell = link_cell;
+            self.window.request_redraw();
+        }
         if hit != self.hover {
             self.hover = hit;
             let icon = match hit {
+                Hit::Terminal if self.link_cell.is_some() => CursorIcon::Pointer,
                 Hit::Terminal => CursorIcon::Text,
                 Hit::Group(_)
                 | Hit::CloseGroup(_)
@@ -1398,6 +1422,9 @@ impl State {
                 self.mouse_report(b, false, col, row, self.active_mode());
             }
             self.selecting = false;
+            if let Some(link) = self.link_press.take().filter(|_| button == MouseButton::Left) {
+                self.release_on_link(&l, link);
+            }
             return;
         }
 
@@ -1586,6 +1613,18 @@ impl State {
             MouseButton::Right => 2,
             _ => return,
         };
+        // Clic en un enlace: con ⌘ se abre ya (también si la app pidió el mouse); sin ⌘, al
+        // soltar, si no se arrastró para seleccionar.
+        self.link_press = None;
+        if button == MouseButton::Left && count == 1 {
+            if let Some(link) = self.clickable_link(col, row) {
+                if self.mods.super_key() {
+                    links::open(&link.url);
+                    return;
+                }
+                self.link_press = Some(link);
+            }
+        }
         // La app pidió el mouse (vim, htop…): se le reporta. Shift fuerza selección local.
         if mode.intersects(TermMode::MOUSE_MODE) && !self.mods.shift_key() {
             self.mouse_button = Some(code);
@@ -1622,6 +1661,31 @@ impl State {
         if let Some(id) = self.ws.active_term() {
             self.write(id, bytes);
         }
+    }
+
+    /// Enlace en la celda (columna, fila) del tab visible que se abriría con un clic: con
+    /// ⌘ siempre; sin ⌘, solo si la app no pidió el mouse (si no, el clic es suyo).
+    fn clickable_link(&self, col: usize, row: usize) -> Option<links::Link> {
+        let t = self.active().filter(|t| !t.is_suspended())?;
+        let term = t.term.lock();
+        if term.mode().intersects(TermMode::MOUSE_MODE) && !self.mods.super_key() && !self.mods.shift_key() {
+            return None;
+        }
+        links::scan(&*term).into_iter().find(|k| k.contains(col, row) && links::openable(&k.url))
+    }
+
+    /// Se soltó el clic que empezó en `link`: si no hubo selección y sigue sobre él, se abre.
+    fn release_on_link(&mut self, l: &Layout, link: links::Link) {
+        let (col, row, _) = l.cell_at(self.cursor.0, self.cursor.1);
+        let Some(t) = self.active() else { return };
+        let mut term = t.term.lock();
+        if term.selection.as_ref().is_some_and(|s| !s.is_empty()) || !link.contains(col, row) {
+            return;
+        }
+        term.selection = None;
+        drop(term);
+        links::open(&link.url);
+        self.window.request_redraw();
     }
 
     fn on_scroll(&mut self, delta: MouseScrollDelta) {
@@ -2603,6 +2667,17 @@ impl State {
     }
 
     /// Modo snapshot: lo que se abre encima para la captura (también con una sesión cargada).
+    /// TELAR_SNAPSHOT_HOVER=x,y: el puntero en ese punto (en puntos).
+    fn snapshot_hover(&mut self) {
+        if let Some((x, y)) = std::env::var("TELAR_SNAPSHOT_HOVER").ok().and_then(|v| {
+            let (x, y) = v.split_once(',')?;
+            Some((x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?))
+        }) {
+            let s = self.window.scale_factor();
+            self.on_cursor_moved(PhysicalPosition::new(x * s, y * s));
+        }
+    }
+
     fn snapshot_overlays(&mut self) {
         // TELAR_SNAPSHOT_SEARCH=texto: captura con el buscador abierto.
         if let Some(q) = std::env::var("TELAR_SNAPSHOT_SEARCH").ok().filter(|q| !q.is_empty()) {
@@ -2616,14 +2691,7 @@ impl State {
         if let Some(gi) = std::env::var("TELAR_SNAPSHOT_DELETE").ok().and_then(|v| v.parse().ok()) {
             self.ask_delete_group(gi);
         }
-        // TELAR_SNAPSHOT_HOVER=x,y: el puntero en ese punto (en puntos).
-        if let Some((x, y)) = std::env::var("TELAR_SNAPSHOT_HOVER").ok().and_then(|v| {
-            let (x, y) = v.split_once(',')?;
-            Some((x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?))
-        }) {
-            let s = self.window.scale_factor();
-            self.on_cursor_moved(PhysicalPosition::new(x * s, y * s));
-        }
+        self.snapshot_hover();
         // TELAR_SNAPSHOT_SETTINGS=1: captura con la configuración abierta.
         if let Ok(section) = std::env::var("TELAR_SNAPSHOT_SETTINGS") {
             self.toggle_settings();
@@ -2714,6 +2782,7 @@ impl State {
             ram_limit_mb: self.config.ram_limit_mb,
             over_groups: &self.over_groups,
             drop_group: self.drag.as_ref().and_then(|d| d.drop_group),
+            link_cell: self.link_cell,
         };
         let mut ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
         if let Some(st) = &self.settings {

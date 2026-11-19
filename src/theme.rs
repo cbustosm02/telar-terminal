@@ -19,6 +19,9 @@ pub const fn hex(c: u32) -> Rgba {
     ]
 }
 
+/// Naranja de Claude, para marcar los tabs donde corre Claude Code (igual en todos los temas).
+pub const CLAUDE: Rgba = hex(0xD97757);
+
 /// Mezcla `a` hacia `b` (k = 0: a; k = 1: b).
 pub fn mix(a: Rgba, b: Rgba, k: f32) -> Rgba {
     [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k, 1.0]
