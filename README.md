@@ -2,13 +2,28 @@
 
 Terminal personal para macOS escrita en Rust. Organiza las terminales en **grupos** dentro de una barra lateral, y cada grupo tiene sus propios **tabs**. Está pensada para trabajar con muchas sesiones de Claude Code a la vez.
 
-## Ejecutar
+## Instalar
 
 ```bash
 cargo build --release
-./target/release/telar install   # una vez: hooks de Claude Code, enlace ~/.local/bin/telar y regla para Claude
-telar                            # abre la terminal
+./target/release/telar install
 ```
+
+`install` deja:
+- la app en `~/Applications/Telar.app` (se abre desde Spotlight, Launchpad o el Dock);
+- el enlace `~/.local/bin/telar` a esa app, para la CLI;
+- los hooks de Claude Code y la regla `~/.claude/rules/telar.md`.
+
+`telar uninstall` quita todo lo anterior.
+
+## Actualizaciones
+
+Al pie de la barra lateral se ve la versión. Telar busca una nueva al abrirse (y con un clic en «Buscar ↻»). Si hay una, aparece **Actualizar a X.Y.Z** con una barra de progreso de la descarga y la aplicación, y luego **Reiniciar**. Al reiniciar, los grupos, tabs y sesiones de Claude se recuperan como siempre.
+
+- Las versiones salen de los releases de GitHub del repo. Se publican con `scripts/release.sh X.Y.Z`: sube la versión, hace commit y empuja el tag; el workflow `Release` corre las pruebas, compila un binario universal (Apple Silicon e Intel) y publica el paquete con su SHA-256.
+- La descarga va a una carpeta temporal junto al binario. Se verifica el SHA-256 y que el binario nuevo arranque con la versión anunciada; luego reemplaza al actual de forma atómica. **La carpeta temporal se borra siempre**, salga bien o mal, y al abrir se limpian restos de una actualización interrumpida. No se guardan versiones viejas.
+- Desde la terminal: `telar update --check` (solo busca) y `telar update`.
+- Una compilación de desarrollo (`target/…`) no se actualiza sola: se actualiza con `git pull` y `cargo build`.
 
 ## Sesiones que sobreviven
 

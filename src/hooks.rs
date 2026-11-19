@@ -1,6 +1,7 @@
 //! Instala o quita la integración con Claude Code:
 //! - hooks en `~/.claude/settings.json`;
-//! - enlace `~/.local/bin/telar` al binario actual;
+//! - la app `~/Applications/Telar.app` (copia de este binario; se actualiza sola);
+//! - enlace `~/.local/bin/telar` al binario de la app;
 //! - regla `~/.claude/rules/telar.md`, para que Claude sepa usar la CLI.
 //!
 //! El comando de cada hook no hace nada fuera de Telar (`TELAR_SOCKET` vacío),
@@ -47,7 +48,8 @@ pub fn install() -> Result<String, String> {
     let mut report = vec![install_hooks()?];
 
     let link = link_path();
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = crate::update::install_app()?;
+    report.push(format!("App en {} (versión {})", crate::update::app_path().display(), crate::update::VERSION));
     match std::fs::symlink_metadata(&link) {
         Ok(m) if !m.file_type().is_symlink() => {
             report.push(format!("No se creó {}: ya existe un archivo que no es un enlace", link.display()));
@@ -80,6 +82,10 @@ pub fn uninstall() -> Result<String, String> {
     }
     if std::fs::remove_file(rule_path()).is_ok() {
         report.push(format!("Se quitó {}", rule_path().display()));
+    }
+    let app = crate::update::app_path();
+    if std::fs::remove_dir_all(&app).is_ok() {
+        report.push(format!("Se quitó {}", app.display()));
     }
     Ok(report.join("\n"))
 }

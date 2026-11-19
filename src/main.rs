@@ -13,6 +13,7 @@ mod session;
 mod terminal;
 mod theme;
 mod ui;
+mod update;
 mod workspace;
 
 use std::collections::HashMap;
@@ -54,6 +55,8 @@ const SAVE_TICK: Duration = Duration::from_secs(5);
 pub enum UserEvent {
     /// Evento de la terminal `id`, de la generación indicada (ver `terminal::Listener`).
     Term(u64, u64, TermEvent),
+    /// Avance de la búsqueda o instalación de una actualización.
+    Update(update::Status),
     Ipc(ipc::Request),
 }
 
@@ -65,6 +68,7 @@ fn main() {
         Some("install" | "install-hooks") => return finish(hooks::install()),
         Some("uninstall" | "uninstall-hooks") => return finish(hooks::uninstall()),
         Some("-h" | "--help" | "help") => return println!("{}", cli::USAGE),
+        Some("-V" | "--version" | "version") => return println!("telar {}", update::VERSION),
         Some(cmd) => return finish(cli::run(cmd, &args[1..])),
     }
 
@@ -128,6 +132,11 @@ struct State {
     next_save: Instant,
     /// `caffeinate`: mantener el Mac despierto (⌘⇧C).
     awake: awake::Awake,
+    update: update::Status,
+    /// La búsqueda automática al abrir no muestra errores (p. ej. sin conexión).
+    update_quiet: bool,
+    /// Pedido de salir desde fuera del teclado (p. ej. «Reiniciar» tras actualizar).
+    quit: bool,
 }
 
 /// Modo de prueba: `TELAR_SNAPSHOT=archivo.bmp` abre la app, escribe
@@ -201,6 +210,9 @@ impl ApplicationHandler<UserEvent> for App {
             last_saved: None,
             next_save: Instant::now() + SAVE_TICK,
             awake: awake::Awake::default(),
+            update: update::Status::Idle,
+            update_quiet: true,
+            quit: false,
         };
         if let Some(server) = &state.server {
             // Para que el modo snapshot (y quien depure) sepa dónde está el socket.
@@ -223,6 +235,10 @@ impl ApplicationHandler<UserEvent> for App {
             state.snapshot_setup();
         }
         state.update_awake();
+        if state.snapshot.is_none() {
+            update::cleanup_leftovers();
+            update::check(state.proxy.clone());
+        }
         self.state = Some(state);
     }
 
@@ -232,6 +248,18 @@ impl ApplicationHandler<UserEvent> for App {
             // De un proceso anterior del mismo tab (suspendido o reanudado): se ignora.
             UserEvent::Term(id, generation, _) if st.terms.get(&id).is_none_or(|t| t.generation != generation) => return,
             UserEvent::Term(id, _, event) => (id, event),
+            UserEvent::Update(status) => {
+                // La búsqueda automática no molesta con errores; la pedida con clic sí los muestra.
+                st.update = match status {
+                    update::Status::Error(_) if st.update_quiet => update::Status::Idle,
+                    s => s,
+                };
+                if !matches!(st.update, update::Status::Checking) {
+                    st.update_quiet = false;
+                }
+                st.window.request_redraw();
+                return;
+            }
             UserEvent::Ipc(req) => {
                 let response = st.on_ipc(&req.body);
                 let _ = req.reply.send(response);
@@ -366,7 +394,12 @@ impl ApplicationHandler<UserEvent> for App {
                 st.hover = Hit::None;
                 st.window.request_redraw();
             }
-            WindowEvent::MouseInput { state, button, .. } => st.on_mouse(state, button),
+            WindowEvent::MouseInput { state, button, .. } => {
+                st.on_mouse(state, button);
+                if st.quit {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => st.on_scroll(delta),
             WindowEvent::RedrawRequested => st.draw(),
             _ => {}
@@ -922,7 +955,7 @@ impl State {
             self.hover = hit;
             let icon = match hit {
                 Hit::Terminal => CursorIcon::Text,
-                Hit::Group(_) | Hit::NewGroup | Hit::Tab(_) | Hit::CloseTab(_) | Hit::NewTab | Hit::Awake => CursorIcon::Pointer,
+                Hit::Group(_) | Hit::NewGroup | Hit::Tab(_) | Hit::CloseTab(_) | Hit::NewTab | Hit::Awake | Hit::Update => CursorIcon::Pointer,
                 _ => CursorIcon::Default,
             };
             self.window.set_cursor(icon);
@@ -1034,6 +1067,7 @@ impl State {
                 self.new_tab();
             }
             (Hit::Awake, MouseButton::Left) => self.cycle_awake(),
+            (Hit::Update, MouseButton::Left) => self.update_action(),
             (Hit::Drag, MouseButton::Left) => {
                 if count == 2 {
                     let max = self.window.is_maximized();
@@ -1357,6 +1391,29 @@ impl State {
         json!({ "ok": true, "changed": changed })
     }
 
+    /// Clic en el pie de versión: buscar, instalar o reiniciar, según el estado.
+    fn update_action(&mut self) {
+        use update::Status;
+        match self.update.clone() {
+            Status::Idle | Status::UpToDate | Status::Error(_) => {
+                self.update_quiet = false;
+                update::check(self.proxy.clone());
+            }
+            Status::Available(release) => {
+                self.update = Status::Downloading(release.version.clone(), 0, release.size);
+                update::install(self.proxy.clone(), release);
+            }
+            Status::Ready(_) => {
+                // Guarda la sesión, sale y otro proceso abre la versión nueva al terminar este.
+                self.save_session();
+                update::relaunch();
+                self.quit = true;
+            }
+            Status::Checking | Status::Downloading(..) | Status::Applying(_) => {}
+        }
+        self.window.request_redraw();
+    }
+
     /// ⌘⇧C o clic abajo en la barra lateral: apagado → siempre → con Claude.
     fn cycle_awake(&mut self) {
         self.awake.mode = self.awake.mode.next();
@@ -1634,6 +1691,7 @@ impl State {
             time: self.started.elapsed().as_secs_f32(),
             awake: (self.awake.mode, self.awake.active()),
             menu: self.menu.as_ref(),
+            update: &self.update,
         };
         let ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
         if let Some((col, row)) = ime_cell {

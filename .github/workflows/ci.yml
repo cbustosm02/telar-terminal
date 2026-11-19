@@ -1,0 +1,19 @@
+# Pruebas en cada push y pull request a main.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    # macOS: Telar usa Metal, las fuentes del sistema y APIs de procesos de Darwin.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Pruebas
+        run: cargo test --release

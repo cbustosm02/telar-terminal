@@ -17,6 +17,7 @@ use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 
 use crate::awake;
+use crate::update::{self, Status};
 use crate::font::{self, Fonts, Glyph};
 use crate::renderer::{Quad, KIND_COLOR, KIND_MASK};
 use crate::terminal::{AgentState, GridSize, Listener, Terminal};
@@ -60,6 +61,8 @@ pub enum Hit {
     NewTab,
     /// Interruptor de `caffeinate`, abajo en la barra lateral.
     Awake,
+    /// Versión y actualización, al pie de la barra lateral.
+    Update,
     /// Zona vacía de la barra de título: arrastra la ventana.
     Drag,
     Terminal,
@@ -133,17 +136,27 @@ impl Layout {
         Rect { w: NEW_TAB_W * self.s, ..r }
     }
 
-    /// Bloque de «Despierto», al pie de la barra lateral (dos líneas).
+    /// Bloque de versión y actualizaciones, al pie de la barra lateral (dos líneas).
+    fn update_rect(&self) -> Rect {
+        let s = self.s;
+        let h = 2.0 * self.cell_h + 14.0 * s;
+        Rect { x: 8.0 * s, y: self.h - h - 6.0 * s, w: (SIDEBAR_W - 16.0) * s, h }
+    }
+
+    /// Bloque de «Despierto», encima del de la versión (dos líneas).
     fn awake_rect(&self) -> Rect {
         let s = self.s;
         let h = 2.0 * self.cell_h + 16.0 * s;
-        Rect { x: 8.0 * s, y: self.h - h - 8.0 * s, w: (SIDEBAR_W - 16.0) * s, h }
+        Rect { x: 8.0 * s, y: self.update_rect().y - h - 4.0 * s, w: (SIDEBAR_W - 16.0) * s, h }
     }
 
     pub fn hit(&self, x: f32, y: f32, n_groups: usize, n_tabs: usize) -> Hit {
         if x < self.sidebar_w() {
             if self.awake_rect().contains(x, y) {
                 return Hit::Awake;
+            }
+            if self.update_rect().contains(x, y) {
+                return Hit::Update;
             }
             if let Some(i) = (0..n_groups).find(|i| self.group_rect(*i).contains(x, y)) {
                 return Hit::Group(i);
@@ -300,6 +313,7 @@ pub struct View<'a> {
     /// Modo de `caffeinate` y si está corriendo ahora.
     pub awake: (awake::Mode, bool),
     pub menu: Option<&'a Menu>,
+    pub update: &'a Status,
 }
 
 /// Prioridad y color del indicador de un tab (None = sin indicador).
@@ -519,6 +533,69 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
     let tx = x + icon + 10.0 * s;
     text(out, fonts, tx, y1, mode.label(), color, r.x + r.w - tx - 6.0 * s);
     text(out, fonts, tx, y2, "⌘⇧C para cambiar", theme::TEXT_DIM, r.x + r.w - tx - 6.0 * s);
+
+    draw_update(out, fonts, l, v);
+}
+
+/// Pie: versión y, según el estado, buscar / actualizar (con progreso) / reiniciar.
+fn draw_update(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
+    let s = l.s;
+    let ch = fonts.cell_h;
+    let cw = fonts.cell_w;
+    let r = l.update_rect();
+    let hovered = v.hover == Hit::Update;
+    out.push(Quad::rect(r.x + 4.0 * s, r.y - 2.0 * s, r.w - 8.0 * s, s, theme::BORDER));
+    if hovered {
+        out.push(Quad::rounded(r.x, r.y, r.w, r.h, 6.0 * s, theme::ITEM_HOVER));
+    }
+    let (x, y1) = (r.x + 12.0 * s, r.y + 5.0 * s);
+    let y2 = y1 + ch + 4.0 * s;
+    let inner = r.w - 24.0 * s;
+    text(out, fonts, x, y1, &format!("Telar {}", update::VERSION), theme::TEXT_DIM, inner);
+
+    // A la derecha de la primera línea: el estado en corto.
+    let link = if hovered { theme::TEXT } else { theme::TEXT_DIM };
+    let pct;
+    let (right, color): (&str, Rgba) = match v.update {
+        Status::Idle => ("Buscar ↻", link),
+        Status::Checking => ("Buscando…", theme::TEXT_DIM),
+        Status::UpToDate => ("Al día ✓", theme::DONE),
+        Status::Error(_) => ("Reintentar ↻", theme::ATTENTION),
+        Status::Available(_) => ("Nueva", theme::ACCENT),
+        Status::Downloading(..) => {
+            pct = format!("{:.0} %", v.update.progress().unwrap_or(0.0) * 100.0);
+            (pct.as_str(), theme::TEXT_DIM)
+        }
+        Status::Applying(_) => ("Aplicando…", theme::TEXT_DIM),
+        Status::Ready(_) => ("Lista ✓", theme::DONE),
+    };
+    let rw = right.chars().count() as f32 * cw;
+    text(out, fonts, r.x + r.w - 12.0 * s - rw, y1, right, color, rw + 1.0);
+
+    // Segunda línea: botón, barra de progreso o el error.
+    let button = |out: &mut Vec<Quad>, fonts: &mut Fonts, label: &str, bg: Rgba| {
+        let bh = ch + 4.0 * s;
+        out.push(Quad::rounded(x - 4.0 * s, y2 - 2.0 * s, inner + 8.0 * s, bh, 5.0 * s, bg));
+        let tw = (label.chars().count() as f32 * cw).min(inner);
+        text(out, fonts, x + (inner - tw) / 2.0, y2, label, theme::CHROME_BG, inner);
+    };
+    match v.update {
+        Status::Available(rel) => button(out, fonts, &format!("Actualizar a {}", rel.version), theme::ACCENT),
+        Status::Ready(ver) => button(out, fonts, &format!("Reiniciar ({ver})"), theme::DONE),
+        Status::Downloading(..) | Status::Applying(_) => {
+            let p = v.update.progress().unwrap_or(0.0);
+            let bh = 6.0 * s;
+            let by = y2 + (ch - bh) / 2.0;
+            out.push(Quad::rounded(x, by, inner, bh, bh / 2.0, theme::BORDER));
+            out.push(Quad::rounded(x, by, (inner * p).max(bh), bh, bh / 2.0, theme::ACCENT));
+        }
+        Status::Error(e) => {
+            text(out, fonts, x, y2, e, theme::TEXT_DIM, inner);
+        }
+        _ => {
+            text(out, fonts, x, y2, "Actualizaciones", theme::TEXT_DIM, inner);
+        }
+    }
 }
 
 fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> Option<()> {

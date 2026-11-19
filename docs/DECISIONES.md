@@ -83,3 +83,17 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - Los caracteres con presentación de emoji por defecto (☕ ⚡ ✅ ❌ ⭐…, `font::emoji_presentation`) van primero a Apple Color Emoji. Antes ganaba el glifo de texto de Menlo o Apple Symbols y se veían como símbolos chicos.
 - Modo captura: la ventana se abre sin activarse (`with_active(false)`) e ignora el teclado. Antes tomaba el foco y lo que el usuario escribía en otra app terminaba en la ventana de prueba.
 - El completado de `ng` escribe «Error: This command is not available when running the Angular CLI outside a workspace» al presionar Tab fuera de un proyecto. Es del script de Angular, no de Telar; en el `.zshrc` del usuario se envolvió la función para descartar su stderr.
+
+## Pruebas (2026-11-18)
+
+- `cargo test --release`: pruebas unitarias en cada módulo (`#[cfg(test)]`). Para que la lógica se pueda probar sin ventana ni PTY se separaron funciones puras: `proc::display_name`, `hooks::add_hooks`/`remove_hooks`, `terminal::grid_text`, `ui::Layout::with_cell`, `update::release_from_json`/`is_newer`.
+- El workflow `CI` las corre en macOS (Metal, fuentes del sistema y APIs de Darwin) en cada push y PR a main.
+
+## Actualizaciones (2026-11-18)
+
+- Releases de GitHub: el tag `vX.Y.Z` dispara el workflow `Release`. Comprueba que el tag coincide con `Cargo.toml`, corre las pruebas, compila para `aarch64` y `x86_64`, los une con `lipo`, firma ad hoc y publica `telar-X.Y.Z-macos-universal.tar.gz` con su `.sha256`. No se usa `softprops/action-gh-release`, que corre en Node 20: se usa `gh release create`. Las demás acciones corren en node24 o son composite.
+- La app consulta `releases/latest` (el repo es público: no hace falta token) con el `curl` del sistema. La descarga también va con `curl`, y el progreso se calcula con el tamaño del archivo frente al del asset. Así no se suman dependencias HTTP ni TLS.
+- Para aplicar: carpeta temporal en el mismo directorio que el binario (mismo disco, para que el `rename` sea atómico), verificación del SHA-256, `telar --version` del binario nuevo, `rename` sobre el actual y `codesign` ad hoc de la `.app` (si no, la firma del paquete deja de valer). El proceso en marcha sigue con el binario viejo, que ya no tiene nombre en disco, hasta reiniciar. La carpeta temporal se borra en todos los casos, y `cleanup_leftovers` limpia restos al arrancar.
+- Reiniciar: se guarda la sesión, un `sh` espera a que el proceso termine y abre la app (`open Telar.app`, con un entorno limpio de LaunchServices).
+- `telar install` crea `~/Applications/Telar.app` (Info.plist mínimo) con una copia del binario. El enlace `~/.local/bin/telar` apunta a la app, no a `target/`, para que una actualización no pise la compilación de desarrollo. Una compilación de `target/` se niega a autoactualizarse.
+- La búsqueda automática al abrir no muestra errores (p. ej. sin conexión); la que se pide con un clic sí.

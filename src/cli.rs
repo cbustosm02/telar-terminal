@@ -30,6 +30,8 @@ Sin comando abre la terminal. Comandos (dentro de Telar):
   clear <tab>                        borra la pantalla y el scrollback del tab (como ⌘K)
   awake [on|off|auto]                mantener el Mac despierto (caffeinate -dims): siempre,
                                      nunca, o solo mientras algún Claude trabaja
+  update [--check]                   busca la última versión y la instala (--check: solo busca)
+  version                            versión instalada
   wait <tab> [--state S] [--timeout SEG]
                                      espera a que Claude en ese tab deje de trabajar
                                      (o a que llegue al estado S: idle, done, needs-you, shell)
@@ -181,6 +183,25 @@ pub fn run(cmd: &str, raw: &[String]) -> Result<String, String> {
                 ("suspend", _) => format!("Suspendidos: {}", v["changed"]),
                 _ => format!("Reanudados: {}", v["changed"]),
             })
+        }
+        "update" => {
+            use crate::update::{self, Status};
+            let status = update::latest()?;
+            let Status::Available(release) = status else {
+                return Ok(format!("Telar {} está al día", update::VERSION));
+            };
+            if raw.iter().any(|a| a == "--check") {
+                return Ok(format!("Hay una versión nueva: {} (instalada: {})", release.version, update::VERSION));
+            }
+            let last = std::cell::Cell::new(-1i32);
+            update::install_sync(&release, &|s| {
+                let pct = (s.progress().unwrap_or(0.0) * 100.0) as i32;
+                if pct / 10 != last.get() / 10 {
+                    last.set(pct);
+                    eprintln!("{pct:>3} %  {}", if matches!(s, Status::Applying(_)) { "aplicando" } else { "descargando" });
+                }
+            })?;
+            Ok(format!("Telar {} instalado. Reinicia Telar para usarlo.", release.version))
         }
         "clear" => {
             let tab = raw.first().ok_or("falta <tab>")?;

@@ -1,0 +1,55 @@
+# Publica una versión al empujar un tag vX.Y.Z (ver scripts/release.sh).
+# Telar busca aquí sus actualizaciones: necesita el paquete *-macos-universal.tar.gz y su .sha256.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: El tag coincide con la versión de Cargo.toml
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "El tag $GITHUB_REF_NAME no coincide con Cargo.toml ($v)"; exit 1
+          fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: Pruebas
+        run: cargo test --release
+
+      - name: Compilar para Apple Silicon e Intel
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+
+      - name: Binario universal, firma ad hoc y paquete
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/telar \
+            target/aarch64-apple-darwin/release/telar \
+            target/x86_64-apple-darwin/release/telar
+          codesign --force --sign - dist/telar
+          ./dist/telar --version | grep -q "$VERSION"
+          pkg="telar-$VERSION-macos-universal.tar.gz"
+          tar -czf "dist/$pkg" -C dist telar
+          (cd dist && shasum -a 256 "$pkg" > "$pkg.sha256")
+
+      - name: Publicar el release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
+            --title "Telar $VERSION" --generate-notes
