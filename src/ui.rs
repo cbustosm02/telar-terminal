@@ -646,7 +646,10 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
             k.icon(bx - 10.0 * s, cy, icons::MOON, 13.0, th.text_dim);
             name_right -= 16.0 * s;
         }
-        let tx = r.x + 12.0 * s;
+        // Carpeta: abierta y de color en el grupo activo.
+        let (icon, icon_color) = if active { (icons::FOLDER_OPEN, th.accent) } else { (icons::FOLDER, th.text_dim) };
+        k.icon(r.x + 18.0 * s, cy, icon, 14.0, if asleep { th.muted } else { icon_color });
+        let tx = r.x + 32.0 * s;
         match v.editing {
             Some((Edit::Group(gi), buf)) if gi == i => {
                 k.input(Rect { x: r.x + 4.0 * s, y: r.y + 3.0 * s, w: name_right - r.x - 4.0 * s, h: r.h - 6.0 * s }, buf, "Nombre del grupo", None, true);
