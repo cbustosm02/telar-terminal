@@ -280,7 +280,7 @@ pub fn install_app() -> Result<PathBuf, String> {
     let macos = app.join("Contents").join("MacOS");
     let dest = macos.join("telar");
     std::fs::create_dir_all(&macos).map_err(|e| e.to_string())?;
-    std::fs::write(app.join("Contents").join("Info.plist"), info_plist()).map_err(|e| e.to_string())?;
+    write_bundle_files(&app)?;
     if exe != dest {
         // Copia a un temporal y rename: si Telar.app está abierta, sigue funcionando.
         let tmp = macos.join(".telar-new");
@@ -296,6 +296,32 @@ pub fn install_app() -> Result<PathBuf, String> {
     Ok(dest)
 }
 
+/// Info.plist y el `.icns` del paquete.
+fn write_bundle_files(app: &Path) -> Result<(), String> {
+    let resources = app.join("Contents").join("Resources");
+    std::fs::create_dir_all(&resources).map_err(|e| e.to_string())?;
+    std::fs::write(resources.join("Telar.icns"), crate::appicon::ICNS).map_err(|e| e.to_string())?;
+    std::fs::write(app.join("Contents").join("Info.plist"), info_plist()).map_err(|e| e.to_string())
+}
+
+/// Si Telar corre desde su `.app` y al paquete le falta el ícono o el Info.plist está
+/// desactualizado (p. ej. tras actualizarse desde una versión sin ícono), los reescribe.
+/// El actualizador solo reemplaza el binario.
+pub fn ensure_bundle() {
+    let Ok(exe) = current_exe() else { return };
+    let Some(app) = app_bundle(&exe) else { return };
+    let plist = app.join("Contents").join("Info.plist");
+    let current = std::fs::read_to_string(&plist).unwrap_or_default();
+    if current == info_plist() && app.join("Contents/Resources/Telar.icns").is_file() {
+        return;
+    }
+    if write_bundle_files(app).is_ok() {
+        sign(app);
+        // Que el Finder y el Dock vuelvan a leer el ícono.
+        let _ = Command::new("/usr/bin/touch").arg(app).status();
+    }
+}
+
 fn info_plist() -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -306,6 +332,7 @@ fn info_plist() -> String {
   <key>CFBundleDisplayName</key><string>Telar</string>
   <key>CFBundleIdentifier</key><string>dev.cbustos.telar</string>
   <key>CFBundleExecutable</key><string>telar</string>
+  <key>CFBundleIconFile</key><string>Telar</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>{VERSION}</string>
   <key>CFBundleVersion</key><string>{VERSION}</string>

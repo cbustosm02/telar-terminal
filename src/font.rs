@@ -104,6 +104,8 @@ pub struct Fonts {
     shaper: ShapeContext,
     /// Glifos de la interfaz a cualquier tamaño: (fuente, glifo, tamaño ×4, peso).
     sized: HashMap<(u8, u16, u32, u16), Option<Glyph>>,
+    /// Imágenes subidas al atlas (vistas previas de íconos), por clave.
+    images: HashMap<String, Option<Glyph>>,
     /// El atlas se vació en este frame: hay que volver a dibujar.
     pub atlas_reset: bool,
 }
@@ -136,6 +138,7 @@ impl Fonts {
             icons,
             shaper: ShapeContext::new(),
             sized: HashMap::new(),
+            images: HashMap::new(),
             family,
             primary,
             fallbacks,
@@ -170,6 +173,7 @@ impl Fonts {
     fn clear_atlas(&mut self) {
         self.cache.clear();
         self.sized.clear();
+        self.images.clear();
         self.atlas = Atlas::new();
         self.atlas_reset = true;
     }
@@ -322,6 +326,27 @@ impl Fonts {
             }
         }
         (out, pen)
+    }
+
+    /// Imagen RGBA en el atlas, identificada por `key`. `load` solo se llama la primera vez
+    /// (o si el atlas se vació): decodificar no se repite en cada frame.
+    pub fn image(&mut self, key: &str, load: impl FnOnce() -> Option<(Vec<u8>, u32, u32)>) -> Option<Glyph> {
+        if let Some(g) = self.images.get(key) {
+            return *g;
+        }
+        let g = load().and_then(|(rgba, w, h)| {
+            let (x, y) = match self.atlas.alloc(w, h) {
+                Some(pos) => pos,
+                None => {
+                    self.clear_atlas();
+                    self.atlas.alloc(w, h)?
+                }
+            };
+            self.atlas.uploads.push(Upload { x, y, w, h, data: rgba });
+            Some(Glyph { uv: [x as f32, y as f32, w as f32, h as f32], left: 0.0, top: 0.0, color: true })
+        });
+        self.images.insert(key.to_string(), g);
+        g
     }
 
     /// Ícono de Lucide (`icons::*`) a `px` píxeles.

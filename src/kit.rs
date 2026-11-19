@@ -22,6 +22,8 @@ pub mod icons {
     pub const CPU: char = '\u{e0a9}';
     pub const FOLDER: char = '\u{e0d7}';
     pub const GAUGE: char = '\u{e1bf}';
+    pub const IMAGE: char = '\u{e0f6}';
+    pub const UPLOAD: char = '\u{e19e}';
     pub const MEMORY: char = '\u{e445}';
     pub const ARROW_DOWN_CIRCLE: char = '\u{e078}';
     pub const BOT: char = '\u{e1bb}';
@@ -191,6 +193,11 @@ impl<'a> Kit<'a> {
         let (w, h) = (g.uv[2], g.uv[3]);
         let (kind, color) = if g.color { (KIND_COLOR, [1.0, 1.0, 1.0, color[3]]) } else { (KIND_MASK, color) };
         self.out.push(Quad { rect: [x + g.left, baseline - g.top, w, h], uv: g.uv, color, params: [kind, 0.0, 0.0, 0.0] });
+    }
+
+    /// Imagen del atlas (`Fonts::image`) escalada a `r`.
+    pub fn image(&mut self, r: Rect, g: Glyph) {
+        self.out.push(Quad { rect: [r.x, r.y, r.w, r.h], uv: g.uv, color: [1.0; 4], params: [KIND_COLOR, 0.0, 0.0, 0.0] });
     }
 
     /// Ícono de `size` puntos centrado en (cx, cy).

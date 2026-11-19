@@ -22,6 +22,7 @@ cargo build --release
 
 - **Apariencia · Tema:** 10 temas predefinidos (Telar, Tokyo Night, Catppuccin Mocha y Latte, Dracula, Nord, Gruvbox Dark, One Dark, Rosé Pine y GitHub Light). Cambian la interfaz y los colores de la terminal. ←/→ los recorre.
 - **Apariencia · Fuente:** la fuente de la terminal y su tamaño (la interfaz usa SF Pro). La lista muestra JetBrains Mono (incluida en Telar; es la que usan Ghostty y cmux por defecto) y las fuentes monoespaciadas instaladas en el Mac. Escribe para filtrar; ↑↓ cambian la fuente; − y + el tamaño (⌘0 vuelve a ese tamaño).
+- **Ícono:** el ícono de la app. Por defecto, «Ventana con grupos»; hay otras tres propuestas y uno propio desde un archivo (PNG, JPEG, HEIC o ICNS). Cambia en el Dock al instante y queda guardado en Telar.app. Los íconos incluidos se generan con `scripts/iconos.py`.
 - Los íconos de prompts (Nerd Fonts) se ven con cualquier fuente: Telar incluye «Symbols Nerd Font» como respaldo.
 
 ## Actualizaciones

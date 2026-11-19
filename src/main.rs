@@ -1,5 +1,6 @@
 //! Telar: terminal personal con grupos de tabs en una barra lateral.
 
+mod appicon;
 mod awake;
 mod cli;
 mod config;
@@ -270,6 +271,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
         state.update_awake();
         stats::spawn(state.proxy.clone());
+        if state.snapshot.is_none() {
+            // Ícono del paquete (si la app se actualizó desde una versión sin él) y el elegido.
+            update::ensure_bundle();
+            let _ = appicon::apply(&state.config.app_icon, false);
+        }
         if state.snapshot.is_none() {
             update::cleanup_leftovers();
             update::check(state.proxy.clone());
@@ -1736,6 +1742,33 @@ impl State {
         self.window.request_redraw();
     }
 
+    /// Cambia el ícono de la app (Dock y Telar.app) y lo guarda.
+    fn set_app_icon(&mut self, id: &str) {
+        let result = appicon::apply(id, true);
+        if let Some(st) = self.settings.as_mut() {
+            st.icon_error = result.as_ref().err().cloned();
+        }
+        if result.is_ok() {
+            self.config.app_icon = id.to_string();
+            self.config.save();
+        }
+        self.window.request_redraw();
+    }
+
+    /// «Elegir archivo…»: selector de macOS; la imagen elegida pasa a ser el ícono propio.
+    fn pick_app_icon(&mut self) {
+        let Some(path) = appicon::pick_file() else { return };
+        match appicon::import(&path) {
+            Ok(()) => self.set_app_icon(appicon::CUSTOM),
+            Err(e) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.icon_error = Some(e);
+                }
+            }
+        }
+        self.window.request_redraw();
+    }
+
     /// Cambia el tema (interfaz y colores de la terminal) y lo guarda.
     fn set_theme(&mut self, name: &str) {
         if !theme::set(name) {
@@ -1780,6 +1813,15 @@ impl State {
                     self.set_theme(t.name);
                 }
             }
+            settings::Hit::Icon(i) => {
+                let id = appicon::CHOICES.get(i).map_or(appicon::CUSTOM, |c| c.id);
+                if id == appicon::CUSTOM && !appicon::has_custom() {
+                    self.pick_app_icon();
+                } else {
+                    self.set_app_icon(id);
+                }
+            }
+            settings::Hit::PickIcon => self.pick_app_icon(),
             settings::Hit::SizeDown => self.set_font_size(self.font_pt - 1.0),
             settings::Hit::SizeUp => self.set_font_size(self.font_pt + 1.0),
             settings::Hit::Inside => {}
@@ -1795,6 +1837,16 @@ impl State {
         let Some(st) = self.settings.as_mut() else { return };
         let page = st.page(&l, &self.fonts);
         let mut apply = false;
+        // Las flechas y el filtro son de la sección Apariencia.
+        if st.section == settings::ICON_SECTION {
+            let close = event.logical_key == Key::Named(NamedKey::Escape)
+                || (cmd && matches!(event.key_without_modifiers(), Key::Character(ref c) if c.as_str() == "," || c.as_str() == "w"));
+            if close {
+                self.settings = None;
+            }
+            self.window.request_redraw();
+            return;
+        }
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => self.settings = None,
             Key::Named(NamedKey::ArrowDown) => {
@@ -2111,8 +2163,11 @@ impl State {
             self.toggle_stats();
         }
         // TELAR_SNAPSHOT_SETTINGS=1: captura con la configuración abierta.
-        if std::env::var_os("TELAR_SNAPSHOT_SETTINGS").is_some() {
+        if let Ok(section) = std::env::var("TELAR_SNAPSHOT_SETTINGS") {
             self.toggle_settings();
+            if let (Some(st), "icono") = (self.settings.as_mut(), section.as_str()) {
+                st.section = settings::ICON_SECTION;
+            }
         }
         // TELAR_SNAPSHOT_MENU=tab|group: captura con el menú contextual abierto.
         match std::env::var("TELAR_SNAPSHOT_MENU").as_deref() {
@@ -2157,7 +2212,7 @@ impl State {
         };
         let mut ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
         if let Some(st) = &self.settings {
-            st.draw(&mut self.quads, &mut self.fonts, &l, &self.config.font_family, self.font_pt);
+            st.draw(&mut self.quads, &mut self.fonts, &l, &self.config.font_family, self.font_pt, &self.config.app_icon);
             ime_cell = None;
         }
         if let (Some(d), Some(sample)) = (&self.stats_detail, &self.stats) {

@@ -2143,6 +2143,8 @@ dependencies = [
  "libc",
  "log",
  "memmap2",
+ "objc2 0.6.5",
+ "png",
  "pollster",
  "serde_json",
  "swash",

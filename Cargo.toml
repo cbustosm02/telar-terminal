@@ -5,6 +5,8 @@ edition = "2024"
 description = "Terminal personal: grupos de tabs en una barra lateral, render propio por GPU."
 
 [dependencies]
+objc2 = "0.6.5"
+png = "0.18.1"
 core-foundation = "0.9.4"
 core-foundation-sys = "0.8.7"
 alacritty_terminal = "0.26.0"

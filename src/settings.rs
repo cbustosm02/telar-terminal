@@ -6,6 +6,7 @@
 //! Los cambios se aplican al instante (la terminal de atrás sirve de vista previa)
 //! y se guardan solos en `config.json`.
 
+use crate::appicon;
 use crate::font::Fonts;
 use crate::fontlist::{self, Family};
 use crate::kit::{Kit, Text, Variant, icons};
@@ -13,7 +14,11 @@ use crate::renderer::Quad;
 use crate::theme::{self, Theme};
 use crate::ui::{Layout, Rect};
 
-pub const SECTIONS: &[(char, &str)] = &[(icons::PALETTE, "Apariencia")];
+pub const SECTIONS: &[(char, &str)] = &[(icons::PALETTE, "Apariencia"), (icons::IMAGE, "Ícono")];
+
+/// Sección del ícono de la app.
+pub const ICON_SECTION: usize = 1;
+const ICON_CARD_H: f32 = 168.0;
 
 const PANEL_W: f32 = 760.0;
 const PANEL_H: f32 = 620.0;
@@ -34,6 +39,10 @@ pub enum Hit {
     Font(usize),
     SizeDown,
     SizeUp,
+    /// Tarjeta de ícono: las incluidas y, al final, el propio.
+    Icon(usize),
+    /// «Elegir archivo…» para el ícono propio.
+    PickIcon,
 }
 
 #[derive(Default)]
@@ -46,6 +55,8 @@ pub struct Settings {
     /// Primera fila visible.
     pub scroll: usize,
     pub hover: Option<Hit>,
+    /// Error al cambiar el ícono (se muestra en su sección).
+    pub icon_error: Option<String>,
 }
 
 /// Rectángulos del modal para una ventana dada (los usan el dibujo y los clics).
@@ -65,6 +76,8 @@ struct Geometry {
     size_y: f32,
     size_down: Rect,
     size_up: Rect,
+    icon_cards: Vec<Rect>,
+    pick: Rect,
 }
 
 fn geometry(l: &Layout) -> Geometry {
@@ -99,7 +112,17 @@ fn geometry(l: &Layout) -> Geometry {
     let btn = 28.0 * s;
     let size_down = Rect { x: content_x + 80.0 * s, y: size_y, w: btn, h: btn };
     let size_up = Rect { x: size_down.x + btn + 64.0 * s, y: size_y, w: btn, h: btn };
-    Geometry { panel, close, nav, content_x, content_w, title_y, themes_y, themes, font_label_y, search, list, rows, size_y, size_down, size_up }
+    // Sección «Ícono»: las incluidas y la propia, en tres columnas.
+    let icon_w = (content_w - gap * 2.0) / 3.0;
+    let icon_cards = (0..=appicon::CHOICES.len())
+        .map(|i| {
+            let (c, r) = (i % 3, i / 3);
+            Rect { x: content_x + c as f32 * (icon_w + gap), y: themes_y + r as f32 * (ICON_CARD_H * s + gap), w: icon_w, h: ICON_CARD_H * s }
+        })
+        .collect::<Vec<_>>();
+    let cards_end = icon_cards.last().map_or(themes_y, |r| r.y + r.h);
+    let pick = Rect { x: content_x, y: cards_end + 18.0 * s, w: 170.0 * s, h: 32.0 * s };
+    Geometry { panel, close, nav, content_x, content_w, title_y, themes_y, themes, font_label_y, search, list, rows, size_y, size_down, size_up, icon_cards, pick }
 }
 
 impl Settings {
@@ -127,6 +150,12 @@ impl Settings {
         }
         if let Some(i) = g.nav.iter().position(|r| r.contains(x, y)) {
             return Hit::Section(i);
+        }
+        if self.section == ICON_SECTION {
+            if let Some(i) = g.icon_cards.iter().position(|r| r.contains(x, y)) {
+                return Hit::Icon(i);
+            }
+            return if g.pick.contains(x, y) { Hit::PickIcon } else { Hit::Inside };
         }
         if let Some(i) = g.themes.iter().position(|r| r.contains(x, y)) {
             return Hit::Theme(i);
@@ -170,8 +199,8 @@ impl Settings {
         self.scroll = (self.scroll as isize + rows).clamp(0, max as isize) as usize;
     }
 
-    /// Dibuja el modal sobre todo lo demás. `family` y `size`: lo que está en uso.
-    pub fn draw(&self, out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, family: &str, size: f32) {
+    /// Dibuja el modal sobre todo lo demás. `family`, `size` y `app_icon`: lo que está en uso.
+    pub fn draw(&self, out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, family: &str, size: f32, app_icon: &str) {
         let s = l.s();
         let g = geometry(l);
         let th = theme::t();
@@ -197,6 +226,11 @@ impl Settings {
             let color = if on { th.text } else { th.text_dim };
             k.icon(r.x + 18.0 * s, r.y + r.h / 2.0, *icon, 15.0, color);
             k.text_in(*r, r.x + 34.0 * s, name, Text::label().color(color));
+        }
+
+        if self.section == ICON_SECTION {
+            self.draw_icons(&mut k, &g, app_icon);
+            return;
         }
 
         // Apariencia.
@@ -255,6 +289,61 @@ impl Settings {
         let x = k.kbd(right, cy, &["⌘", "0"]);
         let x = k.kbd(x - 10.0 * s, cy, &["⌘", "−"]);
         k.kbd(x - 6.0 * s, cy, &["⌘", "+"]);
+    }
+}
+
+impl Settings {
+    fn draw_icons(&self, k: &mut Kit, g: &Geometry, current: &str) {
+        let s = k.s;
+        let th = theme::t();
+        let cx = g.content_x;
+        k.text(cx, g.title_y, "Ícono de la app", Text::title(), g.content_w - 40.0 * s);
+        k.text(cx, g.title_y + 22.0 * s, "Cambia en el Dock al instante y queda guardado en Telar.app", Text::small(), g.content_w);
+        let custom_key = std::fs::metadata(appicon::custom_path())
+            .and_then(|m| m.modified())
+            .ok()
+            .map(|t| format!("icono:propio:{:?}", t));
+        for (i, r) in g.icon_cards.iter().enumerate() {
+            let (id, name) = match appicon::CHOICES.get(i) {
+                Some(c) => (c.id, c.name),
+                None => (appicon::CUSTOM, "Propio"),
+            };
+            let selected = id == current;
+            let hovered = self.hover == Some(Hit::Icon(i));
+            let border = if selected { th.accent } else if hovered { theme::mix(th.border, th.text, 0.25) } else { th.border };
+            k.bordered(*r, 10.0, th.chrome, border);
+            if selected {
+                k.bordered(Rect { x: r.x + s, y: r.y + s, w: r.w - 2.0 * s, h: r.h - 2.0 * s }, 9.0, th.chrome, th.accent);
+                k.icon(r.x + r.w - 16.0 * s, r.y + 16.0 * s, icons::CHECK, 14.0, th.accent);
+            }
+            let size = 104.0 * s;
+            let img_r = Rect { x: r.x + (r.w - size) / 2.0, y: r.y + 14.0 * s, w: size, h: size };
+            let px = (size.round() as u32).max(32);
+            let glyph = if id == appicon::CUSTOM {
+                custom_key.as_ref().and_then(|key| k.fonts.image(&format!("{key}:{px}"), || appicon::preview(id, px)))
+            } else {
+                k.fonts.image(&format!("icono:{id}:{px}"), || appicon::preview(id, px))
+            };
+            match glyph {
+                Some(gl) => k.image(img_r, gl),
+                None => {
+                    k.bordered(img_r, 22.0, th.surface, th.border);
+                    k.icon(img_r.x + img_r.w / 2.0, img_r.y + img_r.h / 2.0, icons::UPLOAD, 26.0, th.text_dim);
+                }
+            }
+            let style = if selected { Text::label() } else { Text::body().color(theme::mix(th.text, th.text_dim, 0.3)) };
+            k.text_center(Rect { x: r.x, y: img_r.y + img_r.h + 10.0 * s, w: r.w, h: 18.0 * s }, name, style);
+            if id == appicon::CUSTOM && glyph.is_none() {
+                k.text_center(Rect { x: r.x, y: img_r.y + img_r.h + 28.0 * s, w: r.w, h: 14.0 * s }, "Sin imagen", Text::small());
+            }
+        }
+        k.button(g.pick, "Elegir archivo…", Some(icons::UPLOAD), Variant::Subtle, self.hover == Some(Hit::PickIcon));
+        let note_x = g.pick.x + g.pick.w + 12.0 * s;
+        let note = "PNG, JPEG, HEIC o ICNS · mejor cuadrada de 1024 px";
+        k.text_in(Rect { x: note_x, w: g.content_x + g.content_w - note_x, ..g.pick }, note_x, note, Text::small());
+        if let Some(err) = &self.icon_error {
+            k.text(g.content_x, g.pick.y + g.pick.h + 12.0 * s, err, Text::small().color(th.danger), g.content_w);
+        }
     }
 }
 
