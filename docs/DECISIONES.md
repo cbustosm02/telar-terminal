@@ -191,3 +191,9 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - Pedido del usuario: un tab con Claude abierto lleva su ícono, y una sesión SSH, la etiqueta «SSH» en verde. Los pone Telar, antes del nombre: no son parte del nombre ni se editan al renombrar.
 - El ícono es el logo de Claude (el destello naranja). No está en Lucide, así que `logo.rs` lo dibuja por código al tamaño exacto en píxeles (12 rayos de punta redondeada, con 4×4 muestras por píxel) y lo sube al atlas como imagen: no hace falta incluir un archivo y se ve nítido en cualquier escala. Color: `theme::CLAUDE` (#D97757), igual en todos los temas. Vista previa: `TELAR_LOGO_PNG=x.png cargo test logo -- --ignored`. El estado (trabajando, te necesita, listo) sigue en el punto de color de al lado.
 - SSH: el proceso en primer plano es `ssh`, `mosh-client` o `autossh` (`Terminal::is_remote`). Se refresca con el proceso del tab, cada pocos segundos.
+
+## Paneles de macOS fuera del manejador del clic (2026-11-19)
+
+- «Elegir carpeta…» cerraba la app de golpe. `NSOpenPanel runModal` abre su propio ciclo de eventos; abierto dentro del manejador del clic de winit, a winit le llegaban eventos de la ventana mientras todavía atendía el clic y abortaba («tried to handle event while another event is currently being handled», un `panic!` con `panic = "abort"`). Ahora los paneles se abren con `appicon::later_on_main` (`dispatch_async_f` a la cola principal), cuando winit ya terminó con el clic, y lo elegido vuelve como `UserEvent::Picked`. «Elegir archivo…» del ícono tenía el mismo problema.
+- La ruta elegida salía vacía: el `NSString` de `path` se soltaba antes de copiar su `UTF8String` (era un temporal de la misma expresión). `url_path` lo mantiene vivo hasta copiar el texto, y una ruta vacía o relativa no se guarda.
+- Lo probó el usuario con la app antes de publicar; las capturas del modo `TELAR_SNAPSHOT` no hacen clics reales y no lo habían detectado.

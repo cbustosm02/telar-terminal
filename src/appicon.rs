@@ -128,6 +128,21 @@ fn nsstring(s: &str) -> Retained<AnyObject> {
     unsafe { msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()] }
 }
 
+/// Ruta de un `NSURL` de archivo. La cadena se copia mientras su `NSString` sigue vivo:
+/// el puntero de `UTF8String` apunta adentro de ella (antes se soltaba primero y la ruta
+/// salía vacía).
+unsafe fn url_path(url: &AnyObject) -> Option<PathBuf> {
+    let path: Option<Retained<AnyObject>> = unsafe { msg_send![url, path] };
+    let path = path?;
+    let utf8: *const std::ffi::c_char = unsafe { msg_send![&*path, UTF8String] };
+    if utf8.is_null() {
+        return None;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(utf8) }.to_string_lossy().into_owned();
+    drop(path);
+    (!s.is_empty()).then(|| PathBuf::from(s))
+}
+
 /// NSImage a partir de bytes PNG.
 fn nsimage(png: &[u8]) -> Option<Retained<AnyObject>> {
     unsafe {
@@ -186,6 +201,29 @@ pub fn set_window_movable(window: &winit::window::Window, movable: bool) {
 }
 
 /// Selector de archivos de macOS para elegir una imagen. Bloquea hasta que se cierra.
+/// Corre `f` en el hilo principal, en una vuelta posterior del run loop, fuera de los
+/// manejadores de eventos de winit.
+///
+/// Los paneles de macOS (`NSOpenPanel runModal`) abren su propio ciclo de eventos. Si se
+/// abren dentro de un manejador de winit (un clic), winit recibe eventos de la ventana
+/// mientras todavía atiende el clic y aborta la app («tried to handle event while
+/// another event is currently being handled»). Desde la cola principal de GCD no pasa:
+/// winit ya terminó con el clic y atiende los eventos del panel con normalidad.
+pub fn later_on_main(f: impl FnOnce() + 'static) {
+    unsafe extern "C" {
+        static _dispatch_main_q: u8;
+        fn dispatch_async_f(queue: *const u8, context: *mut std::ffi::c_void, work: extern "C" fn(*mut std::ffi::c_void));
+    }
+    extern "C" fn run(context: *mut std::ffi::c_void) {
+        let f = unsafe { Box::from_raw(context as *mut Box<dyn FnOnce()>) };
+        f();
+    }
+    let boxed: Box<Box<dyn FnOnce()>> = Box::new(Box::new(f));
+    unsafe { dispatch_async_f(&raw const _dispatch_main_q, Box::into_raw(boxed) as *mut std::ffi::c_void, run) };
+}
+
+/// Panel para elegir la imagen del ícono propio. Bloquea hasta que se elige o se cancela:
+/// llamarlo con `later_on_main`, nunca dentro de un manejador de eventos.
 pub fn pick_file() -> Option<PathBuf> {
     unsafe {
         let panel: Retained<AnyObject> = msg_send![class!(NSOpenPanel), openPanel];
@@ -202,13 +240,12 @@ pub fn pick_file() -> Option<PathBuf> {
             return None; // cancelado
         }
         let url: Option<Retained<AnyObject>> = msg_send![&*panel, URL];
-        let path: Option<Retained<AnyObject>> = msg_send![&*url?, path];
-        let utf8: *const std::ffi::c_char = msg_send![&*path?, UTF8String];
-        (!utf8.is_null()).then(|| PathBuf::from(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()))
+        url_path(&*url?)
     }
 }
 
 /// Panel de macOS para elegir una carpeta (se puede crear una nueva). `None` si se cancela.
+/// Como `pick_file`, va con `later_on_main`.
 pub fn pick_folder(message: &str, start: Option<&std::path::Path>) -> Option<PathBuf> {
     unsafe {
         let panel: Retained<AnyObject> = msg_send![class!(NSOpenPanel), openPanel];
@@ -226,9 +263,7 @@ pub fn pick_folder(message: &str, start: Option<&std::path::Path>) -> Option<Pat
             return None; // cancelado
         }
         let url: Option<Retained<AnyObject>> = msg_send![&*panel, URL];
-        let path: Option<Retained<AnyObject>> = msg_send![&*url?, path];
-        let utf8: *const std::ffi::c_char = msg_send![&*path?, UTF8String];
-        (!utf8.is_null()).then(|| PathBuf::from(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()))
+        url_path(&*url?)
     }
 }
 

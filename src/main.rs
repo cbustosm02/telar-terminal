@@ -72,6 +72,15 @@ pub enum UserEvent {
     /// Uso de recursos (cada 2 s).
     Stats(Box<stats::Sample>),
     Ipc(ipc::Request),
+    /// Lo elegido en un panel de macOS (`None`: se canceló).
+    Picked(Picked),
+}
+
+/// Para qué se abrió un panel de macOS.
+#[derive(Debug)]
+pub enum Picked {
+    StartDir(Option<PathBuf>),
+    Icon(Option<PathBuf>),
 }
 
 fn main() {
@@ -350,6 +359,10 @@ impl ApplicationHandler<UserEvent> for App {
                     st.update_quiet = false;
                 }
                 st.window.request_redraw();
+                return;
+            }
+            UserEvent::Picked(picked) => {
+                st.on_picked(picked);
                 return;
             }
             UserEvent::Ipc(req) => {
@@ -2233,15 +2246,40 @@ impl State {
     }
 
     /// «Elegir archivo…»: selector de macOS; la imagen elegida pasa a ser el ícono propio.
+    /// Abre el panel para elegir la imagen del ícono propio (fuera del manejador del clic).
     fn pick_app_icon(&mut self) {
-        let Some(path) = appicon::pick_file() else { return };
-        match appicon::import(&path) {
-            Ok(()) => self.set_app_icon(appicon::CUSTOM),
-            Err(e) => {
-                if let Some(st) = self.settings.as_mut() {
-                    st.icon_error = Some(e);
-                }
+        let proxy = self.proxy.clone();
+        appicon::later_on_main(move || {
+            let _ = proxy.send_event(UserEvent::Picked(Picked::Icon(appicon::pick_file())));
+        });
+    }
+
+    /// Abre el panel para elegir la carpeta de inicio (fuera del manejador del clic).
+    fn pick_start_dir(&mut self) {
+        let proxy = self.proxy.clone();
+        let current = self.start_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+        appicon::later_on_main(move || {
+            let dir = appicon::pick_folder("Elige la carpeta donde abren los tabs nuevos", current.as_deref());
+            let _ = proxy.send_event(UserEvent::Picked(Picked::StartDir(dir)));
+        });
+    }
+
+    /// Resultado de un panel de macOS.
+    fn on_picked(&mut self, picked: Picked) {
+        match picked {
+            Picked::StartDir(Some(dir)) if dir.is_absolute() => {
+                self.config.start_dir = Some(dir);
+                self.config.save();
             }
+            Picked::Icon(Some(path)) => match appicon::import(&path) {
+                Ok(()) => self.set_app_icon(appicon::CUSTOM),
+                Err(e) => {
+                    if let Some(st) = self.settings.as_mut() {
+                        st.icon_error = Some(e);
+                    }
+                }
+            },
+            Picked::StartDir(_) | Picked::Icon(None) => {}
         }
         self.window.request_redraw();
     }
@@ -2299,13 +2337,7 @@ impl State {
                 }
             }
             settings::Hit::PickIcon => self.pick_app_icon(),
-            settings::Hit::PickStartDir => {
-                let current = self.start_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from));
-                if let Some(dir) = appicon::pick_folder("Elige la carpeta donde abren los tabs nuevos", current.as_deref()) {
-                    self.config.start_dir = Some(dir);
-                    self.config.save();
-                }
-            }
+            settings::Hit::PickStartDir => self.pick_start_dir(),
             settings::Hit::ClearStartDir => {
                 self.config.start_dir = None;
                 self.config.save();
