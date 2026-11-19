@@ -134,3 +134,12 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 ## Capturas en una textura propia (2026-11-18)
 
 - Con la ventana de prueba abierta sin foco, a veces quedaba tapada por otras y macOS no entregaba su superficie (`get_current_texture` sin frame): la captura no se guardaba. Ahora el modo captura dibuja en una textura propia, del mismo formato y tamaño, y la copia de ahí.
+
+## Suspensión por inactividad (2026-11-18)
+
+- Cada tab guarda su último uso (`Terminal::last_used`). Cuenta como uso: verlo (el tab visible se marca en cada muestra de 2 s), lo que escribes (`send_input` y `telar send`; no las respuestas automáticas de la terminal a consultas del programa) y, **solo en tabs sin Claude**, lo que el programa muestra (`Wakeup`).
+- Con Claude, la salida no cuenta: su interfaz puede redibujarse estando quieta (línea de estado, avisos) y un Claude abierto sin hacer nada nunca parecería inactivo. En cambio, mientras su estado es «trabajando» (hooks), el tab se marca como usado en cada muestra: un agente que trabaja horas sin que el usuario toque nada no es inactividad. Al terminar, empieza a contar.
+- Un grupo está tan inactivo como su tab usado más recientemente; el grupo abierto nunca lo está. Al suspender, el tab conserva su último uso, así el grupo no parece recién usado.
+- «Comando corriendo»: el proceso en primer plano no es una shell conocida (`idle::is_shell`) ni Claude. Por defecto se respeta, porque suspender lo cierra (un servidor sin logs se perdería sin avisar).
+- La decisión es pura (`idle::pick`, con pruebas); la app solo arma el estado y suspende. Se revisa con cada muestra de uso (2 s). Probado con los minutos cambiados por segundos: suspendió los tabs sin uso y respetó el visible y el grupo excluido.
+- Las reglas van en `config.json` (`inactivity`); la exclusión de cada grupo, con el grupo en la sesión (`idle_exempt`).

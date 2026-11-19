@@ -106,6 +106,15 @@ En **Configuración › Rendimiento** se fija un límite de memoria para Telar c
 - macOS no permite un tope duro de memoria para otros procesos. Por eso Telar hace cumplir el límite **suspendiendo tabs**: al pasarlo, suspende el tab inactivo que más memoria usa (uno cada pocos segundos, hasta volver por debajo) y avisa con una notificación. Nunca suspende el tab que estás mirando ni uno donde Claude trabaja o espera tu respuesta.
 - Con la suspensión automática apagada, el límite solo avisa: el medidor de RAM lo toma como 100 % (ámbar desde 75 %, rojo desde 90 %) y los grupos pasados de su límite muestran un aviso rojo en la barra lateral.
 
+### Suspensión por inactividad
+
+En **Configuración › Inactividad** se elige cuánto tiempo sin uso suspende un tab (de 5 min a 24 h, o nunca) y cuánto suspende un grupo entero (todos sus tabs, si no usaste ninguno). Viene apagada.
+
+- Un tab cuenta como usado cuando lo ves, cuando escribes en él (también con `telar send`) o cuando **Claude trabaja** en él, aunque tú no toques nada: un agente trabajando una hora no es inactividad. La inactividad empieza a contar cuando Claude termina.
+- Claude abierto sin hacer nada **sí** es inactividad: lo que muestra su interfaz no cuenta como uso. En un tab sin Claude, lo que muestra el programa sí cuenta (un servidor con logs, un build).
+- Nunca se suspende el tab visible ni uno donde Claude trabaja. Por defecto tampoco uno donde Claude espera tu respuesta ni uno con un comando corriendo (un servidor sin logs, ssh, vim), porque suspender lo cierra; cada caso tiene su interruptor.
+- Cada grupo se puede excluir: en la lista de la sección o con clic derecho › «Nunca suspender solo». `telar tabs` muestra `idle_secs` de cada tab.
+
 ## Mantener el Mac despierto
 
 Abajo en la barra lateral, **Despierto** (clic o **⌘⇧C**) alterna entre los modos. La taza se ve a color con un círculo verde mientras `caffeinate` corre, y atenuada con un círculo gris si no:

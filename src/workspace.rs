@@ -11,6 +11,8 @@ pub struct Group {
     pub dir: Option<PathBuf>,
     /// Límite de memoria del grupo en MB (0: sin límite). Ver `limits`.
     pub ram_limit_mb: u64,
+    /// Nunca suspenderlo por inactividad. Ver `idle`.
+    pub idle_exempt: bool,
 }
 
 /// Nombre puesto por Telar («Grupo 3»), no por el usuario.
@@ -51,7 +53,7 @@ impl Workspace {
 
     /// Agrega un grupo con su primer tab. Devuelve su índice.
     pub fn push_group(&mut self, name: String, first_tab: u64, focus: bool, dir: Option<PathBuf>) -> usize {
-        self.groups.push(Group { name, tabs: vec![first_tab], active: 0, dir, ram_limit_mb: 0 });
+        self.groups.push(Group { name, tabs: vec![first_tab], active: 0, dir, ram_limit_mb: 0, idle_exempt: false });
         if focus || self.groups.len() == 1 {
             self.active = self.groups.len() - 1;
         }
@@ -251,7 +253,7 @@ mod tests {
     #[test]
     fn restore_acota_el_activo_y_sigue_numerando() {
         let mut w = Workspace::default();
-        let g = |name: &str, id| Group { name: name.into(), tabs: vec![id], active: 0, dir: None, ram_limit_mb: 0 };
+        let g = |name: &str, id| Group { name: name.into(), tabs: vec![id], active: 0, dir: None, ram_limit_mb: 0, idle_exempt: false };
         w.restore(vec![g("a", 1), g("b", 2)], 9);
         assert_eq!(w.active, 1);
         w.add_group(3);

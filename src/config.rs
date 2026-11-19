@@ -28,6 +28,8 @@ pub struct Config {
     pub ram_limit_mb: u64,
     /// Al pasar un límite, suspender tabs inactivos (si no, solo avisa).
     pub auto_suspend: bool,
+    /// Suspensión por inactividad (ver `idle`).
+    pub idle: crate::idle::Rules,
 }
 
 impl Default for Config {
@@ -40,6 +42,7 @@ impl Default for Config {
             app_icon: crate::appicon::DEFAULT.into(),
             ram_limit_mb: 0,
             auto_suspend: true,
+            idle: crate::idle::Rules::default(),
         }
     }
 }
@@ -65,6 +68,12 @@ impl Config {
                 "ram_limit_mb": self.ram_limit_mb,
                 "auto_suspend": self.auto_suspend,
             },
+            "inactivity": {
+                "tab_minutes": self.idle.tab_min,
+                "group_minutes": self.idle.group_min,
+                "include_waiting": self.idle.include_waiting,
+                "include_running": self.idle.include_running,
+            },
         })
     }
 
@@ -79,6 +88,15 @@ impl Config {
             app_icon: a["app_icon"].as_str().filter(|s| !s.trim().is_empty()).map_or(d.app_icon, String::from),
             ram_limit_mb: v["performance"]["ram_limit_mb"].as_u64().unwrap_or(d.ram_limit_mb),
             auto_suspend: v["performance"]["auto_suspend"].as_bool().unwrap_or(d.auto_suspend),
+            idle: {
+                let i = &v["inactivity"];
+                crate::idle::Rules {
+                    tab_min: i["tab_minutes"].as_u64().unwrap_or(d.idle.tab_min),
+                    group_min: i["group_minutes"].as_u64().unwrap_or(d.idle.group_min),
+                    include_waiting: i["include_waiting"].as_bool().unwrap_or(d.idle.include_waiting),
+                    include_running: i["include_running"].as_bool().unwrap_or(d.idle.include_running),
+                }
+            },
         }
     }
 
@@ -122,6 +140,7 @@ mod tests {
             app_icon: "tejido".into(),
             ram_limit_mb: 4096,
             auto_suspend: false,
+            idle: crate::idle::Rules { tab_min: 30, group_min: 120, include_waiting: true, include_running: false },
         };
         assert_eq!(Config::from_json(&c.to_json()), c);
     }

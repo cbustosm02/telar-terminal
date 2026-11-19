@@ -21,13 +21,18 @@ const MIN_TO_SUSPEND: u64 = 32 * 1024 * 1024;
 
 const MB: u64 = 1024 * 1024;
 
-/// Siguiente (`delta` > 0) o anterior paso de la lista desde `current`. Si `current` no
-/// es un paso exacto, va al paso inmediato de arriba o de abajo.
+/// Siguiente (`delta` > 0) o anterior paso de la lista de límites.
 pub fn step(current: u64, delta: i32) -> u64 {
-    match PRESETS_MB.iter().position(|&p| p == current) {
-        Some(i) => PRESETS_MB[(i as i32 + delta).clamp(0, PRESETS_MB.len() as i32 - 1) as usize],
-        None if delta > 0 => PRESETS_MB.iter().copied().find(|&p| p > current).unwrap_or(PRESETS_MB[PRESETS_MB.len() - 1]),
-        None => PRESETS_MB.iter().copied().rev().find(|&p| p < current).unwrap_or(0),
+    step_in(PRESETS_MB, current, delta)
+}
+
+/// Siguiente o anterior paso de `steps` (ordenada) desde `current`. Si `current` no es
+/// un paso exacto, va al paso inmediato de arriba o de abajo.
+pub fn step_in(steps: &[u64], current: u64, delta: i32) -> u64 {
+    match steps.iter().position(|&p| p == current) {
+        Some(i) => steps[(i as i32 + delta).clamp(0, steps.len() as i32 - 1) as usize],
+        None if delta > 0 => steps.iter().copied().find(|&p| p > current).unwrap_or(steps[steps.len() - 1]),
+        None => steps.iter().copied().rev().find(|&p| p < current).unwrap_or(steps[0]),
     }
 }
 

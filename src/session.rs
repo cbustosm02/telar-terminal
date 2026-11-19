@@ -25,6 +25,8 @@ pub struct SavedGroup {
     pub dir: Option<PathBuf>,
     /// Límite de memoria en MB (0: sin límite).
     pub ram_limit_mb: u64,
+    /// Excluido de la suspensión por inactividad.
+    pub idle_exempt: bool,
     pub active: usize,
     pub tabs: Vec<SavedTab>,
 }
@@ -56,6 +58,7 @@ impl Saved {
                 "name": g.name,
                 "dir": g.dir,
                 "ram_limit_mb": g.ram_limit_mb,
+                "idle_exempt": g.idle_exempt,
                 "active": g.active,
                 "tabs": g.tabs.iter().map(|t| json!({
                     "title": t.title,
@@ -88,6 +91,7 @@ impl Saved {
                     name: g["name"].as_str().unwrap_or("Grupo").to_string(),
                     dir: g["dir"].as_str().map(PathBuf::from),
                     ram_limit_mb: g["ram_limit_mb"].as_u64().unwrap_or(0),
+                    idle_exempt: g["idle_exempt"].as_bool().unwrap_or(false),
                     active: g["active"].as_u64().unwrap_or(0) as usize,
                     tabs,
                 })
@@ -133,13 +137,14 @@ mod tests {
                     name: "telar".into(),
                     dir: Some("/Users/x/telar".into()),
                     ram_limit_mb: 2048,
+                    idle_exempt: true,
                     active: 1,
                     tabs: vec![
                         SavedTab { title: Some("✳ Refactor".into()), name: None, cwd: Some("/Users/x/telar".into()), claude: Some("ses-1".into()), screen: None },
                         SavedTab { title: None, name: Some("logs".into()), cwd: Some("/tmp".into()), claude: None, screen: Some("\x1b[31mhola".into()) },
                     ],
                 },
-                SavedGroup { name: "Grupo 2".into(), dir: None, ram_limit_mb: 0, active: 0, tabs: vec![SavedTab { title: None, name: None, cwd: None, claude: None, screen: None }] },
+                SavedGroup { name: "Grupo 2".into(), dir: None, ram_limit_mb: 0, idle_exempt: false, active: 0, tabs: vec![SavedTab { title: None, name: None, cwd: None, claude: None, screen: None }] },
             ],
         }
     }

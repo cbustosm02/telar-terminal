@@ -6,7 +6,10 @@
 //! Los cambios se aplican al instante (la terminal de atrás sirve de vista previa)
 //! y se guardan solos en `config.json`.
 
+use std::time::Duration;
+
 use crate::appicon;
+use crate::idle;
 use crate::font::Fonts;
 use crate::fontlist::{self, Family};
 use crate::kit::{Kit, Text, Variant, icons};
@@ -14,7 +17,8 @@ use crate::renderer::Quad;
 use crate::theme::{self, Theme};
 use crate::ui::{Layout, Rect};
 
-pub const SECTIONS: &[(char, &str)] = &[(icons::PALETTE, "Apariencia"), (icons::IMAGE, "Ícono"), (icons::GAUGE, "Rendimiento")];
+pub const SECTIONS: &[(char, &str)] =
+    &[(icons::PALETTE, "Apariencia"), (icons::IMAGE, "Ícono"), (icons::GAUGE, "Rendimiento"), (icons::TIMER, "Inactividad")];
 
 /// Sección de límites de memoria.
 pub const PERF_SECTION: usize = 2;
@@ -30,12 +34,34 @@ pub struct Perf {
     pub groups: Vec<(String, u64, u64, bool)>,
 }
 
+/// Sección de suspensión por inactividad.
+pub const IDLE_SECTION: usize = 3;
+const IDLE_ROW_H: f32 = 38.0;
+
+/// Datos de la sección Inactividad.
+pub struct IdleView {
+    pub rules: idle::Rules,
+    pub groups: Vec<IdleGroup>,
+}
+
+pub struct IdleGroup {
+    pub name: String,
+    pub exempt: bool,
+    /// Es el grupo abierto (cuenta como en uso).
+    pub open: bool,
+    /// Tiempo desde el último uso de cualquiera de sus tabs.
+    pub idle: Duration,
+    pub suspended: usize,
+    pub tabs: usize,
+}
+
 /// Lo que el modal muestra «en uso».
 pub struct Ctx<'a> {
     pub family: &'a str,
     pub size: f32,
     pub app_icon: &'a str,
     pub perf: Perf,
+    pub idle: IdleView,
 }
 
 /// Sección del ícono de la app.
@@ -70,6 +96,16 @@ pub enum Hit {
     AutoSuspend,
     /// «Elegir archivo…» para el ícono propio.
     PickIcon,
+    /// − / + del tiempo sin uso de un tab o de un grupo.
+    IdleTabDown,
+    IdleTabUp,
+    IdleGroupDown,
+    IdleGroupUp,
+    /// Interruptores: incluir tabs donde Claude espera respuesta o con un comando corriendo.
+    IdleWaiting,
+    IdleRunning,
+    /// Interruptor de un grupo: se suspende por inactividad o no.
+    IdleExempt(usize),
 }
 
 #[derive(Default)]
@@ -86,6 +122,8 @@ pub struct Settings {
     pub icon_error: Option<String>,
     /// Primera fila visible de la lista de grupos en Rendimiento.
     pub perf_scroll: usize,
+    /// Primera fila visible de la lista de grupos en Inactividad.
+    pub idle_scroll: usize,
 }
 
 /// Geometría de la sección Rendimiento.
@@ -128,6 +166,50 @@ fn perf_geometry(g: &Geometry, s: f32, n_groups: usize, scroll: usize) -> PerfGe
         .collect();
     let switch = Rect { x: cx + 14.0 * s, y: auto.y + (auto.h - 20.0 * s) / 2.0, w: 34.0 * s, h: 20.0 * s };
     PerfGeometry { total, total_down, total_up, groups_y, rows, capacity, auto, switch, note_y }
+}
+
+/// Geometría de la sección Inactividad.
+struct IdleGeometry {
+    tab: Rect,
+    tab_down: Rect,
+    tab_up: Rect,
+    group: Rect,
+    group_down: Rect,
+    group_up: Rect,
+    waiting: Rect,
+    running: Rect,
+    groups_y: f32,
+    /// Filas visibles: índice del grupo, fila e interruptor.
+    rows: Vec<(usize, Rect, Rect)>,
+    capacity: usize,
+    note_y: f32,
+}
+
+/// Interruptor a la izquierda de una tarjeta.
+fn left_switch(r: Rect, s: f32) -> Rect {
+    Rect { x: r.x + 14.0 * s, y: r.y + (r.h - 20.0 * s) / 2.0, w: 34.0 * s, h: 20.0 * s }
+}
+
+fn idle_geometry(g: &Geometry, s: f32, n_groups: usize, scroll: usize) -> IdleGeometry {
+    let (cx, cw) = (g.content_x, g.content_w);
+    let tab = Rect { x: cx, y: g.themes_y + 22.0 * s, w: cw, h: 50.0 * s };
+    let (tab_down, tab_up) = stepper(tab, s);
+    let group = Rect { y: tab.y + tab.h + 8.0 * s, ..tab };
+    let (group_down, group_up) = stepper(group, s);
+    let waiting = Rect { y: group.y + group.h + 8.0 * s, h: 46.0 * s, ..tab };
+    let running = Rect { y: waiting.y + waiting.h + 8.0 * s, ..waiting };
+    let groups_y = running.y + running.h + 20.0 * s;
+    let note_y = g.panel.y + g.panel.h - 34.0 * s;
+    let list_top = groups_y + 22.0 * s;
+    let capacity = (((note_y - 10.0 * s - list_top) / (IDLE_ROW_H * s)).floor() as usize).max(1);
+    let rows = (scroll..n_groups.min(scroll + capacity))
+        .map(|gi| {
+            let r = Rect { x: cx, y: list_top + (gi - scroll) as f32 * IDLE_ROW_H * s, w: cw, h: IDLE_ROW_H * s - 4.0 * s };
+            let sw = Rect { x: r.x + r.w - 10.0 * s - 34.0 * s, y: r.y + (r.h - 20.0 * s) / 2.0, w: 34.0 * s, h: 20.0 * s };
+            (gi, r, sw)
+        })
+        .collect();
+    IdleGeometry { tab, tab_down, tab_up, group, group_down, group_up, waiting, running, groups_y, rows, capacity, note_y }
 }
 
 /// Rectángulos del modal para una ventana dada (los usan el dibujo y los clics).
@@ -216,6 +298,11 @@ impl Settings {
         perf_geometry(&geometry(l), l.s(), n_groups, self.perf_scroll).capacity
     }
 
+    /// Filas de grupos visibles en Inactividad (para desplazar con la rueda).
+    pub fn idle_capacity(&self, l: &Layout, n_groups: usize) -> usize {
+        idle_geometry(&geometry(l), l.s(), n_groups, self.idle_scroll).capacity
+    }
+
     pub fn hit(&self, x: f32, y: f32, l: &Layout, _fonts: &Fonts, n_groups: usize) -> Hit {
         let g = geometry(l);
         if !g.panel.contains(x, y) {
@@ -244,6 +331,21 @@ impl Settings {
                 }
             }
             return if pg.auto.contains(x, y) { Hit::AutoSuspend } else { Hit::Inside };
+        }
+        if self.section == IDLE_SECTION {
+            let ig = idle_geometry(&g, l.s(), n_groups, self.idle_scroll);
+            let hits = [
+                (ig.tab_down, Hit::IdleTabDown),
+                (ig.tab_up, Hit::IdleTabUp),
+                (ig.group_down, Hit::IdleGroupDown),
+                (ig.group_up, Hit::IdleGroupUp),
+                (ig.waiting, Hit::IdleWaiting),
+                (ig.running, Hit::IdleRunning),
+            ];
+            if let Some((_, h)) = hits.iter().find(|(r, _)| r.contains(x, y)) {
+                return *h;
+            }
+            return ig.rows.iter().find(|(_, r, _)| r.contains(x, y)).map_or(Hit::Inside, |(gi, _, _)| Hit::IdleExempt(*gi));
         }
         if self.section == ICON_SECTION {
             if let Some(i) = g.icon_cards.iter().position(|r| r.contains(x, y)) {
@@ -329,6 +431,10 @@ impl Settings {
         }
         if self.section == PERF_SECTION {
             self.draw_perf(&mut k, &g, &ctx.perf);
+            return;
+        }
+        if self.section == IDLE_SECTION {
+            self.draw_idle(&mut k, &g, &ctx.idle);
             return;
         }
 
@@ -454,6 +560,98 @@ impl Settings {
         k.text(tx, a.y + 29.0 * s, sub, Text::small(), a.x + a.w - tx - 10.0 * s);
         k.text(cx, pg.note_y, "macOS no permite un tope duro de memoria para otros procesos: Telar lo hace", Text::small(), g.content_w);
         k.text(cx, pg.note_y + 16.0 * s, "cumplir suspendiendo tabs, que liberan su memoria y se retoman con Enter.", Text::small(), g.content_w);
+    }
+
+    fn draw_idle(&self, k: &mut Kit, g: &Geometry, v: &IdleView) {
+        let s = k.s;
+        let th = theme::t();
+        let cx = g.content_x;
+        let ig = idle_geometry(g, s, v.groups.len(), self.idle_scroll);
+        let r = v.rules;
+        k.text(cx, g.title_y, "Inactividad", Text::title(), g.content_w - 40.0 * s);
+        k.text(cx, g.title_y + 22.0 * s, "Suspende solo lo que no usas para liberar memoria; se retoma con Enter o un clic", Text::small(), g.content_w);
+        k.text(cx, g.themes_y, "SUSPENDER AUTOMÁTICAMENTE", Text::caption(), g.content_w);
+
+        // Tarjeta con − tiempo +.
+        let card = |k: &mut Kit, r: Rect, d: Rect, u: Rect, title: &str, sub: &str, min: u64, hd: Hit, hu: Hit| {
+            k.bordered(r, 8.0, th.chrome, th.border);
+            let right = d.x - 12.0 * s;
+            k.text(r.x + 14.0 * s, r.y + 9.0 * s, title, Text::label(), right - r.x - 14.0 * s);
+            k.text(r.x + 14.0 * s, r.y + 28.0 * s, sub, Text::small(), right - r.x - 14.0 * s);
+            k.button(d, "", Some(icons::MINUS), Variant::Subtle, self.hover == Some(hd));
+            k.button(u, "", Some(icons::PLUS), Variant::Subtle, self.hover == Some(hu));
+            let value = Rect { x: d.x + d.w, y: d.y, w: u.x - d.x - d.w, h: d.h };
+            let style = if min == 0 { Text::body().color(th.text_dim) } else { Text::label() };
+            k.text_center(value, &idle::label(min), style);
+        };
+        card(k, ig.tab, ig.tab_down, ig.tab_up, "Tab sin uso", "Ni lo ves, ni escribes en él, ni muestra nada", r.tab_min, Hit::IdleTabDown, Hit::IdleTabUp);
+        card(k, ig.group, ig.group_down, ig.group_up, "Grupo sin uso", "Todos sus tabs, si no usaste ninguno", r.group_min, Hit::IdleGroupDown, Hit::IdleGroupUp);
+
+        // Interruptores.
+        let toggle = |k: &mut Kit, r: Rect, on: bool, title: &str, sub: &str, h: Hit| {
+            let border = if self.hover == Some(h) { theme::mix(th.border, th.text, 0.25) } else { th.border };
+            k.bordered(r, 8.0, th.chrome, border);
+            let sw = left_switch(r, s);
+            k.switch(sw, on);
+            let tx = sw.x + sw.w + 14.0 * s;
+            k.text(tx, r.y + 7.0 * s, title, Text::label(), r.x + r.w - tx - 10.0 * s);
+            k.text(tx, r.y + 26.0 * s, sub, Text::small(), r.x + r.w - tx - 10.0 * s);
+        };
+        toggle(
+            k,
+            ig.waiting,
+            r.include_waiting,
+            "Incluir tabs donde Claude espera tu respuesta",
+            "Se pierde la pregunta pendiente; al reanudar, Claude vuelve a la misma sesión",
+            Hit::IdleWaiting,
+        );
+        toggle(
+            k,
+            ig.running,
+            r.include_running,
+            "Incluir tabs con un comando corriendo",
+            "Suspender lo cierra: un servidor sin logs, ssh, vim…",
+            Hit::IdleRunning,
+        );
+
+        // Por grupo.
+        k.text(cx, ig.groups_y, "POR GRUPO", Text::caption(), g.content_w);
+        for (gi, row, sw) in &ig.rows {
+            let grp = &v.groups[*gi];
+            if self.hover == Some(Hit::IdleExempt(*gi)) {
+                k.rounded(*row, 6.0, th.hover);
+            }
+            let icon = if grp.exempt { icons::PIN } else { icons::FOLDER };
+            k.icon(row.x + 16.0 * s, row.y + row.h / 2.0, icon, 14.0, if grp.exempt { th.accent } else { th.text_dim });
+            let x = row.x + 32.0 * s;
+            let name_style = Text::body();
+            let ty = row.y + (row.h - k.line_h(name_style)) / 2.0;
+            let right = sw.x - 12.0 * s;
+            let nw = k.measure(&grp.name, name_style).min((right - x) * 0.55);
+            k.text(x, ty, &grp.name, name_style, nw);
+            let mut detail = if grp.open { "abierto".to_string() } else { format!("usado {}", idle::ago(grp.idle)) };
+            if grp.suspended > 0 {
+                detail += &format!(" · {} de {} suspendidos", grp.suspended, grp.tabs);
+            }
+            if grp.exempt {
+                detail = format!("nunca se suspende · {detail}");
+            }
+            k.text(x + nw + 10.0 * s, ty + 1.5 * s, &detail, Text::small(), right - x - nw - 10.0 * s);
+            k.switch(*sw, !grp.exempt);
+        }
+        if v.groups.len() > ig.capacity {
+            let top = ig.rows.first().map_or(ig.groups_y, |r| r.1.y);
+            let track = ig.capacity as f32 * IDLE_ROW_H * s;
+            let h = (track * ig.capacity as f32 / v.groups.len() as f32).max(20.0 * s);
+            let y = top + (track - h) * self.idle_scroll as f32 / (v.groups.len() - ig.capacity) as f32;
+            k.rounded(Rect { x: cx + g.content_w + 6.0 * s, y, w: 3.0 * s, h }, 1.5, th.border);
+        }
+        let note = if r.enabled() {
+            "Nunca se suspende el tab visible ni uno donde Claude trabaja"
+        } else {
+            "Desactivado: elige un tiempo para tabs o para grupos"
+        };
+        k.text(cx, ig.note_y, note, Text::small(), g.content_w);
     }
 
     fn draw_icons(&self, k: &mut Kit, g: &Geometry, current: &str) {

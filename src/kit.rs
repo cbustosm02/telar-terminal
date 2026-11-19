@@ -38,6 +38,8 @@ pub mod icons {
     pub const LOADER: char = '\u{e10a}';
     pub const MINUS: char = '\u{e11c}';
     pub const MOON: char = '\u{e11e}';
+    pub const PIN: char = '\u{e259}';
+    pub const TIMER: char = '\u{e1e0}';
     pub const PALETTE: char = '\u{e1dd}';
     pub const PENCIL: char = '\u{e1f9}';
     pub const PLAY: char = '\u{e13c}';

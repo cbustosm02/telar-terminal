@@ -7,6 +7,7 @@ mod config;
 mod font;
 mod fontlist;
 mod hooks;
+mod idle;
 mod input;
 mod kit;
 mod limits;
@@ -279,6 +280,9 @@ impl ApplicationHandler<UserEvent> for App {
         if state.snapshot.is_some() && !restored {
             state.snapshot_setup();
         }
+        if state.snapshot.is_some() {
+            state.snapshot_overlays();
+        }
         state.update_awake();
         stats::spawn(state.proxy.clone());
         if state.snapshot.is_none() {
@@ -324,6 +328,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
         let visible = st.ws.active_term() == Some(id);
+        // Lo que muestra una shell (un servidor con logs, un build) cuenta como uso del tab.
+        // Lo que muestra Claude no: su interfaz puede redibujarse sola estando quieta. Con
+        // Claude cuenta que trabaje (ver `enforce_idle`), que lo veas o que escribas.
+        if let (TermEvent::Wakeup, Some(t)) = (&event, st.terms.get(&id)) {
+            if t.agent.state == AgentState::None {
+                t.touch();
+            }
+        }
         match event {
             TermEvent::Wakeup if visible => st.window.request_redraw(),
             TermEvent::Bell if !visible => {
@@ -508,7 +520,9 @@ impl State {
         let name = old.name.take();
         let mut agent = std::mem::take(&mut old.agent);
         let size = old.size();
+        let last_used = old.last_used.get();
         let mut t = Terminal::frozen(id, size, self.proxy.clone(), Frozen { cwd, screen });
+        t.last_used.set(last_used);
         t.title = title;
         t.name = name;
         if claude {
@@ -771,6 +785,7 @@ impl State {
                     self.window.request_redraw();
                 }
             }
+            t.touch();
             t.write(bytes);
         }
     }
@@ -879,6 +894,11 @@ impl State {
         } else {
             items.push(MenuItem::new(icons::MOON, "Suspender grupo", &["⌘", "⇧", "S"], Action::SuspendGroup));
         }
+        if self.config.idle.enabled() {
+            let exempt = self.ws.groups.get(group).is_some_and(|g| g.idle_exempt);
+            let (icon, label) = if exempt { (icons::TIMER, "Permitir suspender solo") } else { (icons::PIN, "Nunca suspender solo") };
+            items.push(MenuItem::new(icon, label, &[], Action::ToggleIdleExempt));
+        }
         let l = self.layout();
         self.menu = Some(Menu::new(self.cursor.0, self.cursor.1, tab, group, items, &l));
         self.editing = None;
@@ -917,6 +937,12 @@ impl State {
             }
             (Action::RenameGroup, _) => self.start_rename(gi),
             (Action::SuspendGroup | Action::ResumeGroup, _) => self.toggle_suspend_group(gi),
+            (Action::ToggleIdleExempt, _) => {
+                if let Some(g) = self.ws.groups.get_mut(gi) {
+                    g.idle_exempt = !g.idle_exempt;
+                    self.save_session();
+                }
+            }
             _ => {}
         }
         self.window.request_redraw();
@@ -1418,6 +1444,13 @@ impl State {
                 MouseScrollDelta::LineDelta(_, y) => -y.round() as isize,
                 MouseScrollDelta::PixelDelta(p) => (-p.y as f32 / (26.0 * l.s())).round() as isize,
             };
+            if st.section == settings::IDLE_SECTION {
+                let n = self.ws.groups.len();
+                let max = n.saturating_sub(st.idle_capacity(&l, n));
+                st.idle_scroll = (st.idle_scroll as isize + rows).clamp(0, max as isize) as usize;
+                self.window.request_redraw();
+                return;
+            }
             if st.section == settings::PERF_SECTION {
                 let n = self.ws.groups.len();
                 let max = n.saturating_sub(st.perf_capacity(&l, n));
@@ -1543,6 +1576,7 @@ impl State {
                     } else {
                         text.as_bytes().to_vec()
                     };
+                    t.touch();
                     t.write(bytes);
                     json!({ "ok": true, "id": id })
                 }
@@ -1719,6 +1753,7 @@ impl State {
         self.meters_shown = shown;
         self.stats = Some(sample);
         let over_changed = self.enforce_limits();
+        self.enforce_idle();
         if changed || over_changed || self.stats_detail.is_some() || self.settings.is_some() {
             self.window.request_redraw();
         }
@@ -1748,6 +1783,89 @@ impl State {
             }
         }
         changed
+    }
+
+    /// Estado de inactividad de cada tab y grupo. Antes, marca como usados el tab visible
+    /// y los tabs donde Claude trabaja: un agente trabajando mucho rato no es inactividad,
+    /// aunque no toques nada.
+    fn idle_state(&self) -> (Vec<idle::Tab>, Vec<idle::Group>) {
+        let visible = self.ws.active_term();
+        let mut tabs = Vec::new();
+        for (gi, g) in self.ws.groups.iter().enumerate() {
+            for id in &g.tabs {
+                let Some(t) = self.terms.get(id) else { continue };
+                let state = t.agent.state;
+                if Some(*id) == visible || state == AgentState::Working {
+                    t.touch();
+                }
+                tabs.push(idle::Tab {
+                    id: *id,
+                    group: gi,
+                    idle: t.last_used.get().elapsed(),
+                    visible: Some(*id) == visible,
+                    suspended: t.is_suspended(),
+                    working: state == AgentState::Working,
+                    waiting: state == AgentState::NeedsYou,
+                    running: !t.is_suspended()
+                        && state == AgentState::None
+                        && t.process.as_deref().is_some_and(|p| !idle::is_shell(p)),
+                });
+            }
+        }
+        let group_idle = idle::group_idle(&tabs, self.ws.groups.len(), self.ws.active);
+        let groups = self
+            .ws
+            .groups
+            .iter()
+            .zip(group_idle)
+            .enumerate()
+            .map(|(gi, (g, idle))| idle::Group { idle, open: gi == self.ws.active, exempt: g.idle_exempt })
+            .collect();
+        (tabs, groups)
+    }
+
+    /// Suspende lo que lleva sin usarse más de lo configurado (Configuración › Inactividad).
+    fn enforce_idle(&mut self) {
+        let (tabs, groups) = self.idle_state();
+        let ids = idle::pick(&self.config.idle, &tabs, &groups);
+        let mut any = false;
+        for id in ids {
+            any |= self.suspend(id);
+        }
+        if any {
+            log::info!("suspensión por inactividad");
+            self.save_session();
+        }
+    }
+
+    /// Datos de la sección Inactividad del modal.
+    fn idle_view(&self) -> settings::IdleView {
+        let (tabs, groups) = self.idle_state();
+        settings::IdleView {
+            rules: self.config.idle,
+            groups: self
+                .ws
+                .groups
+                .iter()
+                .zip(groups)
+                .enumerate()
+                .map(|(gi, (g, ig))| settings::IdleGroup {
+                    name: g.name.clone(),
+                    exempt: g.idle_exempt,
+                    open: ig.open,
+                    idle: ig.idle,
+                    suspended: tabs.iter().filter(|t| t.group == gi && t.suspended).count(),
+                    tabs: g.tabs.len(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Cambia algo de Inactividad, lo guarda y aplica.
+    fn set_idle(&mut self, f: impl FnOnce(&mut idle::Rules)) {
+        f(&mut self.config.idle);
+        self.config.save();
+        self.enforce_idle();
     }
 
     /// − / + de un límite: 0 es Telar completo (configuración); 1.. el grupo i-1 (sesión).
@@ -1904,6 +2022,18 @@ impl State {
                 self.config.save();
                 self.enforce_limits();
             }
+            settings::Hit::IdleTabDown => self.set_idle(|r| r.tab_min = idle::step(r.tab_min, -1)),
+            settings::Hit::IdleTabUp => self.set_idle(|r| r.tab_min = idle::step(r.tab_min, 1)),
+            settings::Hit::IdleGroupDown => self.set_idle(|r| r.group_min = idle::step(r.group_min, -1)),
+            settings::Hit::IdleGroupUp => self.set_idle(|r| r.group_min = idle::step(r.group_min, 1)),
+            settings::Hit::IdleWaiting => self.set_idle(|r| r.include_waiting = !r.include_waiting),
+            settings::Hit::IdleRunning => self.set_idle(|r| r.include_running = !r.include_running),
+            settings::Hit::IdleExempt(gi) => {
+                if let Some(g) = self.ws.groups.get_mut(gi) {
+                    g.idle_exempt = !g.idle_exempt;
+                    self.save_session();
+                }
+            }
             settings::Hit::SizeDown => self.set_font_size(self.font_pt - 1.0),
             settings::Hit::SizeUp => self.set_font_size(self.font_pt + 1.0),
             settings::Hit::Inside => {}
@@ -2042,6 +2172,7 @@ impl State {
             "state": t.agent.state.name(),
             "suspended": t.is_suspended(),
             "state_secs": t.agent.since.elapsed().as_secs(),
+            "idle_secs": t.last_used.get().elapsed().as_secs(),
             "changes": t.agent.changes,
             "session_id": t.agent.session_id,
             "cwd": t.cwd().or_else(|| t.agent.cwd.as_ref().map(PathBuf::from)),
@@ -2083,6 +2214,7 @@ impl State {
                 name: g.name.clone(),
                 dir: g.dir.clone(),
                 ram_limit_mb: g.ram_limit_mb,
+                idle_exempt: g.idle_exempt,
                 active: g.active,
                 tabs: g
                     .tabs
@@ -2154,7 +2286,7 @@ impl State {
             }
             if !tabs.is_empty() {
                 let active = g.active.min(tabs.len() - 1);
-                groups.push(Group { name: g.name, tabs, active, dir: g.dir, ram_limit_mb: g.ram_limit_mb });
+                groups.push(Group { name: g.name, tabs, active, dir: g.dir, ram_limit_mb: g.ram_limit_mb, idle_exempt: g.idle_exempt });
             }
         }
         self.ws.restore(groups, saved.active);
@@ -2237,6 +2369,10 @@ impl State {
             let text = text.replace("\\n", "\r");
             self.send_input(text.into_bytes());
         }
+    }
+
+    /// Modo snapshot: lo que se abre encima para la captura (también con una sesión cargada).
+    fn snapshot_overlays(&mut self) {
         // TELAR_SNAPSHOT_SEARCH=texto: captura con el buscador abierto.
         if let Some(q) = std::env::var("TELAR_SNAPSHOT_SEARCH").ok().filter(|q| !q.is_empty()) {
             self.search = Some((q, 0));
@@ -2252,6 +2388,7 @@ impl State {
                 match section.as_str() {
                     "icono" => st.section = settings::ICON_SECTION,
                     "rendimiento" => st.section = settings::PERF_SECTION,
+                    "inactividad" => st.section = settings::IDLE_SECTION,
                     _ => {}
                 }
             }
@@ -2306,6 +2443,7 @@ impl State {
                 size: self.font_pt,
                 app_icon: &self.config.app_icon,
                 perf: self.perf_view(),
+                idle: self.idle_view(),
             };
             st.draw(&mut self.quads, &mut self.fonts, &l, &ctx);
             ime_cell = None;

@@ -8,6 +8,7 @@
 //! (reconstruida desde `screen::to_ansi`) para la vista previa.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
@@ -161,6 +162,8 @@ pub struct Terminal {
     /// Copia del descriptor del PTY, para preguntar por el proceso en primer plano.
     pty: Option<OwnedFd>,
     size: GridSize,
+    /// Último uso: lo viste, escribiste en él o su programa mostró algo (ver `idle`).
+    pub last_used: Cell<Instant>,
 }
 
 impl Terminal {
@@ -214,6 +217,7 @@ impl Terminal {
             process: None,
             pty: pty_fd,
             size,
+            last_used: Cell::new(Instant::now()),
         })
     }
 
@@ -236,12 +240,18 @@ impl Terminal {
             process: None,
             pty: None,
             size,
+            last_used: Cell::new(Instant::now()),
         }
     }
 
     /// Nombre a mostrar: el del usuario, el título del programa o el proceso.
     pub fn label(&self) -> Option<&str> {
         self.name.as_deref().or(self.title.as_deref()).or(self.process.as_deref())
+    }
+
+    /// Marca el tab como usado ahora.
+    pub fn touch(&self) {
+        self.last_used.set(Instant::now());
     }
 
     pub fn is_suspended(&self) -> bool {

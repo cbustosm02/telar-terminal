@@ -290,6 +290,8 @@ pub enum Action {
     RenameGroup,
     SuspendGroup,
     ResumeGroup,
+    /// Excluir o volver a incluir el grupo en la suspensión por inactividad.
+    ToggleIdleExempt,
 }
 
 pub struct MenuItem {
