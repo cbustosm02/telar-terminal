@@ -174,6 +174,17 @@ impl Layout {
         Rect { x: 8.0 * s, y: (LIST_TOP + row * GROUP_ROW_H) * s, w: (SIDEBAR_W - 16.0) * s, h: (GROUP_ROW_H - 2.0) * s }
     }
 
+    /// Fila de la lista bajo `y` (puede quedar fuera de la vista o ser negativa).
+    pub fn row_at(&self, y: f32) -> isize {
+        ((y - LIST_TOP * self.s) / (GROUP_ROW_H * self.s)).floor() as isize + self.list_scroll as isize
+    }
+
+    /// Lugar de la barra de tabs bajo `x`, entre 0 y `n_tabs - 1`.
+    pub fn tab_at(&self, x: f32, n_tabs: usize) -> usize {
+        let i = ((x - (SIDEBAR_W + 8.0) * self.s) / (self.tab_w + TAB_GAP * self.s)).floor();
+        (i.max(0.0) as usize).min(n_tabs.saturating_sub(1))
+    }
+
     pub fn tab_rect(&self, i: usize) -> Rect {
         let s = self.s;
         Rect { x: (SIDEBAR_W + 8.0) * s + i as f32 * (self.tab_w + TAB_GAP * s), y: 7.0 * s, w: self.tab_w, h: (TITLEBAR_H - 14.0) * s }
@@ -393,6 +404,8 @@ pub struct View<'a> {
     /// Límite de memoria de Telar completo (MB, 0: sin límite) y grupos pasados del suyo.
     pub ram_limit_mb: u64,
     pub over_groups: &'a [bool],
+    /// Grupo sobre el que se va a soltar un tab arrastrado.
+    pub drop_group: Option<usize>,
 }
 
 /// Resultado de buscar en la barra lateral: un grupo, o un tab de un grupo.
@@ -633,6 +646,9 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
             k.rounded(Rect { x: r.x, y: r.y + 8.0 * s, w: 3.0 * s, h: r.h - 16.0 * s }, 1.5, th.accent);
         } else if v.hover == Hit::Group(i) {
             k.rounded(r, 6.0, th.hover);
+        }
+        if v.drop_group == Some(i) {
+            k.bordered(r, 6.0, theme::mix(th.chrome, th.accent, 0.14), th.accent);
         }
         let asleep = grp.tabs.iter().all(|id| v.terms.get(id).is_some_and(Terminal::is_suspended));
         let count = grp.tabs.len().to_string();

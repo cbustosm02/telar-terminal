@@ -143,3 +143,11 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - «Comando corriendo»: el proceso en primer plano no es una shell conocida (`idle::is_shell`) ni Claude. Por defecto se respeta, porque suspender lo cierra (un servidor sin logs se perdería sin avisar).
 - La decisión es pura (`idle::pick`, con pruebas); la app solo arma el estado y suspende. Se revisa con cada muestra de uso (2 s). Probado con los minutos cambiados por segundos: suspendió los tabs sin uso y respetó el visible y el grupo excluido.
 - Las reglas van en `config.json` (`inactivity`); la exclusión de cada grupo, con el grupo en la sesión (`idle_exempt`).
+
+## Reordenar con arrastre (2026-11-18)
+
+- Al apretar sobre un grupo o un tab empieza un arrastre «pendiente»; se vuelve arrastre recién al moverse 5 pt, así el clic, el doble clic (renombrar) y el clic derecho siguen igual.
+- El reordenamiento es en vivo: mientras se arrastra, el grupo o tab se mueve en el modelo al lugar bajo el puntero (`Workspace::move_group` y `move_tab`). No hace falta dibujar un «fantasma» ni una línea de inserción: lo que se ve ya es el resultado, y el elemento arrastrado está resaltado porque apretarlo lo selecciona. El grupo abierto y el tab visible se mantienen aunque cambien de índice (`follow`).
+- Un tab llevado a la barra lateral resalta el grupo de destino; al soltarlo pasa al final de ese grupo y queda visible (`move_tab_to_group`). Si su grupo queda vacío, se elimina, como al cerrar su último tab.
+- Llevar un grupo más allá de la vista desplaza la lista. Al soltar se guarda la sesión y se recalculan los límites por grupo, que se indican por índice. Si la ventana pierde el foco, el arrastre termina.
+- `TELAR_SNAPSHOT_DRAG=group|tab|tab-to-group|tab-to-group-drop` simula un arrastre en el modo captura, por el mismo código que el mouse.

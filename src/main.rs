@@ -162,11 +162,30 @@ struct State {
     over_total: bool,
     over_groups: Vec<bool>,
     last_auto_suspend: Instant,
+    /// Grupo o tab que se está arrastrando para reordenarlo.
+    drag: Option<Dragging>,
     update: update::Status,
     /// La búsqueda automática al abrir no muestra errores (p. ej. sin conexión).
     update_quiet: bool,
     /// Pedido de salir desde fuera del teclado (p. ej. «Reiniciar» tras actualizar).
     quit: bool,
+}
+
+/// Arrastre para reordenar: empieza al apretar sobre un grupo o un tab y cuenta como
+/// arrastre recién al moverse unos píxeles (antes es un clic normal).
+struct Dragging {
+    item: Dragged,
+    from: (f32, f32),
+    moved: bool,
+    /// Tab arrastrado sobre otro grupo de la barra lateral: al soltarlo, pasa ahí.
+    drop_group: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum Dragged {
+    /// Índice actual del grupo (cambia mientras se arrastra).
+    Group(usize),
+    Tab(u64),
 }
 
 /// Modo de prueba: `TELAR_SNAPSHOT=archivo.bmp` abre la app, escribe
@@ -214,6 +233,7 @@ impl ApplicationHandler<UserEvent> for App {
             over_total: false,
             over_groups: Vec::new(),
             last_auto_suspend: Instant::now(),
+            drag: None,
             palette: theme::t().palette(),
             window,
             renderer,
@@ -441,6 +461,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // Al cambiar de app, el menú se cierra (salvo en modo captura, sin foco).
                 if !focused && st.snapshot.is_none() {
                     st.menu = None;
+                    st.drag_end();
                 }
                 if focused {
                     st.mark_seen();
@@ -1146,6 +1167,10 @@ impl State {
 
     fn on_cursor_moved(&mut self, pos: PhysicalPosition<f64>) {
         self.cursor = (pos.x as f32, pos.y as f32);
+        if self.drag.is_some() {
+            self.drag_move();
+            return;
+        }
         let l = self.layout();
         if let Some(d) = self.stats_detail.as_mut() {
             let hover = Some(d.hit(self.cursor.0, self.cursor.1, &l));
@@ -1257,6 +1282,9 @@ impl State {
         }
 
         if !pressed {
+            if button == MouseButton::Left {
+                self.drag_end();
+            }
             if let Some(b) = self.mouse_button.take() {
                 let (col, row, _) = l.cell_at(self.cursor.0, self.cursor.1);
                 self.mouse_report(b, false, col, row, self.active_mode());
@@ -1307,9 +1335,12 @@ impl State {
             (Hit::Group(i), MouseButton::Left) => {
                 if count >= 2 {
                     self.start_rename(i);
-                } else if self.ws.active != i {
-                    self.ws.select_group(i);
-                    self.after_switch();
+                } else {
+                    if self.ws.active != i {
+                        self.ws.select_group(i);
+                        self.after_switch();
+                    }
+                    self.drag = Some(Dragging { item: Dragged::Group(i), from: self.cursor, moved: false, drop_group: None });
                 }
             }
             (Hit::NewGroup, MouseButton::Left) => {
@@ -1324,6 +1355,9 @@ impl State {
                 } else {
                     self.ws.select_tab(i);
                     self.after_switch();
+                    if let Some(id) = id {
+                        self.drag = Some(Dragging { item: Dragged::Tab(id), from: self.cursor, moved: false, drop_group: None });
+                    }
                 }
             }
             (Hit::Tab(i) | Hit::CloseTab(i), MouseButton::Right) => {
@@ -1357,6 +1391,73 @@ impl State {
             (Hit::Terminal, _) => self.on_terminal_press(button, count),
             _ => {}
         }
+        self.window.request_redraw();
+    }
+
+    /// Arrastrando: el grupo o tab se mueve en vivo al lugar bajo el puntero. Un tab
+    /// llevado a la barra lateral marca el grupo donde va a quedar.
+    fn drag_move(&mut self) {
+        let Some(mut d) = self.drag.take() else { return };
+        let l = self.layout();
+        let (x, y) = self.cursor;
+        if !d.moved {
+            let (dx, dy) = (x - d.from.0, y - d.from.1);
+            let min = 5.0 * l.s();
+            if dx * dx + dy * dy < min * min {
+                self.drag = Some(d);
+                return;
+            }
+            d.moved = true;
+            self.editing = None;
+            self.window.set_cursor(CursorIcon::Grabbing);
+        }
+        match d.item {
+            Dragged::Group(from) => {
+                let n = self.ws.groups.len();
+                let to = l.row_at(y).clamp(0, n as isize - 1) as usize;
+                if self.ws.move_group(from, to) {
+                    d.item = Dragged::Group(to);
+                    self.reveal_row(to);
+                }
+            }
+            Dragged::Tab(id) => {
+                let src = self.ws.group_of(id);
+                if x < l.sidebar_w() {
+                    let row = l.row_at(y);
+                    let row_ok = row >= 0 && l.row_visible(row as usize) && (row as usize) < self.ws.groups.len();
+                    d.drop_group = (row_ok && Some(row as usize) != src).then_some(row as usize);
+                } else {
+                    d.drop_group = None;
+                    if let Some(g) = src.filter(|g| *g == self.ws.active) {
+                        let tabs = &self.ws.groups[g].tabs;
+                        if let Some(from) = tabs.iter().position(|t| *t == id) {
+                            let to = l.tab_at(x, tabs.len());
+                            self.ws.move_tab(g, from, to);
+                        }
+                    }
+                }
+            }
+        }
+        self.drag = Some(d);
+        self.window.request_redraw();
+    }
+
+    /// Al soltar: un tab sobre otro grupo pasa a ese grupo; lo demás ya quedó en su lugar.
+    fn drag_end(&mut self) {
+        let Some(d) = self.drag.take() else { return };
+        if !d.moved {
+            return;
+        }
+        if let (Dragged::Tab(id), Some(gi)) = (d.item, d.drop_group) {
+            if self.ws.move_tab_to_group(id, gi) {
+                self.after_switch();
+            }
+        }
+        // Los grupos pasados de su límite se indican por índice: se recalculan.
+        self.enforce_limits();
+        self.save_session();
+        self.hover = Hit::None;
+        self.on_cursor_moved(PhysicalPosition::new(self.cursor.0 as f64, self.cursor.1 as f64));
         self.window.request_redraw();
     }
 
@@ -2393,6 +2494,40 @@ impl State {
                 }
             }
         }
+        // TELAR_SNAPSHOT_DRAG=group|tab|tab-to-group: arrastre simulado. «group» lleva el
+        // primer grupo a la cuarta fila; «tab», el primer tab al final; «tab-to-group»
+        // deja el tab visible sobre la tercera fila de la barra lateral, sin soltarlo.
+        if let Ok(kind) = std::env::var("TELAR_SNAPSHOT_DRAG") {
+            let l = self.layout();
+            let s = l.s();
+            let row_y = |i: f32| (112.0 + 32.0 * i + 15.0) * s;
+            let (item, start, end) = match kind.as_str() {
+                "group" => (Some(Dragged::Group(0)), (60.0 * s, row_y(0.0)), (60.0 * s, row_y(3.0))),
+                "tab" => {
+                    let r = l.tab_rect(0);
+                    let n = self.ws.group().map_or(1, |g| g.tabs.len());
+                    let last = l.tab_rect(n - 1);
+                    let first = self.ws.group().and_then(|g| g.tabs.first().copied());
+                    (first.map(Dragged::Tab), (r.x + 10.0, r.y + 10.0), (last.x + last.w - 10.0, last.y + 10.0))
+                }
+                _ => {
+                    let r = l.tab_rect(0);
+                    (self.ws.active_term().map(Dragged::Tab), (r.x + 10.0, r.y + 10.0), (60.0 * s, row_y(2.0)))
+                }
+            };
+            if let Some(item) = item {
+                if let Dragged::Group(i) = item {
+                    self.ws.select_group(i);
+                }
+                self.cursor = start;
+                self.drag = Some(Dragging { item, from: start, moved: false, drop_group: None });
+                self.cursor = end;
+                self.drag_move();
+                if kind != "tab-to-group" {
+                    self.drag_end();
+                }
+            }
+        }
         // TELAR_SNAPSHOT_MENU=tab|group: captura con el menú contextual abierto.
         match std::env::var("TELAR_SNAPSHOT_MENU").as_deref() {
             Ok("tab") => {
@@ -2435,6 +2570,7 @@ impl State {
             search: self.search.as_ref().map(|(q, sel)| (q.as_str(), *sel, results.as_slice())),
             ram_limit_mb: self.config.ram_limit_mb,
             over_groups: &self.over_groups,
+            drop_group: self.drag.as_ref().and_then(|d| d.drop_group),
         };
         let mut ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
         if let Some(st) = &self.settings {

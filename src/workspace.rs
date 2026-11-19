@@ -110,6 +110,44 @@ impl Workspace {
         self.groups.is_empty()
     }
 
+    /// Mueve el grupo `from` a la posición `to` (arrastrando). El grupo abierto sigue
+    /// siendo el mismo, aunque cambie su índice.
+    pub fn move_group(&mut self, from: usize, to: usize) -> bool {
+        if from == to || from >= self.groups.len() || to >= self.groups.len() {
+            return false;
+        }
+        let g = self.groups.remove(from);
+        self.groups.insert(to, g);
+        self.active = follow(self.active, from, to);
+        true
+    }
+
+    /// Mueve el tab `from` del grupo `gi` a la posición `to`. El tab visible sigue siendo el mismo.
+    pub fn move_tab(&mut self, gi: usize, from: usize, to: usize) -> bool {
+        let Some(g) = self.groups.get_mut(gi) else { return false };
+        if from == to || from >= g.tabs.len() || to >= g.tabs.len() {
+            return false;
+        }
+        let id = g.tabs.remove(from);
+        g.tabs.insert(to, id);
+        g.active = follow(g.active, from, to);
+        true
+    }
+
+    /// Pasa el tab `id` al final del grupo `to` y lo deja visible. Si su grupo queda
+    /// vacío, se elimina.
+    pub fn move_tab_to_group(&mut self, id: u64, to: usize) -> bool {
+        let Some(from) = self.group_of(id) else { return false };
+        if from == to || to >= self.groups.len() {
+            return false;
+        }
+        let removed_group = self.groups[from].tabs.len() == 1;
+        self.remove_term(id);
+        let to = if removed_group && from < to { to - 1 } else { to };
+        self.insert_tab(to, id, true);
+        true
+    }
+
     pub fn select_group(&mut self, i: usize) {
         if i < self.groups.len() {
             self.active = i;
@@ -138,6 +176,19 @@ impl Workspace {
                 g.active = (g.active as isize + delta).rem_euclid(n) as usize;
             }
         }
+    }
+}
+
+/// Dónde queda el elemento `active` al mover el de `from` a `to`.
+fn follow(active: usize, from: usize, to: usize) -> usize {
+    if active == from {
+        to
+    } else if from < active && active <= to {
+        active - 1
+    } else if to <= active && active < from {
+        active + 1
+    } else {
+        active
     }
 }
 
@@ -258,5 +309,49 @@ mod tests {
         assert_eq!(w.active, 1);
         w.add_group(3);
         assert_eq!(w.groups[2].name, "Grupo 3");
+    }
+
+    fn ids(w: &Workspace) -> Vec<Vec<u64>> {
+        w.groups.iter().map(|g| g.tabs.clone()).collect()
+    }
+
+    #[test]
+    fn mover_grupos() {
+        let mut w = ws(&[&[1], &[2], &[3], &[4]]);
+        w.select_group(1);
+        assert!(w.move_group(0, 3));
+        assert_eq!(ids(&w), vec![vec![2], vec![3], vec![4], vec![1]]);
+        assert_eq!(w.active, 0, "el abierto sigue siendo el del tab 2");
+        assert!(w.move_group(0, 2));
+        assert_eq!(ids(&w), vec![vec![3], vec![4], vec![2], vec![1]]);
+        assert_eq!(w.active, 2, "el abierto se movió con el arrastre");
+        assert!(w.move_group(3, 0));
+        assert_eq!(w.active, 3);
+        assert!(!w.move_group(1, 1) && !w.move_group(0, 9));
+    }
+
+    #[test]
+    fn mover_tabs() {
+        let mut w = ws(&[&[1, 2, 3, 4]]);
+        // add_tab inserta después del activo: queda [1, 2, 3, 4] con el 4 visible.
+        assert_eq!(ids(&w), vec![vec![1, 2, 3, 4]]);
+        w.select_tab(1);
+        assert!(w.move_tab(0, 3, 0));
+        assert_eq!(ids(&w), vec![vec![4, 1, 2, 3]]);
+        assert_eq!(w.groups[0].active, 2, "sigue visible el tab 2");
+        assert!(!w.move_tab(0, 0, 9) && !w.move_tab(5, 0, 1));
+    }
+
+    #[test]
+    fn mover_un_tab_a_otro_grupo() {
+        let mut w = ws(&[&[1, 2], &[3], &[4]]);
+        assert!(w.move_tab_to_group(2, 2));
+        assert_eq!(ids(&w), vec![vec![1], vec![3], vec![4, 2]]);
+        assert_eq!((w.active, w.groups[2].active), (2, 1), "queda visible en su grupo nuevo");
+        // El grupo de origen queda vacío y se elimina: el destino cambia de índice.
+        assert!(w.move_tab_to_group(3, 2));
+        assert_eq!(ids(&w), vec![vec![1], vec![4, 2, 3]]);
+        assert_eq!(w.active, 1);
+        assert!(!w.move_tab_to_group(3, 1), "ya está en ese grupo");
     }
 }
