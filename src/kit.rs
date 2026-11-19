@@ -99,6 +99,8 @@ pub enum Variant {
     Subtle,
     /// Sin fondo hasta pasar el puntero.
     Ghost,
+    /// Fondo rojo: una acción que no se puede deshacer.
+    Danger,
 }
 
 pub struct Kit<'a> {
@@ -260,6 +262,7 @@ impl<'a> Kit<'a> {
             Variant::Primary => (if hovered { theme::mix(th.accent, th.text, 0.12) } else { th.accent }, th.on_accent),
             Variant::Subtle => (if hovered { th.active } else { th.hover }, th.text),
             Variant::Ghost => (if hovered { th.hover } else { theme::alpha(th.hover, 0.0) }, if hovered { th.text } else { th.text_dim }),
+            Variant::Danger => (if hovered { theme::mix(th.danger, th.text, 0.12) } else { th.danger }, th.on_accent),
         };
         self.rounded(r, 6.0, bg);
         let style = Text::label().color(fg);

@@ -145,7 +145,8 @@ Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina so
 | ⌘⇧T | Nuevo agente: tab que arranca `claude` |
 | ⌘K | Limpiar la pantalla y el scrollback |
 | Arrastrar un grupo o un tab | Reordenarlo; un tab soltado sobre otro grupo de la barra lateral pasa a ese grupo |
-| Clic derecho en un tab o grupo | Menú: suspender/reanudar, limpiar, renombrar, cerrar, nuevo tab o agente |
+| Clic derecho en un tab o grupo | Menú: suspender/reanudar, limpiar, renombrar, cerrar, nuevo tab o agente, eliminar grupo |
+| ✕ en la fila de un grupo (abierto o bajo el puntero) | Eliminar el grupo con todos sus tabs, después de confirmar |
 | Doble clic en un tab | Renombrar el tab (vacío: vuelve el título automático) |
 | ⌘S | Suspender o reanudar el tab activo (Enter también reanuda) |
 | ⌘⇧S | Suspender o reanudar el grupo activo |

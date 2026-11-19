@@ -160,3 +160,12 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - `top` es setuid root: `proc_pidinfo` y `KERN_PROCARGS2` fallan con él. Se usa `ps -o ppid=,args=` (que es setuid) como respaldo, y su carpeta es la de la shell del tab, cuyo pid se anota (`Terminal::shell_pid`).
 - Si el líder del grupo ya terminó (`cat x | less`: `cat` sale enseguida), el pipeline no se puede rearmar igual y `less` solo no tendría entrada: no se ejecuta nada. Las variables de entorno puestas en la línea (`FOO=1 cmd`) no se recuperan.
 - Probado de punta a punta por la CLI (`new`, `suspend`, `resume`, `read`): `top`, `vim -R`, `tail -f | grep` volvieron en su carpeta; `cat | less` dejó la shell.
+
+## Eliminar un grupo entero (2026-11-19)
+
+- Pedido del usuario: borrar un grupo sin cerrar sus tabs uno por uno. Hay una ✕ a la derecha de la cantidad de tabs (en el grupo abierto o bajo el puntero, como la ✕ de los tabs) y «Eliminar grupo» al final del menú del grupo.
+- Las dos piden confirmación con un diálogo del kit (`confirm.rs`): dice cuántos tabs se cierran, si Claude está trabajando en alguno y que sus sesiones se pueden retomar con `claude --resume`. Enter o el botón rojo (`Variant::Danger`) confirman; Esc, «Cancelar» o un clic fuera cancelan. Mientras está abierto, ni el teclado ni el IME llegan a la terminal.
+- El diálogo recuerda el grupo por uno de sus tabs y no por el índice: si mientras tanto se crea o se mueve un grupo (por ejemplo, con `telar new`), se elimina igual el elegido.
+- Si era el único grupo, Telar sigue con uno nuevo en lugar de cerrarse. Se guarda la sesión y se recalculan los límites por grupo, que se indican por índice.
+- Con la búsqueda abierta las filas son resultados y no tienen ✕.
+- `TELAR_SNAPSHOT_DELETE=n` abre la confirmación del grupo n en el modo captura.

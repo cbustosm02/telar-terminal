@@ -4,6 +4,7 @@ mod appicon;
 mod awake;
 mod cli;
 mod config;
+mod confirm;
 mod font;
 mod fontlist;
 mod hooks;
@@ -149,6 +150,8 @@ struct State {
     /// Última muestra de uso de recursos y el panel de detalle, si está abierto.
     stats: Option<stats::Sample>,
     stats_detail: Option<statsview::Detail>,
+    /// Diálogo de confirmación abierto (eliminar un grupo).
+    confirm: Option<confirm::Confirm>,
     /// Lo que muestran los medidores: solo se repinta si cambia.
     meters_shown: String,
     /// Primera fila visible de la lista de la barra lateral, y píxeles acumulados del
@@ -226,6 +229,7 @@ impl ApplicationHandler<UserEvent> for App {
             settings: None,
             stats: None,
             stats_detail: None,
+            confirm: None,
             meters_shown: String::new(),
             list_scroll: 0,
             list_scroll_px: 0.0,
@@ -781,6 +785,49 @@ impl State {
     }
 
     /// Cierra una terminal. Devuelve `true` si ya no queda ninguna (hay que salir).
+    /// Pide confirmación para eliminar el grupo `gi` con todos sus tabs.
+    fn ask_delete_group(&mut self, gi: usize) {
+        let Some(g) = self.ws.groups.get(gi) else { return };
+        let Some(&anchor) = g.tabs.first() else { return };
+        let terms: Vec<&Terminal> = g.tabs.iter().filter_map(|id| self.terms.get(id)).collect();
+        let claude = terms.iter().filter(|t| t.agent.session_id.is_some()).count();
+        let working = terms.iter().filter(|t| t.agent.state == AgentState::Working).count();
+        self.confirm = Some(confirm::delete_group(&g.name, g.tabs.len(), claude, working, anchor));
+        self.menu = None;
+        self.editing = None;
+        self.drag = None;
+        self.hover = Hit::None;
+        self.window.set_cursor(CursorIcon::Default);
+        self.window.request_redraw();
+    }
+
+    /// Hace lo que se confirmó en el diálogo y lo cierra.
+    fn run_confirm(&mut self) {
+        let Some(c) = self.confirm.take() else { return };
+        match c.pending {
+            confirm::Pending::DeleteGroup { anchor } => {
+                if let Some(gi) = self.ws.group_of(anchor) {
+                    self.delete_group(gi);
+                }
+            }
+        }
+    }
+
+    /// Elimina el grupo `gi` y cierra sus tabs (con lo que corre en ellos).
+    fn delete_group(&mut self, gi: usize) {
+        for id in self.ws.remove_group(gi) {
+            self.terms.remove(&id);
+        }
+        if self.ws.groups.is_empty() {
+            // Era el único: Telar sigue con un grupo nuevo en lugar de cerrarse.
+            self.new_group();
+        }
+        // Los grupos pasados de su límite se indican por índice: se recalculan.
+        self.enforce_limits();
+        self.after_switch();
+        self.save_session();
+    }
+
     fn close_term(&mut self, id: u64) -> bool {
         self.terms.remove(&id);
         self.editing = None;
@@ -927,6 +974,8 @@ impl State {
             let (icon, label) = if exempt { (icons::TIMER, "Permitir suspender solo") } else { (icons::PIN, "Nunca suspender solo") };
             items.push(MenuItem::new(icon, label, &[], Action::ToggleIdleExempt));
         }
+        items.push(MenuItem::separator());
+        items.push(MenuItem::new(icons::TRASH, "Eliminar grupo", &[], Action::DeleteGroup));
         let l = self.layout();
         self.menu = Some(Menu::new(self.cursor.0, self.cursor.1, tab, group, items, &l));
         self.editing = None;
@@ -965,6 +1014,7 @@ impl State {
             }
             (Action::RenameGroup, _) => self.start_rename(gi),
             (Action::SuspendGroup | Action::ResumeGroup, _) => self.toggle_suspend_group(gi),
+            (Action::DeleteGroup, _) => self.ask_delete_group(gi),
             (Action::ToggleIdleExempt, _) => {
                 if let Some(g) = self.ws.groups.get_mut(gi) {
                     g.idle_exempt = !g.idle_exempt;
@@ -996,6 +1046,15 @@ impl State {
     fn on_key(&mut self, event: &KeyEvent) -> bool {
         let m = self.mods;
 
+        if self.confirm.is_some() {
+            match event.logical_key {
+                Key::Named(NamedKey::Enter) => self.run_confirm(),
+                Key::Named(NamedKey::Escape) => self.confirm = None,
+                _ => {}
+            }
+            self.window.request_redraw();
+            return false;
+        }
         if self.menu.is_some() {
             self.menu_key(event);
             return false;
@@ -1161,7 +1220,9 @@ impl State {
             }
             Ime::Commit(text) => {
                 self.preedit.clear();
-                if let Some((_, buf)) = self.editing.as_mut() {
+                if self.confirm.is_some() {
+                    // Con la confirmación abierta, nada llega a la terminal.
+                } else if let Some((_, buf)) = self.editing.as_mut() {
                     buf.push_str(&text);
                     self.window.request_redraw();
                 } else {
@@ -1179,6 +1240,16 @@ impl State {
             return;
         }
         let l = self.layout();
+        if let Some(c) = self.confirm.as_mut() {
+            let hover = Some(c.hit(self.cursor.0, self.cursor.1, &l, &mut self.fonts));
+            if hover != c.hover {
+                c.hover = hover;
+                let pointer = matches!(hover, Some(confirm::Hit::Cancel | confirm::Hit::Confirm));
+                self.window.set_cursor(if pointer { CursorIcon::Pointer } else { CursorIcon::Default });
+                self.window.request_redraw();
+            }
+            return;
+        }
         if let Some(d) = self.stats_detail.as_mut() {
             let hover = Some(d.hit(self.cursor.0, self.cursor.1, &l));
             if hover != d.hover {
@@ -1215,6 +1286,7 @@ impl State {
             let icon = match hit {
                 Hit::Terminal => CursorIcon::Text,
                 Hit::Group(_)
+                | Hit::CloseGroup(_)
                 | Hit::NewGroup
                 | Hit::Tab(_)
                 | Hit::CloseTab(_)
@@ -1257,6 +1329,20 @@ impl State {
         let n_tabs = self.ws.group().map_or(0, |g| g.tabs.len());
         let hit = l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs);
         let pressed = state == ElementState::Pressed;
+
+        // Confirmación abierta: solo sus botones; un clic fuera la cancela.
+        if let Some(c) = &self.confirm {
+            if pressed && button == MouseButton::Left {
+                match c.hit(self.cursor.0, self.cursor.1, &l, &mut self.fonts) {
+                    confirm::Hit::Confirm => self.run_confirm(),
+                    confirm::Hit::Cancel | confirm::Hit::Outside => self.confirm = None,
+                    confirm::Hit::Inside => {}
+                }
+                self.on_cursor_moved(PhysicalPosition::new(self.cursor.0 as f64, self.cursor.1 as f64));
+                self.window.request_redraw();
+            }
+            return;
+        }
 
         // Detalle de uso abierto: un clic fuera o en la ✕ lo cierra.
         if let Some(d) = &self.stats_detail {
@@ -1378,7 +1464,8 @@ impl State {
                     self.open_menu(Some(id), self.ws.active);
                 }
             }
-            (Hit::Group(i), MouseButton::Right) => self.open_menu(None, i),
+            (Hit::Group(i) | Hit::CloseGroup(i), MouseButton::Right) => self.open_menu(None, i),
+            (Hit::CloseGroup(i), MouseButton::Left) => self.ask_delete_group(i),
             (Hit::Search, MouseButton::Left) => self.open_search(),
             (Hit::Tab(i), MouseButton::Middle) | (Hit::CloseTab(i), MouseButton::Left) => {
                 if let Some(id) = self.ws.group().and_then(|g| g.tabs.get(i).copied()) {
@@ -1523,6 +1610,9 @@ impl State {
     }
 
     fn on_scroll(&mut self, delta: MouseScrollDelta) {
+        if self.confirm.is_some() {
+            return;
+        }
         let l = self.layout();
         // Sobre la barra lateral: desplaza la lista de grupos (o de resultados).
         if self.cursor.0 < l.sidebar_w() && self.settings.is_none() && self.stats_detail.is_none() {
@@ -2496,6 +2586,18 @@ impl State {
         if std::env::var_os("TELAR_SNAPSHOT_STATS").is_some() {
             self.toggle_stats();
         }
+        // TELAR_SNAPSHOT_DELETE=n: captura con la confirmación de eliminar el grupo n.
+        if let Some(gi) = std::env::var("TELAR_SNAPSHOT_DELETE").ok().and_then(|v| v.parse().ok()) {
+            self.ask_delete_group(gi);
+        }
+        // TELAR_SNAPSHOT_HOVER=x,y: el puntero en ese punto (en puntos).
+        if let Some((x, y)) = std::env::var("TELAR_SNAPSHOT_HOVER").ok().and_then(|v| {
+            let (x, y) = v.split_once(',')?;
+            Some((x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?))
+        }) {
+            let s = self.window.scale_factor();
+            self.on_cursor_moved(PhysicalPosition::new(x * s, y * s));
+        }
         // TELAR_SNAPSHOT_SETTINGS=1: captura con la configuración abierta.
         if let Ok(section) = std::env::var("TELAR_SNAPSHOT_SETTINGS") {
             self.toggle_settings();
@@ -2601,6 +2703,10 @@ impl State {
         if let (Some(d), Some(sample)) = (&self.stats_detail, &self.stats) {
             let rows = statsview::rows(sample, &self.ws, &self.terms);
             d.draw(&mut self.quads, &mut self.fonts, &l, sample, &rows, self.config.ram_limit_mb);
+            ime_cell = None;
+        }
+        if let Some(c) = &self.confirm {
+            c.draw(&mut self.quads, &mut self.fonts, &l);
             ime_cell = None;
         }
         if let Some((col, row)) = ime_cell {

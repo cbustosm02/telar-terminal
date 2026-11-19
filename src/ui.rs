@@ -61,6 +61,8 @@ pub enum Hit {
     #[default]
     None,
     Group(usize),
+    /// ✕ de la fila de un grupo: lo elimina con sus tabs (después de confirmar).
+    CloseGroup(usize),
     NewGroup,
     Tab(usize),
     CloseTab(usize),
@@ -174,6 +176,13 @@ impl Layout {
         Rect { x: 8.0 * s, y: (LIST_TOP + row * GROUP_ROW_H) * s, w: (SIDEBAR_W - 16.0) * s, h: (GROUP_ROW_H - 2.0) * s }
     }
 
+    /// ✕ al final de la fila del grupo `i`, a la derecha de la cantidad de tabs.
+    fn group_close_rect(&self, i: usize) -> Rect {
+        let r = self.group_rect(i);
+        let side = r.h - 10.0 * self.s;
+        Rect { x: r.x + r.w - side - 4.0 * self.s, y: r.y + 5.0 * self.s, w: side, h: side }
+    }
+
     /// Fila de la lista bajo `y` (puede quedar fuera de la vista o ser negativa).
     pub fn row_at(&self, y: f32) -> isize {
         ((y - LIST_TOP * self.s) / (GROUP_ROW_H * self.s)).floor() as isize + self.list_scroll as isize
@@ -240,6 +249,10 @@ impl Layout {
                 return Hit::Search;
             }
             if let Some(i) = (0..n_groups).find(|i| self.row_visible(*i) && self.group_rect(*i).contains(x, y)) {
+                // Con la búsqueda abierta las filas son resultados, sin ✕.
+                if self.new_row && self.group_close_rect(i).contains(x, y) {
+                    return Hit::CloseGroup(i);
+                }
                 return Hit::Group(i);
             }
             if self.new_row && self.row_visible(n_groups) && self.group_rect(n_groups).contains(x, y) {
@@ -303,6 +316,8 @@ pub enum Action {
     ResumeGroup,
     /// Excluir o volver a incluir el grupo en la suspensión por inactividad.
     ToggleIdleExempt,
+    /// Eliminar el grupo con todos sus tabs (pide confirmación).
+    DeleteGroup,
 }
 
 pub struct MenuItem {
@@ -646,10 +661,11 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
         }
         let r = l.group_rect(i);
         let active = i == v.ws.active;
+        let hovered = matches!(v.hover, Hit::Group(g) | Hit::CloseGroup(g) if g == i);
         if active {
             k.rounded(r, 6.0, th.active);
             k.rounded(Rect { x: r.x, y: r.y + 8.0 * s, w: 3.0 * s, h: r.h - 16.0 * s }, 1.5, th.accent);
-        } else if v.hover == Hit::Group(i) {
+        } else if hovered {
             k.rounded(r, 6.0, th.hover);
         }
         if v.drop_group == Some(i) {
@@ -658,10 +674,17 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
         let asleep = grp.tabs.iter().all(|id| v.terms.get(id).is_some_and(Terminal::is_suspended));
         let count = grp.tabs.len().to_string();
         let cy = r.y + r.h / 2.0;
-        // A la derecha: cantidad de tabs (tag) y, antes, el estado más urgente o la luna.
+        // A la derecha: la ✕ (en el grupo abierto o bajo el puntero), la cantidad de tabs
+        // (tag) y, antes, el estado más urgente o la luna.
+        let mut right = r.x + r.w - 8.0 * s;
+        if (active || hovered) && v.drop_group.is_none() {
+            let close = l.group_close_rect(i);
+            k.icon_button(close, icons::X, 13.0, v.hover == Hit::CloseGroup(i));
+            right = close.x - 2.0 * s;
+        }
         let badge_style = Text::small().weight(510);
         let badge_w = k.measure(&count, badge_style) + 12.0 * s;
-        let bx = r.x + r.w - 8.0 * s - badge_w;
+        let bx = right - badge_w;
         k.tag(bx, cy, &count, th.text_dim, if active { th.hover } else { th.active });
         let worst = grp.tabs.iter().filter_map(|id| v.terms.get(id)).filter_map(|t| status(t, v.time)).max_by_key(|(p, _)| *p);
         let mut name_right = bx - 6.0 * s;

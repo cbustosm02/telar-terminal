@@ -110,6 +110,19 @@ impl Workspace {
         self.groups.is_empty()
     }
 
+    /// Quita el grupo `gi` entero y devuelve sus tabs (para cerrarlos). Si era el abierto,
+    /// queda abierto el de arriba (o el siguiente, si era el primero).
+    pub fn remove_group(&mut self, gi: usize) -> Vec<u64> {
+        if gi >= self.groups.len() {
+            return Vec::new();
+        }
+        let g = self.groups.remove(gi);
+        if gi < self.active || self.active >= self.groups.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        g.tabs
+    }
+
     /// Mueve el grupo `from` a la posición `to` (arrastrando). El grupo abierto sigue
     /// siendo el mismo, aunque cambie su índice.
     pub fn move_group(&mut self, from: usize, to: usize) -> bool {
@@ -328,6 +341,20 @@ mod tests {
         assert!(w.move_group(3, 0));
         assert_eq!(w.active, 3);
         assert!(!w.move_group(1, 1) && !w.move_group(0, 9));
+    }
+
+    #[test]
+    fn eliminar_un_grupo() {
+        let mut w = ws(&[&[1, 2], &[3], &[4, 5, 6]]);
+        w.select_group(2);
+        assert_eq!(w.remove_group(0), vec![1, 2]);
+        assert_eq!(ids(&w), vec![vec![3], vec![4, 5, 6]]);
+        assert_eq!(w.active, 1, "sigue abierto el mismo grupo");
+        assert_eq!(w.remove_group(1), vec![4, 5, 6]);
+        assert_eq!(w.active, 0, "se eliminó el abierto: queda el de arriba");
+        assert!(w.remove_group(7).is_empty());
+        assert_eq!(w.remove_group(0), vec![3]);
+        assert!(w.groups.is_empty());
     }
 
     #[test]
