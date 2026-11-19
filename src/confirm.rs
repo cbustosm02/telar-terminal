@@ -1,4 +1,4 @@
-//! Diálogo de confirmación para acciones que no se pueden deshacer (eliminar un grupo).
+//! Diálogo de confirmación: eliminar un grupo o quitar una cuenta de Claude guardada.
 //! Enter o el botón rojo confirman; Esc, «Cancelar» o un clic fuera lo cierran.
 
 use crate::font::Fonts;
@@ -17,6 +17,8 @@ pub enum Pending {
     /// Eliminar el grupo que contiene este tab (por tab y no por índice: si mientras
     /// tanto se abre o se mueve un grupo, se elimina igual el que se eligió).
     DeleteGroup { anchor: u64 },
+    /// Quitar la copia guardada de una cuenta.
+    RemoveAccount { key: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +33,9 @@ pub struct Confirm {
     pub title: String,
     pub lines: Vec<String>,
     pub confirm: &'static str,
+    /// Ícono junto al título y si el botón es rojo (algo que no se deshace).
+    pub icon: char,
+    pub danger: bool,
     pub pending: Pending,
     pub hover: Option<Hit>,
 }
@@ -64,7 +69,29 @@ pub fn delete_group(name: &str, tabs: usize, claude: usize, working: usize, anch
         title: format!("¿Eliminar el grupo «{name}»?"),
         lines,
         confirm: "Eliminar grupo",
+        icon: icons::TRASH,
+        danger: true,
         pending: Pending::DeleteGroup { anchor },
+        hover: None,
+    }
+}
+
+/// Quitar la copia guardada de la cuenta `email`.
+pub fn remove_account(email: &str, plan: Option<&str>, key: String) -> Confirm {
+    Confirm {
+        // Con el plan: el mismo correo puede tener dos cuentas (personal y de equipo).
+        title: match plan {
+            Some(p) => format!("¿Quitar {email} ({p})?"),
+            None => format!("¿Quitar {email}?"),
+        },
+        lines: vec![
+            "Telar borra la copia guardada de esta cuenta.".into(),
+            "Para volver a usarla, inicia sesión con ella y agrégala otra vez.".into(),
+        ],
+        confirm: "Quitar cuenta",
+        icon: icons::USER_X,
+        danger: true,
+        pending: Pending::RemoveAccount { key },
         hover: None,
     }
 }
@@ -106,10 +133,11 @@ impl Confirm {
         let p = g.panel;
         k.rect(Rect { x: 0.0, y: 0.0, w: l.w(), h: l.h() }, theme::alpha([0.0, 0.0, 0.0, 1.0], if th.dark { 0.5 } else { 0.25 }));
         k.panel(p, 12.0);
-        // Ícono en un círculo rojo suave, a la izquierda del título.
+        // Ícono en un círculo suave (rojo si no se deshace), a la izquierda del título.
+        let tint = if self.danger { th.danger } else { th.accent };
         let (ix, iy) = (p.x + 38.0 * s, p.y + 36.0 * s);
-        k.dot(ix, iy, 30.0, theme::alpha(th.danger, 0.16));
-        k.icon(ix, iy, icons::TRASH, 15.0, th.danger);
+        k.dot(ix, iy, 30.0, theme::alpha(tint, 0.16));
+        k.icon(ix, iy, self.icon, 15.0, tint);
         let tx = p.x + 64.0 * s;
         let tw = p.x + p.w - 20.0 * s - tx;
         k.text(tx, p.y + 26.0 * s, &self.title, Text::title(), tw);
@@ -119,7 +147,8 @@ impl Confirm {
             y += LINE_H * s;
         }
         k.button(g.cancel, "Cancelar", None, Variant::Subtle, self.hover == Some(Hit::Cancel));
-        k.button(g.confirm, self.confirm, None, Variant::Danger, self.hover == Some(Hit::Confirm));
+        let variant = if self.danger { Variant::Danger } else { Variant::Primary };
+        k.button(g.confirm, self.confirm, None, variant, self.hover == Some(Hit::Confirm));
     }
 }
 

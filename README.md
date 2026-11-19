@@ -216,5 +216,15 @@ No necesita el permiso de grabación de pantalla.
 
 Encima de los medidores, el bloque de Claude muestra la cuenta (correo y plan, de `claude auth status`) y dos barras: la **sesión** (5 h) y la **semana** (7 días), con el porcentaje usado y lo que falta para el reinicio. La raya vertical es el ritmo: la parte de la ventana que ya pasó, donde debería ir el uso para que alcance hasta el reinicio. La barra va en verde por debajo del ritmo, en ámbar por encima y en rojo si lo pasa por 20 puntos o llega al 90 %.
 
-El uso lo envía el mod `prompt-info` de Claude Code desde cualquier tab de Telar con `telar usage '<json>'` cada vez que cambia; queda guardado en `~/.config/telar/uso-claude.json`. Se oculta en Configuración › General.
+Telar consulta el uso por su cuenta (`api.anthropic.com/api/oauth/usage`, con el token OAuth de cada cuenta): la cuenta activa al abrir, cada minuto y al terminar cada respuesta de Claude; las demás, al abrir el menú de cuentas. Se oculta en Configuración › General, y oculto no consulta nada.
 
+## Cuentas de Claude
+
+Un clic en el correo del bloque de Claude abre el menú de cuentas, cada una con su uso (sesión · semana):
+
+- **Elegir una cuenta** la activa en caliente, como cswap: las sesiones de Claude abiertas (también las que trabajan) siguen y toman la credencial nueva; no se reinicia nada.
+- **Agregar la cuenta actual** guarda la sesión con que está Claude Code ahora (si ya estaba, la actualiza). **Iniciar sesión con otra cuenta** guarda la actual y abre un tab con `claude auth login`.
+- La **✕** de cada cuenta la quita (con confirmación); la activa no se puede quitar.
+- La primera vez trae las cuentas que ya tenía cswap.
+
+Las copias van en el Llavero (`Telar · cuentas de Claude`); el índice, sin secretos, en `~/.config/telar/cuentas-claude.json`.

@@ -57,6 +57,12 @@ pub mod icons {
     pub const TRASH: char = '\u{e18e}';
     pub const TYPE: char = '\u{e198}';
     pub const X: char = '\u{e1b2}';
+    pub const USER: char = '\u{e19f}';
+    pub const USER_PLUS: char = '\u{e1a2}';
+    pub const USER_X: char = '\u{e1a3}';
+    pub const LOG_IN: char = '\u{e10d}';
+    pub const CHEVRONS_UP_DOWN: char = '\u{e211}';
+    pub const ARROW_LEFT_RIGHT: char = '\u{e24a}';
 }
 
 /// Estilo de texto: tamaño en puntos, peso (400 normal, 510 medio, 590 seminegrita) y color.

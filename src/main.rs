@@ -6,6 +6,7 @@ mod cli;
 mod claude_usage;
 mod config;
 mod confirm;
+mod cuentas;
 mod font;
 mod fontlist;
 mod hooks;
@@ -79,6 +80,13 @@ pub enum UserEvent {
     Picked(Picked),
     /// Cuenta de Claude Code (`claude auth status`); `None` si no se pudo leer.
     ClaudeAccount(Option<claude_usage::Account>),
+    /// Cuentas guardadas y la clave de la activa.
+    Accounts(Vec<cuentas::Saved>, Option<String>),
+    /// Uso consultado de cada cuenta (clave), o el error.
+    UsageAll(Vec<(String, Result<claude_usage::Usage, String>)>),
+    /// Terminó una operación de cuentas: mensaje para avisar, o el error; y si fue un
+    /// cambio de cuenta (hay que reiniciar las sesiones de Claude en reposo).
+    AccountDone(Result<String, String>, bool),
 }
 
 /// Para qué se abrió un panel de macOS.
@@ -165,6 +173,8 @@ struct State {
     settings: Option<settings::Settings>,
     /// Última muestra de uso de recursos y el panel de detalle, si está abierto.
     stats: Option<stats::Sample>,
+    /// El hilo de muestreo mide solo si hace falta (ver `update_stats_needed`).
+    stats_on: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stats_detail: Option<statsview::Detail>,
     /// Diálogo de confirmación abierto (eliminar un grupo).
     confirm: Option<confirm::Confirm>,
@@ -193,8 +203,17 @@ struct State {
     /// Próxima búsqueda de versión nueva en segundo plano.
     next_update_check: Instant,
     /// Uso de Claude (lo envía el mod prompt-info con `telar usage`) y la cuenta.
-    claude_usage: claude_usage::Usage,
+    /// Uso de cada cuenta (clave de `cuentas`) y el último error de su consulta.
+    claude_use: HashMap<String, claude_usage::Usage>,
+    usage_errors: HashMap<String, String>,
+    /// Hay una consulta en curso, y cuándo empezó la última (solo la activa, y todas).
+    usage_fetching: bool,
+    usage_fetched: Option<Instant>,
+    usage_fetched_all: Option<Instant>,
     claude_account: Option<claude_usage::Account>,
+    /// Cuentas de Claude guardadas (para cambiar de cuenta) y la clave de la activa.
+    accounts: Vec<cuentas::Saved>,
+    account_key: Option<String>,
     /// Minuto que muestra la cuenta regresiva del reinicio: se repinta al cambiar.
     claude_minute: u64,
     /// Pedido de salir desde fuera del teclado (p. ej. «Reiniciar» tras actualizar).
@@ -255,6 +274,7 @@ impl ApplicationHandler<UserEvent> for App {
             config,
             settings: None,
             stats: None,
+            stats_on: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             stats_detail: None,
             confirm: None,
             link_cell: None,
@@ -313,8 +333,14 @@ impl ApplicationHandler<UserEvent> for App {
             update: update::Status::Idle,
             update_quiet: true,
             next_update_check: Instant::now() + UPDATE_CHECK_EVERY,
-            claude_usage: claude_usage::load(),
+            claude_use: claude_usage::load(),
+            usage_errors: HashMap::new(),
+            usage_fetching: false,
+            usage_fetched: None,
+            usage_fetched_all: None,
             claude_account: None,
+            accounts: Vec::new(),
+            account_key: None,
             claude_minute: 0,
             quit: false,
         };
@@ -342,7 +368,8 @@ impl ApplicationHandler<UserEvent> for App {
             state.snapshot_overlays();
         }
         state.update_awake();
-        stats::spawn(state.proxy.clone());
+        state.update_stats_needed();
+        stats::spawn(state.proxy.clone(), state.stats_on.clone());
         if state.snapshot.is_none() {
             // Ícono del paquete (si la app se actualizó desde una versión sin él) y el elegido.
             update::ensure_bundle();
@@ -392,6 +419,41 @@ impl ApplicationHandler<UserEvent> for App {
                     st.claude_account = account;
                     st.window.request_redraw();
                 }
+                return;
+            }
+            UserEvent::Accounts(saved, current) => {
+                st.accounts = saved;
+                st.account_key = current;
+                return;
+            }
+            UserEvent::AccountDone(result, switched) => {
+                st.account_done(result, switched);
+                return;
+            }
+            UserEvent::UsageAll(results) => {
+                st.usage_fetching = false;
+                for (key, r) in results {
+                    match r {
+                        Ok(u) => {
+                            st.claude_use.insert(key.clone(), u);
+                            st.usage_errors.remove(&key);
+                        }
+                        Err(e) => {
+                            st.usage_errors.insert(key, e);
+                        }
+                    }
+                }
+                claude_usage::save(&st.claude_use);
+                // Con el menú de cuentas abierto, sus porcentajes se ponen al día.
+                let details: Vec<Option<String>> = st.accounts.iter().map(|a| st.usage_detail(&a.key)).collect();
+                if let Some(menu) = st.menu.as_mut() {
+                    for item in &mut menu.items {
+                        if let Some(Action::SwitchAccount(i)) = item.action {
+                            item.detail = details.get(i).cloned().flatten();
+                        }
+                    }
+                }
+                st.window.request_redraw();
                 return;
             }
             UserEvent::Ipc(req) => {
@@ -566,14 +628,113 @@ impl State {
     }
 
     /// Lee en un hilo el correo y el plan de la cuenta de Claude Code.
-    fn refresh_claude_account(&self) {
+    fn refresh_claude_account(&mut self) {
         if !self.config.show_claude {
             return;
         }
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
+            // La primera vez se traen las cuentas que ya tenía cswap.
+            if cuentas::list().is_empty() {
+                let _ = cuentas::import_cswap();
+            }
+            // La copia de la cuenta activa se mantiene al día (Claude Code rota el token).
+            cuentas::sync_current();
+            let _ = proxy.send_event(UserEvent::Accounts(cuentas::list(), cuentas::current().map(|c| c.key)));
             let _ = proxy.send_event(UserEvent::ClaudeAccount(claude_usage::account()));
         });
+        self.fetch_usage(false);
+    }
+
+    /// Consulta en un hilo el uso de todas las cuentas (la API, con el token de cada una).
+    fn refresh_usage(&mut self) {
+        self.fetch_usage(true);
+    }
+
+    /// Consulta el uso de la cuenta activa y, con `others`, el de las demás guardadas.
+    fn fetch_usage(&mut self, others: bool) {
+        if !self.config.show_claude || self.usage_fetching || self.snapshot.is_some() {
+            return;
+        }
+        self.usage_fetching = true;
+        self.usage_fetched = Some(Instant::now());
+        if others {
+            self.usage_fetched_all = Some(Instant::now());
+        }
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let _ = proxy.send_event(UserEvent::UsageAll(cuentas::usage_all(others)));
+        });
+    }
+
+    /// Texto corto del uso de una cuenta para el menú: «42 % · 18 %» (sesión · semana).
+    fn usage_detail(&self, key: &str) -> Option<String> {
+        if let Some(u) = self.claude_use.get(key) {
+            let now = std::time::SystemTime::now();
+            let pct = |l: Option<claude_usage::Limit>| l.map_or("—".to_string(), |l| format!("{:.0} %", l.now(now).0));
+            return Some(format!("{} · {}", pct(u.session), pct(u.week)));
+        }
+        self.usage_errors.get(key).map(|e| if e == claude_usage::DEAD_LOGIN { "inicia sesión".into() } else { "sin datos".into() })
+    }
+
+    /// Menú de cuentas (clic en el correo del bloque de Claude).
+    fn open_account_menu(&mut self) {
+        let mut items = Vec::new();
+        for (i, a) in self.accounts.iter().enumerate() {
+            let current = self.account_key.as_deref() == Some(a.key.as_str());
+            let mut label = a.email.clone();
+            if let Some(plan) = &a.plan {
+                label.push_str(&format!(" · {plan}"));
+            }
+            let mut item = MenuItem::owned(if current { icons::CHECK } else { icons::USER }, label, Action::SwitchAccount(i));
+            if let Some(d) = self.usage_detail(&a.key) {
+                item = item.with_detail(d);
+            }
+            // ✕ para quitarla (no la activa: está en uso).
+            if !current {
+                item = item.with_remove(Action::RemoveAccount(i));
+            }
+            items.push(item);
+        }
+        if !items.is_empty() {
+            items.push(MenuItem::separator());
+        }
+        let saved = self.account_key.as_ref().is_some_and(|k| self.accounts.iter().any(|a| &a.key == k));
+        let save_label = if saved { "Actualizar la cuenta actual" } else { "Agregar la cuenta actual" };
+        items.push(MenuItem::new(icons::USER_PLUS, save_label, &[], Action::SaveAccount));
+        items.push(MenuItem::new(icons::LOG_IN, "Iniciar sesión con otra cuenta", &[], Action::LoginAccount));
+        let l = self.layout();
+        self.menu = Some(Menu::with_width(self.cursor.0, self.cursor.1, None, self.ws.active, items, &l, 380.0));
+        self.editing = None;
+        self.window.set_cursor(CursorIcon::Default);
+        self.window.request_redraw();
+        // Al abrir el menú se consulta el uso de todas las cuentas (si la última consulta de
+        // todas fue hace más de 1 min); llega con el menú abierto y se actualiza ahí.
+        if self.usage_fetched_all.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
+            self.usage_fetching = false;
+            self.refresh_usage();
+        }
+    }
+
+    /// Corre una operación de cuentas en un hilo (el Llavero y los bloqueos pueden tardar).
+    fn account_task(&self, switched: bool, f: impl FnOnce() -> Result<String, String> + Send + 'static) {
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let _ = proxy.send_event(UserEvent::AccountDone(f(), switched));
+        });
+    }
+
+    /// Terminó una operación de cuentas: avisa y vuelve a leer la cuenta y su uso. Un cambio
+    /// es en caliente: las sesiones de Claude abiertas siguen (también las que trabajan) y
+    /// toman la credencial nueva del Llavero, sin reiniciar nada.
+    fn account_done(&mut self, result: Result<String, String>, _switched: bool) {
+        match result {
+            Ok(msg) => notify_macos("Cuentas de Claude", &msg),
+            Err(e) => notify_macos("No se pudo", &e),
+        }
+        self.claude_account = None;
+        self.refresh_claude_account();
+        self.window.request_redraw();
     }
 
     /// Abre una terminal nueva en la carpeta del tab activo.
@@ -882,6 +1043,9 @@ impl State {
                     self.delete_group(gi);
                 }
             }
+            confirm::Pending::RemoveAccount { key } => {
+                self.account_task(false, move || cuentas::remove(&key).map(|()| "Cuenta quitada".to_string()));
+            }
         }
     }
 
@@ -1087,6 +1251,31 @@ impl State {
             (Action::RenameGroup, _) => self.start_rename(gi),
             (Action::SuspendGroup | Action::ResumeGroup, _) => self.toggle_suspend_group(gi),
             (Action::DeleteGroup, _) => self.ask_delete_group(gi),
+            (Action::SwitchAccount(i), _) => {
+                if let Some(a) = self.accounts.get(i).cloned() {
+                    if self.account_key.as_deref() != Some(a.key.as_str()) {
+                        let key = a.key;
+                        self.account_task(true, move || cuentas::switch(&key).map(|a| format!("Claude Code ahora usa {}", a.email)));
+                    }
+                }
+            }
+            (Action::RemoveAccount(i), _) => {
+                if let Some(a) = self.accounts.get(i).cloned() {
+                    self.confirm = Some(confirm::remove_account(&a.email, a.plan.as_deref(), a.key));
+                }
+            }
+            (Action::SaveAccount, _) => self.account_task(false, || cuentas::save_current().map(|a| format!("Cuenta guardada: {}", a.email))),
+            (Action::LoginAccount, _) => {
+                // Antes de iniciar sesión con otra, se guarda la actual (si no, se perdería).
+                if self.account_key.is_some() {
+                    self.account_task(false, || cuentas::save_current().map(|a| format!("Se guardó {} antes de iniciar sesión con otra cuenta", a.email)));
+                }
+                if let Some(id) = self.new_tab() {
+                    self.write(id, b"claude auth login\r".to_vec());
+                    self.after_switch();
+                }
+                notify_macos("Cuentas de Claude", "Al terminar de iniciar sesión, elige «Agregar la cuenta actual» en el menú del correo");
+            }
             (Action::ToggleIdleExempt, _) => {
                 if let Some(g) = self.ws.groups.get_mut(gi) {
                     g.idle_exempt = !g.idle_exempt;
@@ -1368,9 +1557,12 @@ impl State {
             return;
         }
         if let Some(menu) = self.menu.as_mut() {
-            let hover = menu.item_at(self.cursor.0, self.cursor.1, self.window.scale_factor() as f32);
-            if hover != menu.hover {
+            let s = self.window.scale_factor() as f32;
+            let hover = menu.item_at(self.cursor.0, self.cursor.1, s);
+            let on_x = menu.remove_at(self.cursor.0, self.cursor.1, s).is_some();
+            if hover != menu.hover || on_x != menu.hover_remove {
                 menu.hover = hover;
+                menu.hover_remove = on_x;
                 self.window.set_cursor(if hover.is_some() { CursorIcon::Pointer } else { CursorIcon::Default });
                 self.window.request_redraw();
             }
@@ -1399,6 +1591,7 @@ impl State {
                 Hit::Terminal => CursorIcon::Text,
                 Hit::Group(_)
                 | Hit::CloseGroup(_)
+                | Hit::ClaudeAccount
                 | Hit::NewGroup
                 | Hit::Tab(_)
                 | Hit::CloseTab(_)
@@ -1475,8 +1668,10 @@ impl State {
         // Menú abierto: un clic elige una opción o lo cierra; no llega a lo de abajo.
         if let Some(menu) = &self.menu {
             if pressed {
+                // La ✕ de un ítem tiene su propia acción.
                 let item = menu.item_at(self.cursor.0, self.cursor.1, l.s());
-                match item.and_then(|i| menu.items[i].action) {
+                let action = menu.remove_at(self.cursor.0, self.cursor.1, l.s()).or_else(|| item.and_then(|i| menu.items[i].action));
+                match action {
                     Some(action) if button == MouseButton::Left => self.run_menu(action),
                     _ => self.menu = None,
                 }
@@ -1581,6 +1776,7 @@ impl State {
             }
             (Hit::Group(i) | Hit::CloseGroup(i), MouseButton::Right) => self.open_menu(None, i),
             (Hit::CloseGroup(i), MouseButton::Left) => self.ask_delete_group(i),
+            (Hit::ClaudeAccount, MouseButton::Left) => self.open_account_menu(),
             (Hit::Search, MouseButton::Left) => self.open_search(),
             (Hit::Tab(i), MouseButton::Middle) | (Hit::CloseTab(i), MouseButton::Left) => {
                 if let Some(id) = self.ws.group().and_then(|g| g.tabs.get(i).copied()) {
@@ -1907,12 +2103,6 @@ impl State {
                 json!({ "ok": true })
             }
             Some("tabs") => self.tabs_json(),
-            Some("usage") => {
-                self.claude_usage = claude_usage::parse(&body["usage"]);
-                claude_usage::save(&self.claude_usage);
-                self.window.request_redraw();
-                json!({ "ok": true })
-            }
             Some("status") => match self.resolve_tab(&body["tab"]) {
                 Ok(id) => json!({ "ok": true, "tab": self.tab_json(id) }),
                 Err(e) => json!({ "ok": false, "error": e }),
@@ -2114,7 +2304,6 @@ impl State {
         self.meters_shown = shown;
         self.stats = Some(sample);
         let over_changed = self.enforce_limits();
-        self.enforce_idle();
         if changed || over_changed || self.stats_detail.is_some() || self.settings.is_some() {
             self.window.request_redraw();
         }
@@ -2238,6 +2427,7 @@ impl State {
             g.ram_limit_mb = limits::step(g.ram_limit_mb, delta);
             self.save_session();
         }
+        self.update_stats_needed();
         self.enforce_limits();
         self.window.request_redraw();
     }
@@ -2403,15 +2593,18 @@ impl State {
             settings::Hit::PickIcon => self.pick_app_icon(),
             settings::Hit::PickStartDir => self.pick_start_dir(),
             settings::Hit::ShowClaude => {
+                // Oculto, no se consulta nada (ni el uso ni la cuenta); al volver, se consulta ya.
                 self.config.show_claude = !self.config.show_claude;
                 self.config.save();
-                if self.claude_account.is_none() {
+                if self.config.show_claude {
                     self.refresh_claude_account();
                 }
             }
             settings::Hit::ShowMeters => {
+                // Oculto, el muestreo se detiene (salvo que haya límites de memoria).
                 self.config.show_meters = !self.config.show_meters;
                 self.config.save();
+                self.update_stats_needed();
             }
             settings::Hit::ClearStartDir => {
                 self.config.start_dir = None;
@@ -2440,6 +2633,8 @@ impl State {
             settings::Hit::SizeUp => self.set_font_size(self.font_pt + 1.0),
             settings::Hit::Inside => {}
         }
+        // Cambiar de sección (p. ej. a Rendimiento) puede necesitar el muestreo.
+        self.update_stats_needed();
         self.window.request_redraw();
     }
 
@@ -2583,7 +2778,26 @@ impl State {
     }
 
     /// Cada pocos segundos: nombre del proceso de cada tab y guardado de la sesión.
+    /// El muestreo de CPU, RAM y GPU hace falta si se ven los medidores (o su detalle, o la
+    /// sección Rendimiento con el uso por grupo) o hay un límite de memoria que vigilar; si
+    /// no, se detiene.
+    fn update_stats_needed(&mut self) {
+        let limits = self.config.ram_limit_mb > 0 || self.ws.groups.iter().any(|g| g.ram_limit_mb > 0);
+        let perf_open = self.settings.as_ref().is_some_and(|st| st.section == settings::PERF_SECTION);
+        let needed = self.config.show_meters || limits || self.stats_detail.is_some() || perf_open;
+        let was = self.stats_on.swap(needed, std::sync::atomic::Ordering::Relaxed);
+        if was && !needed {
+            // Sin medición, nada queda marcado como pasado de su límite.
+            self.stats = None;
+            self.over_total = false;
+            self.over_groups.clear();
+        }
+    }
+
     fn periodic(&mut self) {
+        self.update_stats_needed();
+        // La suspensión por inactividad se revisa con este reloj (no depende del muestreo).
+        self.enforce_idle();
         // Cada hora se vuelve a buscar una versión nueva: si salió otra después de la que
         // se muestra, el pie ya ofrece la última.
         if Instant::now() >= self.next_update_check && self.snapshot.is_none() {
@@ -2592,6 +2806,11 @@ impl State {
             if matches!(self.update, update::Status::Idle | update::Status::UpToDate | update::Status::Available(_)) {
                 update::check_quietly(self.proxy.clone());
             }
+        }
+        // El uso de la cuenta activa se consulta cada minuto; el de las demás, solo al abrir
+        // el menú de cuentas (no se están usando).
+        if self.usage_fetched.is_some_and(|t| t.elapsed() > Duration::from_secs(60)) {
+            self.fetch_usage(false);
         }
         // La cuenta regresiva del reinicio de Claude avanza por minuto.
         if self.config.show_claude {
@@ -2750,6 +2969,15 @@ impl State {
             _ => None,
         };
         let Some(new) = new else { return };
+        // Al terminar una respuesta cambió el consumo: se consulta el uso de la cuenta activa
+        // (con al menos 20 s entre consultas).
+        if new == AgentState::Idle || new == AgentState::Done {
+            if self.usage_fetched.is_none_or(|t| t.elapsed() > Duration::from_secs(20)) {
+                self.fetch_usage(false);
+            }
+        }
+        let Some(t) = self.terms.get_mut(&tab) else { return };
+        let agent = &mut t.agent;
         if new == AgentState::NeedsYou {
             agent.message = Some(message.to_string());
         } else if new != AgentState::Working {
@@ -2817,7 +3045,8 @@ impl State {
         // TELAR_SNAPSHOT_USAGE='<json>': uso de Claude de prueba (como `telar usage`), con
         // una cuenta ficticia.
         if let Some(v) = std::env::var("TELAR_SNAPSHOT_USAGE").ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
-            self.claude_usage = claude_usage::parse(&v);
+            self.account_key = Some("persona@ejemplo.com|".into());
+            self.claude_use.insert("persona@ejemplo.com|".into(), claude_usage::parse(&v));
             self.claude_account = Some(claude_usage::Account { email: Some("persona@ejemplo.com".into()), plan: Some("Max".into()) });
         }
         // TELAR_SNAPSHOT_DELETE=n: captura con la confirmación de eliminar el grupo n.
@@ -2888,11 +3117,27 @@ impl State {
                 self.cursor = (60.0 * s, 125.0 * s);
                 self.open_menu(None, 1);
             }
+            // Menú de cuentas de Claude, con cuentas ficticias.
+            Ok("cuentas") => {
+                let fake = |email: &str, org: &str, plan: &str| cuentas::Saved {
+                    key: cuentas::key_of(email, Some(org)),
+                    email: email.into(),
+                    org: None,
+                    plan: Some(plan.into()),
+                };
+                self.accounts = vec![fake("persona@ejemplo.com", "a", "Max"), fake("trabajo@empresa.co", "b", "Team")];
+                self.account_key = Some(self.accounts[0].key.clone());
+                let s = self.window.scale_factor() as f32;
+                let r = self.layout().claude_account_rect();
+                self.cursor = (r.x + 40.0 * s, r.y + r.h / 2.0);
+                self.open_account_menu();
+            }
             _ => {}
         }
     }
 
     fn draw(&mut self) {
+        let empty_usage = claude_usage::Usage::default();
         // Si se borraron grupos o la ventana se achicó, la lista no queda desplazada de más.
         let max = self.list_len().saturating_sub(self.layout().list_rows());
         self.list_scroll = self.list_scroll.min(max);
@@ -2916,7 +3161,7 @@ impl State {
             over_groups: &self.over_groups,
             drop_group: self.drag.as_ref().and_then(|d| d.drop_group),
             link_cell: self.link_cell,
-            claude_usage: &self.claude_usage,
+            claude_usage: self.account_key.as_ref().and_then(|k| self.claude_use.get(k)).unwrap_or(&empty_usage),
             claude_account: self.claude_account.as_ref(),
         };
         let mut ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);

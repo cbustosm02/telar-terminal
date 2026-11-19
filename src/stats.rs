@@ -83,11 +83,16 @@ impl Sample {
     }
 }
 
-/// Lanza el hilo de muestreo.
-pub fn spawn(proxy: EventLoopProxy<UserEvent>) {
+/// Lanza el hilo de muestreo. Mientras `enabled` es falso no mide nada (los medidores
+/// están ocultos y no hay límites de memoria que vigilar): solo espera.
+pub fn spawn(proxy: EventLoopProxy<UserEvent>, enabled: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     let _ = std::thread::Builder::new().name("telar-stats".into()).spawn(move || {
         let mut sampler = Sampler::new();
         loop {
+            if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(INTERVAL);
+                continue;
+            }
             let sample = sampler.sample();
             if proxy.send_event(UserEvent::Stats(Box::new(sample))).is_err() {
                 return; // la app terminó

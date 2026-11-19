@@ -65,6 +65,8 @@ pub enum Hit {
     Group(usize),
     /// ✕ de la fila de un grupo: lo elimina con sus tabs (después de confirmar).
     CloseGroup(usize),
+    /// Fila de la cuenta en el bloque de Claude: abre el menú para cambiar de cuenta.
+    ClaudeAccount,
     NewGroup,
     Tab(usize),
     CloseTab(usize),
@@ -234,6 +236,12 @@ impl Layout {
         }
     }
 
+    /// Fila de la cuenta (logo, correo y plan) arriba del bloque de Claude.
+    pub fn claude_account_rect(&self) -> Rect {
+        let r = self.claude_rect();
+        Rect { x: r.x, y: r.y - 2.0 * self.s, w: r.w, h: 22.0 * self.s }
+    }
+
     /// Bloque de Claude (cuenta, sesión y semana), encima de los medidores y su divisor.
     fn claude_rect(&self) -> Rect {
         let s = self.s;
@@ -262,6 +270,9 @@ impl Layout {
             }
             if self.settings_rect().contains(x, y) {
                 return Hit::Settings;
+            }
+            if self.claude && self.claude_account_rect().contains(x, y) {
+                return Hit::ClaudeAccount;
             }
             if self.meters && self.meters_rect().contains(x, y) {
                 return Hit::Stats;
@@ -342,24 +353,49 @@ pub enum Action {
     ToggleIdleExempt,
     /// Eliminar el grupo con todos sus tabs (pide confirmación).
     DeleteGroup,
+    /// Cuentas de Claude (menú del correo en el bloque de Claude): cambiar a la cuenta
+    /// guardada n, quitar la n, guardar la sesión actual e iniciar sesión con otra.
+    SwitchAccount(usize),
+    RemoveAccount(usize),
+    SaveAccount,
+    LoginAccount,
 }
 
 pub struct MenuItem {
     pub icon: char,
-    pub label: &'static str,
+    pub label: std::borrow::Cow<'static, str>,
     /// Atajo de teclado, a la derecha (una tecla por elemento).
     pub keys: &'static [&'static str],
     /// `None`: separador.
     pub action: Option<Action>,
+    /// Texto tenue a la derecha (p. ej. el uso de una cuenta), en lugar del atajo.
+    pub detail: Option<String>,
+    /// ✕ al final del ítem con su propia acción (p. ej. quitar esa cuenta).
+    pub remove: Option<Action>,
 }
 
 impl MenuItem {
     pub fn new(icon: char, label: &'static str, keys: &'static [&'static str], action: Action) -> Self {
-        Self { icon, label, keys, action: Some(action) }
+        Self { icon, label: label.into(), keys, action: Some(action), detail: None, remove: None }
+    }
+
+    /// Ítem con un texto armado en el momento (p. ej. el correo de una cuenta).
+    pub fn owned(icon: char, label: String, action: Action) -> Self {
+        Self { icon, label: label.into(), keys: &[], action: Some(action), detail: None, remove: None }
+    }
+
+    pub fn with_detail(mut self, detail: String) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+
+    pub fn with_remove(mut self, action: Action) -> Self {
+        self.remove = Some(action);
+        self
     }
 
     pub fn separator() -> Self {
-        Self { icon: ' ', label: "", keys: &[], action: None }
+        Self { icon: ' ', label: "".into(), keys: &[], action: None, detail: None, remove: None }
     }
 }
 
@@ -372,6 +408,10 @@ pub struct Menu {
     pub group: usize,
     pub items: Vec<MenuItem>,
     pub hover: Option<usize>,
+    /// La ✕ del ítem bajo el puntero está resaltada.
+    pub hover_remove: bool,
+    /// Ancho en puntos.
+    pub w: f32,
 }
 
 const MENU_W: f32 = 270.0;
@@ -382,7 +422,12 @@ const MENU_PAD: f32 = 5.0;
 impl Menu {
     /// Abre el menú en (x, y), corrido para que no se salga de la ventana.
     pub fn new(x: f32, y: f32, tab: Option<u64>, group: usize, items: Vec<MenuItem>, l: &Layout) -> Self {
-        let mut m = Self { x, y, tab, group, items, hover: None };
+        Self::with_width(x, y, tab, group, items, l, MENU_W)
+    }
+
+    /// Como `new`, con otro ancho (el menú de cuentas lleva el uso de cada una).
+    pub fn with_width(x: f32, y: f32, tab: Option<u64>, group: usize, items: Vec<MenuItem>, l: &Layout, w: f32) -> Self {
+        let mut m = Self { x, y, tab, group, items, hover: None, hover_remove: false, w };
         let b = m.bounds(l.s);
         m.x = m.x.min(l.w - b.w - 4.0 * l.s).max(0.0);
         m.y = m.y.min(l.h - b.h - 4.0 * l.s).max(0.0);
@@ -391,14 +436,14 @@ impl Menu {
 
     pub fn bounds(&self, s: f32) -> Rect {
         let h: f32 = self.items.iter().map(|i| if i.action.is_some() { MENU_ITEM_H } else { MENU_SEP_H }).sum();
-        Rect { x: self.x, y: self.y, w: MENU_W * s, h: (h + 2.0 * MENU_PAD) * s }
+        Rect { x: self.x, y: self.y, w: self.w * s, h: (h + 2.0 * MENU_PAD) * s }
     }
 
     fn rows(&self, s: f32) -> impl Iterator<Item = (usize, Rect)> + '_ {
         let mut y = self.y + MENU_PAD * s;
         self.items.iter().enumerate().map(move |(i, item)| {
             let h = if item.action.is_some() { MENU_ITEM_H } else { MENU_SEP_H } * s;
-            let r = Rect { x: self.x + MENU_PAD * s, y, w: (MENU_W - 2.0 * MENU_PAD) * s, h };
+            let r = Rect { x: self.x + MENU_PAD * s, y, w: (self.w - 2.0 * MENU_PAD) * s, h };
             y += h;
             (i, r)
         })
@@ -407,6 +452,17 @@ impl Menu {
     /// Opción bajo el puntero (los separadores no cuentan).
     pub fn item_at(&self, x: f32, y: f32, s: f32) -> Option<usize> {
         self.rows(s).find(|(i, r)| self.items[*i].action.is_some() && r.contains(x, y)).map(|(i, _)| i)
+    }
+
+    /// ✕ del final de un ítem (si tiene).
+    fn remove_rect(r: Rect, s: f32) -> Rect {
+        let side = r.h - 6.0 * s;
+        Rect { x: r.x + r.w - side - 3.0 * s, y: r.y + 3.0 * s, w: side, h: side }
+    }
+
+    /// Acción de la ✕ bajo el puntero, si hay.
+    pub fn remove_at(&self, x: f32, y: f32, s: f32) -> Option<Action> {
+        self.rows(s).find(|(i, r)| self.items[*i].remove.is_some() && Self::remove_rect(*r, s).contains(x, y)).and_then(|(i, _)| self.items[i].remove)
     }
 
     /// Mueve la selección con el teclado (`delta` = ±1), saltando separadores.
@@ -608,9 +664,22 @@ fn draw_menu(k: &mut Kit, m: &Menu) {
         }
         let color = if hovered { th.text } else { theme::mix(th.text, th.text_dim, 0.25) };
         k.icon(r.x + 16.0 * s, r.y + r.h / 2.0, item.icon, 14.0, color);
-        let kw = k.kbd_width(item.keys);
-        k.text_in(Rect { w: r.w - kw - 40.0 * s, ..r }, r.x + 32.0 * s, item.label, Text::body().color(color));
-        if !item.keys.is_empty() {
+        // Con ✕ al final, lo de la derecha se corre a su izquierda (la columna de ✕ se
+        // reserva en todos los ítems con detalle, para que los porcentajes queden alineados).
+        let with_x = m.items.iter().any(|i| i.remove.is_some()) && item.detail.is_some();
+        let right = if with_x { r.x + r.w - (r.h + 2.0 * s) } else { r.x + r.w - 10.0 * s };
+        let kw = match &item.detail {
+            Some(d) => k.measure(d, Text::small()) + 8.0 * s + (r.x + r.w - 10.0 * s - right),
+            None => k.kbd_width(item.keys),
+        };
+        k.text_in(Rect { w: r.w - kw - 40.0 * s, ..r }, r.x + 32.0 * s, &item.label, Text::body().color(color));
+        if item.remove.is_some() {
+            k.icon_button(Menu::remove_rect(r, s), icons::X, 13.0, hovered && m.hover_remove);
+        }
+        if let Some(d) = &item.detail {
+            let w = k.measure(d, Text::small());
+            k.text_in(r, right - w, d, Text::small());
+        } else if !item.keys.is_empty() {
             k.kbd(r.x + r.w - 8.0 * s, r.y + r.h / 2.0, item.keys);
         }
     }
@@ -827,11 +896,15 @@ fn draw_claude(k: &mut Kit, l: &Layout, v: &View) {
     let r = l.claude_rect();
     let (x0, x1) = (r.x + 10.0 * s, r.x + r.w - 10.0 * s);
 
-    // Cuenta: logo, correo y plan.
+    // Cuenta: logo, correo y plan. Un clic abre el menú para cambiar de cuenta (↕).
     let cy = r.y + 9.0 * s;
+    if v.hover == Hit::ClaudeAccount {
+        k.rounded(l.claude_account_rect(), 6.0, th.hover);
+    }
     k.claude_logo(x0 + 6.0 * s, cy, 12.0);
     let account = v.claude_account.cloned().unwrap_or_default();
-    let mut right = x1;
+    k.icon(x1 - 6.0 * s, cy, icons::CHEVRONS_UP_DOWN, 12.0, th.text_dim);
+    let mut right = x1 - 16.0 * s;
     if let Some(plan) = &account.plan {
         let w = k.measure(plan, Text::small().weight(510)) + 12.0 * s;
         right -= w;
