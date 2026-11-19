@@ -1,6 +1,6 @@
 [package]
 name = "telar"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Terminal personal: grupos de tabs en una barra lateral, render propio por GPU."
 
