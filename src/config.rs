@@ -32,6 +32,10 @@ pub struct Config {
     pub idle: crate::idle::Rules,
     /// Carpeta de inicio: donde abren los tabs y grupos nuevos (si el grupo no tiene la suya).
     pub start_dir: Option<PathBuf>,
+    /// Barra lateral: el bloque de Claude (uso de la sesión y la semana, cuenta).
+    pub show_claude: bool,
+    /// Barra lateral: los medidores de consumo (CPU, RAM, GPU).
+    pub show_meters: bool,
 }
 
 impl Default for Config {
@@ -46,6 +50,8 @@ impl Default for Config {
             auto_suspend: true,
             idle: crate::idle::Rules::default(),
             start_dir: None,
+            show_claude: true,
+            show_meters: true,
         }
     }
 }
@@ -63,6 +69,8 @@ impl Config {
         json!({
             "general": {
                 "start_dir": self.start_dir,
+                "show_claude": self.show_claude,
+                "show_meters": self.show_meters,
             },
             "appearance": {
                 "theme": self.theme,
@@ -104,6 +112,8 @@ impl Config {
                 }
             },
             start_dir: v["general"]["start_dir"].as_str().map(PathBuf::from).filter(|p| p.is_absolute()),
+            show_claude: v["general"]["show_claude"].as_bool().unwrap_or(d.show_claude),
+            show_meters: v["general"]["show_meters"].as_bool().unwrap_or(d.show_meters),
         }
     }
 
@@ -149,6 +159,8 @@ mod tests {
             auto_suspend: false,
             idle: crate::idle::Rules { tab_min: 30, group_min: 120, include_waiting: true, include_running: false },
             start_dir: Some(PathBuf::from("/tmp/proyectos")),
+            show_claude: false,
+            show_meters: false,
         };
         assert_eq!(Config::from_json(&c.to_json()), c);
     }

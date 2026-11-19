@@ -35,6 +35,8 @@ const SEARCH_Y: f32 = 74.0;
 const SEARCH_H: f32 = 28.0;
 const LIST_TOP: f32 = 112.0;
 const GROUP_ROW_H: f32 = 32.0;
+/// Alto del bloque de Claude en el pie de la barra lateral.
+const CLAUDE_H: f32 = 78.0;
 const PAD_X: f32 = 10.0;
 const PAD_Y: f32 = 6.0;
 const TAB_MIN_W: f32 = 90.0;
@@ -97,6 +99,10 @@ pub struct Layout {
     pub list_scroll: usize,
     /// La lista termina con la fila «Nuevo grupo» (no durante una búsqueda).
     pub new_row: bool,
+    /// Abajo en la barra lateral: el bloque de Claude y los medidores de consumo (se
+    /// pueden ocultar en la configuración; la lista de grupos usa ese espacio).
+    pub claude: bool,
+    pub meters: bool,
 }
 
 impl Layout {
@@ -113,7 +119,7 @@ impl Layout {
         let avail = w - (SIDEBAR_W + 8.0 + NEW_TAB_W + 8.0) * s;
         let n = n_tabs.max(1) as f32;
         let tab_w = (avail / n - TAB_GAP * s).clamp(TAB_MIN_W * s, TAB_MAX_W * s);
-        Self { s, w, h, tab_w, cell_w, cell_h, grid_x, grid_y, cols, rows, list_scroll: 0, new_row: true }
+        Self { s, w, h, tab_w, cell_w, cell_h, grid_x, grid_y, cols, rows, list_scroll: 0, new_row: true, claude: true, meters: true }
     }
 
     /// Factor de escala (píxeles por punto).
@@ -148,7 +154,7 @@ impl Layout {
 
     /// Filas de la lista que caben entre el buscador y los medidores.
     pub fn list_rows(&self) -> usize {
-        let bottom = self.meters_rect().y - 6.0 * self.s;
+        let bottom = self.list_bottom() - 6.0 * self.s;
         (((bottom - LIST_TOP * self.s) / (GROUP_ROW_H * self.s)).floor() as usize).max(1)
     }
 
@@ -217,6 +223,24 @@ impl Layout {
     }
 
     /// Medidores de uso (CPU, RAM, GPU), encima de la línea del pie.
+    /// Donde termina la lista de grupos: arriba del primer bloque visible del pie.
+    fn list_bottom(&self) -> f32 {
+        if self.claude {
+            self.claude_rect().y
+        } else if self.meters {
+            self.meters_rect().y
+        } else {
+            self.awake_rect().y - 8.0 * self.s
+        }
+    }
+
+    /// Bloque de Claude (cuenta, sesión y semana), encima de los medidores y su divisor.
+    fn claude_rect(&self) -> Rect {
+        let s = self.s;
+        let below = if self.meters { self.meters_rect().y } else { self.awake_rect().y };
+        Rect { x: 8.0 * s, y: below - (14.0 + CLAUDE_H) * s, w: (SIDEBAR_W - 16.0) * s, h: CLAUDE_H * s }
+    }
+
     fn meters_rect(&self) -> Rect {
         let s = self.s;
         Rect { x: 8.0 * s, y: self.awake_rect().y - 54.0 * s, w: (SIDEBAR_W - 16.0) * s, h: 40.0 * s }
@@ -239,7 +263,7 @@ impl Layout {
             if self.settings_rect().contains(x, y) {
                 return Hit::Settings;
             }
-            if self.meters_rect().contains(x, y) {
+            if self.meters && self.meters_rect().contains(x, y) {
                 return Hit::Stats;
             }
             if self.new_group_button().contains(x, y) {
@@ -424,6 +448,9 @@ pub struct View<'a> {
     /// Celda de la terminal bajo el puntero (columna, fila), si al hacer clic se abriría
     /// un enlace ahí: el enlace se resalta.
     pub link_cell: Option<(usize, usize)>,
+    /// Uso de Claude (sesión y semana) y la cuenta, para el bloque de la barra lateral.
+    pub claude_usage: &'a crate::claude_usage::Usage,
+    pub claude_account: Option<&'a crate::claude_usage::Account>,
 }
 
 /// Resultado de buscar en la barra lateral: un grupo, o un tab de un grupo.
@@ -775,11 +802,79 @@ fn scrollbar(k: &mut Kit, l: &Layout, total: usize) {
 fn draw_footer(k: &mut Kit, l: &Layout, v: &View) {
     let s = l.s;
     let th = theme::t();
-    draw_meters(k, l, v);
+    if l.claude {
+        draw_claude(k, l, v);
+        if l.meters {
+            // Divisor entre el bloque de Claude y los medidores.
+            let y = l.meters_rect().y - 7.0 * s;
+            k.rect(Rect { x: 12.0 * s, y, w: l.sidebar_w() - 24.0 * s, h: s }, th.border);
+        }
+    }
+    if l.meters {
+        draw_meters(k, l, v);
+    }
     let top = l.awake_rect().y - 8.0 * s;
     k.rect(Rect { x: 12.0 * s, y: top, w: l.sidebar_w() - 24.0 * s, h: s }, th.border);
     draw_awake(k, l, v);
     draw_update(k, l, v);
+}
+
+/// Bloque de Claude: el logo con el correo y el plan, y las barras de la sesión (5 h) y de
+/// la semana con su porcentaje y el tiempo hasta el reinicio.
+fn draw_claude(k: &mut Kit, l: &Layout, v: &View) {
+    let s = l.s;
+    let th = theme::t();
+    let r = l.claude_rect();
+    let (x0, x1) = (r.x + 10.0 * s, r.x + r.w - 10.0 * s);
+
+    // Cuenta: logo, correo y plan.
+    let cy = r.y + 9.0 * s;
+    k.claude_logo(x0 + 6.0 * s, cy, 12.0);
+    let account = v.claude_account.cloned().unwrap_or_default();
+    let mut right = x1;
+    if let Some(plan) = &account.plan {
+        let w = k.measure(plan, Text::small().weight(510)) + 12.0 * s;
+        right -= w;
+        k.tag(right, cy, plan, th.accent, theme::alpha(th.accent, 0.16));
+        right -= 6.0 * s;
+    }
+    let who = account.email.as_deref().unwrap_or("Claude");
+    let tx = x0 + 18.0 * s;
+    k.text_in(Rect { x: tx, y: cy - 9.0 * s, w: right - tx, h: 18.0 * s }, tx, who, Text::small().color(th.text_dim));
+
+    // Sesión y semana. La marca vertical es el ritmo: la parte de la ventana que ya pasó,
+    // donde debería ir el uso para que alcance hasta el reinicio. Si el uso la pasa, la
+    // barra cambia de color.
+    use crate::claude_usage::{self as cu, Pace};
+    let now = std::time::SystemTime::now();
+    let rows = [("SESIÓN", v.claude_usage.session, cu::SESSION_WINDOW), ("SEMANA", v.claude_usage.week, cu::WEEK_WINDOW)];
+    for (i, (label, limit, window)) in rows.into_iter().enumerate() {
+        let y = r.y + 24.0 * s + i as f32 * 27.0 * s;
+        k.text(x0, y, label, Text::caption(), 70.0 * s);
+        let (detail, fill, pace) = match limit.map(|l| l.now(now)) {
+            Some((pct, Some(left))) => (format!("{pct:.0} % · {}", cu::until(left)), pct / 100.0, Some(cu::pace(left, window))),
+            Some((pct, None)) => (format!("{pct:.0} %"), pct / 100.0, None),
+            None => ("sin datos".to_string(), 0.0, None),
+        };
+        let style = Text::small().color(if limit.is_some() { th.text } else { th.text_dim });
+        let w = k.measure(&detail, style);
+        k.text(x1 - w, y, &detail, style, w + 1.0);
+        let bar = Rect { x: x0, y: y + 16.0 * s, w: x1 - x0, h: 4.0 * s };
+        k.rounded(bar, 2.0, th.border);
+        if fill > 0.0 {
+            let color = match cu::pace_level(fill * 100.0, pace) {
+                Pace::Fine => th.done,
+                Pace::Ahead => th.attention,
+                Pace::Far => th.danger,
+            };
+            k.rounded(Rect { w: (bar.w * fill.clamp(0.0, 1.0)).max(bar.h), ..bar }, 2.0, color);
+        }
+        if let Some(p) = pace {
+            // Marca del ritmo: una raya vertical que sobresale de la barra.
+            let mx = (bar.x + bar.w * p).round().clamp(bar.x, bar.x + bar.w - 2.0 * s);
+            k.rect(Rect { x: mx, y: bar.y - 3.0 * s, w: (1.5 * s).round().max(1.0), h: bar.h + 6.0 * s }, th.text);
+        }
+    }
 }
 
 /// Medidores compactos de Telar completo: CPU y GPU en % de la máquina, RAM en GB.
@@ -1222,7 +1317,17 @@ mod tests {
     fn lista_con_desplazamiento() {
         let mut l = Layout::with_cell(1200.0, 780.0, 1.0, 8.0, 16.0, 1);
         let rows = l.list_rows();
-        assert!(rows >= 5 && l.group_rect(rows - 1).y + l.group_rect(rows - 1).h <= l.meters_rect().y, "la lista no pisa los medidores");
+        let last = l.group_rect(rows - 1);
+        assert!(rows >= 5 && last.y + last.h <= l.claude_rect().y, "la lista no pisa el bloque de Claude");
+        // Sin el bloque de Claude ni los medidores, la lista gana esas filas.
+        l.claude = false;
+        assert!(l.group_rect(l.list_rows() - 1).y + GROUP_ROW_H <= l.meters_rect().y);
+        l.meters = false;
+        let more = l.list_rows();
+        assert!(more > rows + 2, "{more} filas sin los bloques, {rows} con ellos");
+        assert!(l.group_rect(more - 1).y + GROUP_ROW_H <= l.awake_rect().y);
+        l.claude = true;
+        l.meters = true;
         assert!(l.row_visible(0) && !l.row_visible(rows));
         l.list_scroll = 3;
         assert!(!l.row_visible(2) && l.row_visible(3));

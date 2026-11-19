@@ -21,6 +21,7 @@ cargo build --release
 **⌘,** (o el engranaje ⚙ junto a «GRUPOS») abre la configuración. Los cambios se aplican al instante (la terminal de atrás sirve de vista previa) y se guardan solos en `~/.config/telar/config.json`.
 
 - **General · Carpeta de inicio:** la carpeta donde abren los tabs y grupos nuevos (también `telar new` sin `--cwd`). Se elige con el panel de carpetas de macOS y se quita con «Quitar». Un grupo con carpeta propia (la de su proyecto) sigue usando la suya; sin carpeta de inicio, un tab nuevo abre en la del tab que tienes a la vista.
+- **General · Barra lateral:** mostrar u ocultar el bloque de Claude y los medidores de consumo (CPU, RAM, GPU). Sin ellos, la lista de grupos usa ese espacio.
 - **Apariencia · Tema:** 10 temas predefinidos (Telar, Tokyo Night, Catppuccin Mocha y Latte, Dracula, Nord, Gruvbox Dark, One Dark, Rosé Pine y GitHub Light). Cambian la interfaz y los colores de la terminal. ←/→ los recorre.
 - **Apariencia · Fuente:** la fuente de la terminal y su tamaño (la interfaz usa SF Pro). La lista muestra JetBrains Mono (incluida en Telar; es la que usa Ghostty por defecto) y las fuentes monoespaciadas instaladas en el Mac. Escribe para filtrar; ↑↓ cambian la fuente; − y + el tamaño (⌘0 vuelve a ese tamaño).
 - **Ícono:** el ícono de la app. Por defecto, «Ventana con grupos»; hay otras tres propuestas y uno propio desde un archivo (PNG, JPEG, HEIC o ICNS). Cambia en el Dock al instante y queda guardado en Telar.app. Los íconos incluidos se generan con `scripts/iconos.py`.
@@ -210,3 +211,10 @@ Este comando:
 3. guarda el frame leído desde la GPU en un BMP y cierra la app.
 
 No necesita el permiso de grabación de pantalla.
+
+## Uso de Claude en la barra lateral
+
+Encima de los medidores, el bloque de Claude muestra la cuenta (correo y plan, de `claude auth status`) y dos barras: la **sesión** (5 h) y la **semana** (7 días), con el porcentaje usado y lo que falta para el reinicio. La raya vertical es el ritmo: la parte de la ventana que ya pasó, donde debería ir el uso para que alcance hasta el reinicio. La barra va en verde por debajo del ritmo, en ámbar por encima y en rojo si lo pasa por 20 puntos o llega al 90 %.
+
+El uso lo envía el mod `prompt-info` de Claude Code desde cualquier tab de Telar con `telar usage '<json>'` cada vez que cambia; queda guardado en `~/.config/telar/uso-claude.json`. Se oculta en Configuración › General.
+

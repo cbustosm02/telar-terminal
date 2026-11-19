@@ -216,3 +216,11 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 
 - Claude Code pone `⏺` (U+23FA) delante de cada paso. JetBrains Mono no lo tiene y macOS lo dibujaba con Apple Color Emoji: un cuadrito azul de «grabar». A pedido del usuario, Telar lo dibuja como un círculo propio (un quad redondeado, sin glifo).
 - Color: mientras Claude trabaja, el último `⏺` de la pantalla (el paso en curso) late con `status_pulse`, el mismo acento y ritmo que el punto del tab y del grupo. Los demás van en gris (`text_dim`), también los que Claude marca en verde al terminar. Los que marca en rojo (error) quedan rojos: `is_reddish` acepta el rojo puro o rosado (ANSI de cada tema, el de Claude) y no el naranja de Claude.
+
+## Uso de Claude en la barra lateral (2026-11-19)
+
+- Pedido del usuario: ver en Telar el uso de la sesión y de la semana, con su reinicio, y la cuenta (correo y plan), que antes mostraba el mod `prompt-info`; el mod se queda con el contexto (ahora abajo a la derecha del prompt).
+- Telar no puede saber el uso por su cuenta: Claude Code lo recibe en las respuestas de la API y se lo da a los mods (`$.session.usage()`, eventos con `rateLimits`). El mod lo envía con `"$TELAR_BIN" usage '<json>'` cuando corre dentro de Telar (`{"session":{"percent","resets_at"(ms)},"week":{…}}`, five_hour y seven_day). Es de la cuenta, no del tab: el último que llega vale. Se guarda en `~/.config/telar/uso-claude.json` para verlo al reabrir. Si el reinicio ya pasó, se muestra 0 %.
+- Correo y plan: `claude auth status --json` en un hilo, al abrir y cada hora (Telar abierto desde el Finder no tiene `~/.local/bin` en el PATH: se busca el ejecutable ahí).
+- Ritmo: la marca vertical es la fracción de la ventana que ya pasó (5 h la sesión, 7 días la semana). Verde por debajo, ámbar por encima, rojo con 20 puntos o más por encima o desde el 90 % (`claude_usage::pace_level`). Lo pidió el usuario a partir de una app de la barra de menús que lo hace igual.
+- Diseño: bloque encima de los medidores, separado por una línea. La lista de grupos termina arriba del primer bloque visible del pie (`Layout::list_bottom`); con la configuración (`general.show_claude`, `general.show_meters`) se ocultan y la lista gana ese espacio.

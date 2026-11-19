@@ -74,6 +74,9 @@ pub struct Ctx<'a> {
     pub idle: IdleView,
     /// Carpeta de inicio elegida y si todavía existe.
     pub start_dir: Option<&'a Path>,
+    /// Qué muestra la barra lateral abajo: el bloque de Claude y los medidores de consumo.
+    pub show_claude: bool,
+    pub show_meters: bool,
 }
 
 /// Sección del ícono de la app.
@@ -121,6 +124,9 @@ pub enum Hit {
     /// «Elegir carpeta…» y «Quitar» de la carpeta de inicio.
     PickStartDir,
     ClearStartDir,
+    /// Interruptores de la barra lateral: bloque de Claude y medidores de consumo.
+    ShowClaude,
+    ShowMeters,
 }
 
 #[derive(Default)]
@@ -250,6 +256,10 @@ struct Geometry {
     start_card: Rect,
     start_pick: Rect,
     start_clear: Rect,
+    /// Sección General: los interruptores de la barra lateral.
+    sidebar_y: f32,
+    show_claude: Rect,
+    show_meters: Rect,
 }
 
 fn geometry(l: &Layout) -> Geometry {
@@ -297,6 +307,9 @@ fn geometry(l: &Layout) -> Geometry {
     let start_card = Rect { x: content_x, y: themes_y + 22.0 * s, w: content_w, h: 56.0 * s };
     let start_pick = Rect { x: content_x, y: start_card.y + start_card.h + 12.0 * s, w: 170.0 * s, h: 32.0 * s };
     let start_clear = Rect { x: start_pick.x + start_pick.w + 8.0 * s, w: 100.0 * s, ..start_pick };
+    let sidebar_y = start_pick.y + start_pick.h + 22.0 * s + 3.0 * 18.0 * s + 20.0 * s;
+    let show_claude = Rect { x: content_x, y: sidebar_y + 22.0 * s, w: content_w, h: 46.0 * s };
+    let show_meters = Rect { y: show_claude.y + show_claude.h + 8.0 * s, ..show_claude };
     Geometry {
         panel,
         close,
@@ -318,6 +331,9 @@ fn geometry(l: &Layout) -> Geometry {
         start_card,
         start_pick,
         start_clear,
+        sidebar_y,
+        show_claude,
+        show_meters,
     }
 }
 
@@ -395,6 +411,10 @@ impl Settings {
                 Hit::PickStartDir
             } else if g.start_clear.contains(x, y) {
                 Hit::ClearStartDir
+            } else if g.show_claude.contains(x, y) {
+                Hit::ShowClaude
+            } else if g.show_meters.contains(x, y) {
+                Hit::ShowMeters
             } else {
                 Hit::Inside
             };
@@ -478,7 +498,7 @@ impl Settings {
         }
 
         if self.section == GENERAL_SECTION {
-            self.draw_general(&mut k, &g, ctx.start_dir);
+            self.draw_general(&mut k, &g, ctx);
             return;
         }
         if self.section == ICON_SECTION {
@@ -711,7 +731,8 @@ impl Settings {
     }
 
     /// Sección General: la carpeta de inicio.
-    fn draw_general(&self, k: &mut Kit, g: &Geometry, start_dir: Option<&Path>) {
+    fn draw_general(&self, k: &mut Kit, g: &Geometry, ctx: &Ctx) {
+        let start_dir = ctx.start_dir;
         let s = k.s;
         let th = theme::t();
         let cx = g.content_x;
@@ -753,6 +774,20 @@ impl Settings {
             k.text(cx, y, note, Text::small(), g.content_w);
             y += 18.0 * s;
         }
+
+        // Lo que muestra la barra lateral abajo.
+        k.text(cx, g.sidebar_y, "BARRA LATERAL", Text::caption(), g.content_w);
+        let toggle = |k: &mut Kit, r: Rect, on: bool, title: &str, sub: &str, h: Hit| {
+            let border = if self.hover == Some(h) { theme::mix(th.border, th.text, 0.25) } else { th.border };
+            k.bordered(r, 8.0, th.chrome, border);
+            let sw = left_switch(r, s);
+            k.switch(sw, on);
+            let tx = sw.x + sw.w + 14.0 * s;
+            k.text(tx, r.y + 7.0 * s, title, Text::label(), r.x + r.w - tx - 10.0 * s);
+            k.text(tx, r.y + 26.0 * s, sub, Text::small(), r.x + r.w - tx - 10.0 * s);
+        };
+        toggle(k, g.show_claude, ctx.show_claude, "Uso de Claude", "Sesión y semana con su reinicio, correo y plan de la cuenta", Hit::ShowClaude);
+        toggle(k, g.show_meters, ctx.show_meters, "Consumo de recursos", "CPU, RAM y GPU de Telar y lo que corre en sus tabs", Hit::ShowMeters);
     }
 
     fn draw_icons(&self, k: &mut Kit, g: &Geometry, current: &str) {

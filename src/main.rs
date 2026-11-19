@@ -3,6 +3,7 @@
 mod appicon;
 mod awake;
 mod cli;
+mod claude_usage;
 mod config;
 mod confirm;
 mod font;
@@ -76,6 +77,8 @@ pub enum UserEvent {
     Ipc(ipc::Request),
     /// Lo elegido en un panel de macOS (`None`: se canceló).
     Picked(Picked),
+    /// Cuenta de Claude Code (`claude auth status`); `None` si no se pudo leer.
+    ClaudeAccount(Option<claude_usage::Account>),
 }
 
 /// Para qué se abrió un panel de macOS.
@@ -189,6 +192,11 @@ struct State {
     update_quiet: bool,
     /// Próxima búsqueda de versión nueva en segundo plano.
     next_update_check: Instant,
+    /// Uso de Claude (lo envía el mod prompt-info con `telar usage`) y la cuenta.
+    claude_usage: claude_usage::Usage,
+    claude_account: Option<claude_usage::Account>,
+    /// Minuto que muestra la cuenta regresiva del reinicio: se repinta al cambiar.
+    claude_minute: u64,
     /// Pedido de salir desde fuera del teclado (p. ej. «Reiniciar» tras actualizar).
     quit: bool,
 }
@@ -305,6 +313,9 @@ impl ApplicationHandler<UserEvent> for App {
             update: update::Status::Idle,
             update_quiet: true,
             next_update_check: Instant::now() + UPDATE_CHECK_EVERY,
+            claude_usage: claude_usage::load(),
+            claude_account: None,
+            claude_minute: 0,
             quit: false,
         };
         if let Some(server) = &state.server {
@@ -340,6 +351,7 @@ impl ApplicationHandler<UserEvent> for App {
         if state.snapshot.is_none() {
             update::cleanup_leftovers();
             update::check(state.proxy.clone());
+            state.refresh_claude_account();
         }
         self.state = Some(state);
     }
@@ -373,6 +385,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Picked(picked) => {
                 st.on_picked(picked);
+                return;
+            }
+            UserEvent::ClaudeAccount(account) => {
+                if account.is_some() {
+                    st.claude_account = account;
+                    st.window.request_redraw();
+                }
                 return;
             }
             UserEvent::Ipc(req) => {
@@ -541,7 +560,20 @@ impl State {
         let mut l = Layout::new(size.width as f32, size.height as f32, self.window.scale_factor() as f32, &self.fonts, n_tabs);
         l.list_scroll = self.list_scroll;
         l.new_row = !self.searching();
+        l.claude = self.config.show_claude;
+        l.meters = self.config.show_meters;
         l
+    }
+
+    /// Lee en un hilo el correo y el plan de la cuenta de Claude Code.
+    fn refresh_claude_account(&self) {
+        if !self.config.show_claude {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let _ = proxy.send_event(UserEvent::ClaudeAccount(claude_usage::account()));
+        });
     }
 
     /// Abre una terminal nueva en la carpeta del tab activo.
@@ -1327,6 +1359,8 @@ impl State {
                         | settings::Hit::SizeDown
                         | settings::Hit::SizeUp
                         | settings::Hit::PickStartDir
+                        | settings::Hit::ShowClaude
+                        | settings::Hit::ShowMeters
                 ) || (hit == settings::Hit::ClearStartDir && self.config.start_dir.is_some());
                 self.window.set_cursor(if pointer { CursorIcon::Pointer } else { CursorIcon::Default });
                 self.window.request_redraw();
@@ -1873,6 +1907,12 @@ impl State {
                 json!({ "ok": true })
             }
             Some("tabs") => self.tabs_json(),
+            Some("usage") => {
+                self.claude_usage = claude_usage::parse(&body["usage"]);
+                claude_usage::save(&self.claude_usage);
+                self.window.request_redraw();
+                json!({ "ok": true })
+            }
             Some("status") => match self.resolve_tab(&body["tab"]) {
                 Ok(id) => json!({ "ok": true, "tab": self.tab_json(id) }),
                 Err(e) => json!({ "ok": false, "error": e }),
@@ -2362,6 +2402,17 @@ impl State {
             }
             settings::Hit::PickIcon => self.pick_app_icon(),
             settings::Hit::PickStartDir => self.pick_start_dir(),
+            settings::Hit::ShowClaude => {
+                self.config.show_claude = !self.config.show_claude;
+                self.config.save();
+                if self.claude_account.is_none() {
+                    self.refresh_claude_account();
+                }
+            }
+            settings::Hit::ShowMeters => {
+                self.config.show_meters = !self.config.show_meters;
+                self.config.save();
+            }
             settings::Hit::ClearStartDir => {
                 self.config.start_dir = None;
                 self.config.save();
@@ -2537,8 +2588,17 @@ impl State {
         // se muestra, el pie ya ofrece la última.
         if Instant::now() >= self.next_update_check && self.snapshot.is_none() {
             self.next_update_check = Instant::now() + UPDATE_CHECK_EVERY;
+            self.refresh_claude_account();
             if matches!(self.update, update::Status::Idle | update::Status::UpToDate | update::Status::Available(_)) {
                 update::check_quietly(self.proxy.clone());
+            }
+        }
+        // La cuenta regresiva del reinicio de Claude avanza por minuto.
+        if self.config.show_claude {
+            let minute = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 60);
+            if minute != self.claude_minute {
+                self.claude_minute = minute;
+                self.window.request_redraw();
             }
         }
         let mut changed = false;
@@ -2754,6 +2814,12 @@ impl State {
         if std::env::var_os("TELAR_SNAPSHOT_STATS").is_some() {
             self.toggle_stats();
         }
+        // TELAR_SNAPSHOT_USAGE='<json>': uso de Claude de prueba (como `telar usage`), con
+        // una cuenta ficticia.
+        if let Some(v) = std::env::var("TELAR_SNAPSHOT_USAGE").ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+            self.claude_usage = claude_usage::parse(&v);
+            self.claude_account = Some(claude_usage::Account { email: Some("persona@ejemplo.com".into()), plan: Some("Max".into()) });
+        }
         // TELAR_SNAPSHOT_DELETE=n: captura con la confirmación de eliminar el grupo n.
         if let Some(gi) = std::env::var("TELAR_SNAPSHOT_DELETE").ok().and_then(|v| v.parse().ok()) {
             self.ask_delete_group(gi);
@@ -2850,6 +2916,8 @@ impl State {
             over_groups: &self.over_groups,
             drop_group: self.drag.as_ref().and_then(|d| d.drop_group),
             link_cell: self.link_cell,
+            claude_usage: &self.claude_usage,
+            claude_account: self.claude_account.as_ref(),
         };
         let mut ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
         if let Some(st) = &self.settings {
@@ -2860,6 +2928,8 @@ impl State {
                 perf: self.perf_view(),
                 idle: self.idle_view(),
                 start_dir: self.config.start_dir.as_deref(),
+                show_claude: self.config.show_claude,
+                show_meters: self.config.show_meters,
             };
             st.draw(&mut self.quads, &mut self.fonts, &l, &ctx);
             ime_cell = None;

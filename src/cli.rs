@@ -30,6 +30,9 @@ Sin comando abre la terminal. Comandos (dentro de Telar):
   clear <tab>                        borra la pantalla y el scrollback del tab (como ⌘K)
   awake [on|off|auto]                mantener el Mac despierto (caffeinate -dims): siempre,
                                      nunca, o solo mientras algún Claude trabaja
+  usage '<json>'                     uso de Claude para la barra lateral (lo envía el mod
+                                     prompt-info): {\"session\":{\"percent\":42,\"resets_at\":<ms>},
+                                     \"week\":{…}}; sin argumento lo lee de la entrada
   update [--check]                   busca la última versión y la instala (--check: solo busca)
   version                            versión instalada
   wait <tab> [--state S] [--timeout SEG]
@@ -202,6 +205,19 @@ pub fn run(cmd: &str, raw: &[String]) -> Result<String, String> {
                 }
             })?;
             Ok(format!("Telar {} instalado. Reinicia Telar para usarlo.", release.version))
+        }
+        "usage" => {
+            let text = match raw.first() {
+                Some(t) => t.clone(),
+                None => {
+                    let mut t = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut t).map_err(|e| e.to_string())?;
+                    t
+                }
+            };
+            let usage: Value = serde_json::from_str(&text).map_err(|e| format!("JSON inválido: {e}"))?;
+            call(json!({ "cmd": "usage", "usage": usage }))?;
+            Ok(String::new())
         }
         "clear" => {
             let tab = raw.first().ok_or("falta <tab>")?;
