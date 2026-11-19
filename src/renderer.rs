@@ -291,6 +291,28 @@ impl Renderer {
         }
         self.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(quads));
 
+        // Captura (modo snapshot): se dibuja en una textura propia, no en la ventana. Si
+        // la ventana está tapada por otras, macOS no entrega su superficie y la captura
+        // se perdía.
+        if let Some(path) = capture {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("captura"),
+                size: wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            self.encode_pass(&mut encoder, &texture.create_view(&Default::default()), quads.len(), clear);
+            let (buf, padded) = self.copy_frame(&mut encoder, &texture);
+            self.queue.submit([encoder.finish()]);
+            self.save_bmp(path, &buf, padded);
+            return;
+        }
+
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -302,39 +324,33 @@ impl Renderer {
         };
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("frame"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: clear[0] as f64,
-                            g: clear[1] as f64,
-                            b: clear[2] as f64,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            if !quads.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.set_vertex_buffer(0, self.instances.slice(..));
-                pass.draw(0..6, 0..quads.len() as u32);
-            }
-        }
-        let readback = capture.map(|_| self.copy_frame(&mut encoder, &frame.texture));
+        self.encode_pass(&mut encoder, &view, quads.len(), clear);
         self.queue.submit([encoder.finish()]);
-        if let (Some(path), Some((buf, padded))) = (capture, readback) {
-            self.save_bmp(path, &buf, padded);
-        }
         self.window.pre_present_notify();
         self.queue.present(frame);
+    }
+
+    /// Pasada de dibujo: limpia con `clear` y dibuja los `n` quads ya cargados.
+    fn encode_pass(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, n: usize, clear: Rgba) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("frame"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: clear[0] as f64, g: clear[1] as f64, b: clear[2] as f64, a: 1.0 }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        if n > 0 {
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.instances.slice(..));
+            pass.draw(0..6, 0..n as u32);
+        }
     }
 
     fn copy_frame(&self, encoder: &mut wgpu::CommandEncoder, texture: &wgpu::Texture) -> (wgpu::Buffer, u32) {

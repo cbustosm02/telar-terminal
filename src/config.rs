@@ -24,16 +24,22 @@ pub struct Config {
     pub font_size: f32,
     /// Ícono de la app (`appicon::CHOICES` o «propio»).
     pub app_icon: String,
+    /// Límite de memoria de Telar completo en MB (0: sin límite). Ver `limits`.
+    pub ram_limit_mb: u64,
+    /// Al pasar un límite, suspender tabs inactivos (si no, solo avisa).
+    pub auto_suspend: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        // Lo mismo que cmux/Ghostty por defecto.
+        // Lo mismo que Ghostty por defecto.
         Self {
             theme: crate::theme::DEFAULT.into(),
             font_family: fontlist::DEFAULT_FAMILY.into(),
             font_size: 13.0,
             app_icon: crate::appicon::DEFAULT.into(),
+            ram_limit_mb: 0,
+            auto_suspend: true,
         }
     }
 }
@@ -55,6 +61,10 @@ impl Config {
                 "font_size": self.font_size,
                 "app_icon": self.app_icon,
             },
+            "performance": {
+                "ram_limit_mb": self.ram_limit_mb,
+                "auto_suspend": self.auto_suspend,
+            },
         })
     }
 
@@ -67,6 +77,8 @@ impl Config {
             font_family: a["font_family"].as_str().filter(|s| !s.trim().is_empty()).map_or(d.font_family, String::from),
             font_size: a["font_size"].as_f64().map_or(d.font_size, |s| (s as f32).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX)),
             app_icon: a["app_icon"].as_str().filter(|s| !s.trim().is_empty()).map_or(d.app_icon, String::from),
+            ram_limit_mb: v["performance"]["ram_limit_mb"].as_u64().unwrap_or(d.ram_limit_mb),
+            auto_suspend: v["performance"]["auto_suspend"].as_bool().unwrap_or(d.auto_suspend),
         }
     }
 
@@ -96,14 +108,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn por_defecto_como_cmux() {
+    fn por_defecto_jetbrains_mono() {
         let c = Config::default();
         assert_eq!((c.font_family.as_str(), c.font_size), ("JetBrains Mono", 13.0));
     }
 
     #[test]
     fn ida_y_vuelta() {
-        let c = Config { theme: "Nord".into(), font_family: "Menlo".into(), font_size: 15.0, app_icon: "tejido".into() };
+        let c = Config {
+            theme: "Nord".into(),
+            font_family: "Menlo".into(),
+            font_size: 15.0,
+            app_icon: "tejido".into(),
+            ram_limit_mb: 4096,
+            auto_suspend: false,
+        };
         assert_eq!(Config::from_json(&c.to_json()), c);
     }
 

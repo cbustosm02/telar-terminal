@@ -388,6 +388,9 @@ pub struct View<'a> {
     pub stats: Option<&'a crate::stats::Sample>,
     /// Búsqueda abierta: texto, resultado elegido y resultados.
     pub search: Option<(&'a str, usize, &'a [Found])>,
+    /// Límite de memoria de Telar completo (MB, 0: sin límite) y grupos pasados del suyo.
+    pub ram_limit_mb: u64,
+    pub over_groups: &'a [bool],
 }
 
 /// Resultado de buscar en la barra lateral: un grupo, o un tab de un grupo.
@@ -639,11 +642,16 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
         k.tag(bx, cy, &count, th.text_dim, if active { th.hover } else { th.active });
         let worst = grp.tabs.iter().filter_map(|id| v.terms.get(id)).filter_map(|t| status(t, v.time)).max_by_key(|(p, _)| *p);
         let mut name_right = bx - 6.0 * s;
+        // Grupo pasado de su límite de memoria.
+        if v.over_groups.get(i).copied().unwrap_or(false) {
+            k.icon(name_right - 7.0 * s, cy, icons::CIRCLE_ALERT, 13.0, th.danger);
+            name_right -= 18.0 * s;
+        }
         if let Some((_, color)) = worst {
-            k.dot(bx - 9.0 * s, cy, 7.0, color);
+            k.dot(name_right - 3.0 * s, cy, 7.0, color);
             name_right -= 14.0 * s;
         } else if asleep {
-            k.icon(bx - 10.0 * s, cy, icons::MOON, 13.0, th.text_dim);
+            k.icon(name_right - 4.0 * s, cy, icons::MOON, 13.0, th.text_dim);
             name_right -= 16.0 * s;
         }
         // Carpeta: abierta y de color en el grupo activo.
@@ -725,8 +733,13 @@ fn draw_meters(k: &mut Kit, l: &Layout, v: &View) {
         let color = statsview::level_color(levels[i], warn, crit);
         k.text(x, r.y + 3.0 * s, labels[i], Text::caption(), col_w);
         k.text(x, r.y + 15.0 * s, &values[i], Text::small().weight(590).color(th.text), col_w);
-        // RAM: la barra llena equivale a la mitad de la memoria del Mac.
-        let fill = if i == 1 { levels[i] * 2.0 } else { levels[i] };
+        // RAM: contra el límite si lo hay; si no, la barra llena es la mitad de la memoria del Mac.
+        let (fill, color) = if i == 1 {
+            let (level, warn, crit, fill) = crate::limits::ram_meter(sample.mem, sample.mem_machine, v.ram_limit_mb);
+            (fill, statsview::level_color(level, warn, crit))
+        } else {
+            (levels[i], color)
+        };
         let bar = Rect { x, y: r.y + r.h - 12.0 * s, w: col_w, h: 4.0 * s };
         k.rounded(bar, 2.0, th.border);
         k.rounded(Rect { w: (bar.w * fill.clamp(0.0, 1.0)).max(bar.h), ..bar }, 2.0, color);

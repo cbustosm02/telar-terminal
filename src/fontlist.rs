@@ -1,5 +1,5 @@
 //! Familias de fuentes monoespaciadas: la incluida en Telar (JetBrains Mono, la misma
-//! que trae Ghostty/cmux) y las instaladas en el sistema.
+//! que trae Ghostty) y las instaladas en el sistema.
 //!
 //! Para listar las del sistema se mapea cada archivo y se leen solo sus tablas de nombre
 //! y métricas; no se carga el archivo entero (Apple Color Emoji pesa ~180 MB).

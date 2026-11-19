@@ -14,7 +14,29 @@ use crate::renderer::Quad;
 use crate::theme::{self, Theme};
 use crate::ui::{Layout, Rect};
 
-pub const SECTIONS: &[(char, &str)] = &[(icons::PALETTE, "Apariencia"), (icons::IMAGE, "Ícono")];
+pub const SECTIONS: &[(char, &str)] = &[(icons::PALETTE, "Apariencia"), (icons::IMAGE, "Ícono"), (icons::GAUGE, "Rendimiento")];
+
+/// Sección de límites de memoria.
+pub const PERF_SECTION: usize = 2;
+const PERF_ROW_H: f32 = 40.0;
+
+/// Datos de la sección Rendimiento.
+pub struct Perf {
+    pub total_limit_mb: u64,
+    pub total_used: u64,
+    pub over_total: bool,
+    pub auto_suspend: bool,
+    /// Nombre, límite (MB), uso (bytes) y si está pasado, por grupo.
+    pub groups: Vec<(String, u64, u64, bool)>,
+}
+
+/// Lo que el modal muestra «en uso».
+pub struct Ctx<'a> {
+    pub family: &'a str,
+    pub size: f32,
+    pub app_icon: &'a str,
+    pub perf: Perf,
+}
 
 /// Sección del ícono de la app.
 pub const ICON_SECTION: usize = 1;
@@ -41,6 +63,11 @@ pub enum Hit {
     SizeUp,
     /// Tarjeta de ícono: las incluidas y, al final, el propio.
     Icon(usize),
+    /// − / + de un límite: 0 es Telar completo; 1.. cada grupo.
+    LimitDown(usize),
+    LimitUp(usize),
+    /// Interruptor de suspensión automática.
+    AutoSuspend,
     /// «Elegir archivo…» para el ícono propio.
     PickIcon,
 }
@@ -57,6 +84,50 @@ pub struct Settings {
     pub hover: Option<Hit>,
     /// Error al cambiar el ícono (se muestra en su sección).
     pub icon_error: Option<String>,
+    /// Primera fila visible de la lista de grupos en Rendimiento.
+    pub perf_scroll: usize,
+}
+
+/// Geometría de la sección Rendimiento.
+struct PerfGeometry {
+    total: Rect,
+    total_down: Rect,
+    total_up: Rect,
+    groups_y: f32,
+    /// Filas visibles: índice del grupo, fila, − y +.
+    rows: Vec<(usize, Rect, Rect, Rect)>,
+    capacity: usize,
+    auto: Rect,
+    switch: Rect,
+    note_y: f32,
+}
+
+/// − y + a la derecha de una fila.
+fn stepper(r: Rect, s: f32) -> (Rect, Rect) {
+    let b = 26.0 * s;
+    let up = Rect { x: r.x + r.w - 10.0 * s - b, y: r.y + (r.h - b) / 2.0, w: b, h: b };
+    let down = Rect { x: up.x - 96.0 * s - b, ..up };
+    (down, up)
+}
+
+fn perf_geometry(g: &Geometry, s: f32, n_groups: usize, scroll: usize) -> PerfGeometry {
+    let (cx, cw) = (g.content_x, g.content_w);
+    let total = Rect { x: cx, y: g.themes_y + 22.0 * s, w: cw, h: 50.0 * s };
+    let (total_down, total_up) = stepper(total, s);
+    let groups_y = total.y + total.h + 22.0 * s;
+    let note_y = g.panel.y + g.panel.h - 46.0 * s;
+    let auto = Rect { x: cx, y: note_y - 66.0 * s, w: cw, h: 54.0 * s };
+    let list_top = groups_y + 22.0 * s;
+    let capacity = (((auto.y - 12.0 * s - list_top) / (PERF_ROW_H * s)).floor() as usize).max(1);
+    let rows = (scroll..n_groups.min(scroll + capacity))
+        .map(|gi| {
+            let r = Rect { x: cx, y: list_top + (gi - scroll) as f32 * PERF_ROW_H * s, w: cw, h: PERF_ROW_H * s - 4.0 * s };
+            let (d, u) = stepper(r, s);
+            (gi, r, d, u)
+        })
+        .collect();
+    let switch = Rect { x: cx + 14.0 * s, y: auto.y + (auto.h - 20.0 * s) / 2.0, w: 34.0 * s, h: 20.0 * s };
+    PerfGeometry { total, total_down, total_up, groups_y, rows, capacity, auto, switch, note_y }
 }
 
 /// Rectángulos del modal para una ventana dada (los usan el dibujo y los clics).
@@ -140,7 +211,12 @@ impl Settings {
         st
     }
 
-    pub fn hit(&self, x: f32, y: f32, l: &Layout, _fonts: &Fonts) -> Hit {
+    /// Filas de grupos visibles en Rendimiento (para desplazar con la rueda).
+    pub fn perf_capacity(&self, l: &Layout, n_groups: usize) -> usize {
+        perf_geometry(&geometry(l), l.s(), n_groups, self.perf_scroll).capacity
+    }
+
+    pub fn hit(&self, x: f32, y: f32, l: &Layout, _fonts: &Fonts, n_groups: usize) -> Hit {
         let g = geometry(l);
         if !g.panel.contains(x, y) {
             return Hit::Outside;
@@ -150,6 +226,24 @@ impl Settings {
         }
         if let Some(i) = g.nav.iter().position(|r| r.contains(x, y)) {
             return Hit::Section(i);
+        }
+        if self.section == PERF_SECTION {
+            let pg = perf_geometry(&g, l.s(), n_groups, self.perf_scroll);
+            if pg.total_down.contains(x, y) {
+                return Hit::LimitDown(0);
+            }
+            if pg.total_up.contains(x, y) {
+                return Hit::LimitUp(0);
+            }
+            for (gi, _, d, u) in &pg.rows {
+                if d.contains(x, y) {
+                    return Hit::LimitDown(gi + 1);
+                }
+                if u.contains(x, y) {
+                    return Hit::LimitUp(gi + 1);
+                }
+            }
+            return if pg.auto.contains(x, y) { Hit::AutoSuspend } else { Hit::Inside };
         }
         if self.section == ICON_SECTION {
             if let Some(i) = g.icon_cards.iter().position(|r| r.contains(x, y)) {
@@ -199,8 +293,9 @@ impl Settings {
         self.scroll = (self.scroll as isize + rows).clamp(0, max as isize) as usize;
     }
 
-    /// Dibuja el modal sobre todo lo demás. `family`, `size` y `app_icon`: lo que está en uso.
-    pub fn draw(&self, out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, family: &str, size: f32, app_icon: &str) {
+    /// Dibuja el modal sobre todo lo demás, con lo que está en uso (`ctx`).
+    pub fn draw(&self, out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, ctx: &Ctx) {
+        let (family, size, app_icon) = (ctx.family, ctx.size, ctx.app_icon);
         let s = l.s();
         let g = geometry(l);
         let th = theme::t();
@@ -230,6 +325,10 @@ impl Settings {
 
         if self.section == ICON_SECTION {
             self.draw_icons(&mut k, &g, app_icon);
+            return;
+        }
+        if self.section == PERF_SECTION {
+            self.draw_perf(&mut k, &g, &ctx.perf);
             return;
         }
 
@@ -263,9 +362,9 @@ impl Settings {
             }
             let mut right = r.x + r.w - 8.0 * s;
             if fam.embedded {
-                let tw = k.measure("incluida · como cmux", Text::small().weight(510)) + 12.0 * s;
+                let tw = k.measure("incluida", Text::small().weight(510)) + 12.0 * s;
                 right -= tw;
-                k.tag(right, r.y + r.h / 2.0, "incluida · como cmux", th.accent, theme::alpha(th.accent, 0.14));
+                k.tag(right, r.y + r.h / 2.0, "incluida", th.accent, theme::alpha(th.accent, 0.14));
                 right -= 8.0 * s;
             }
             let style = if current { Text::label() } else { Text::body().color(theme::mix(th.text, th.text_dim, 0.3)) };
@@ -293,6 +392,70 @@ impl Settings {
 }
 
 impl Settings {
+    fn draw_perf(&self, k: &mut Kit, g: &Geometry, p: &Perf) {
+        let s = k.s;
+        let th = theme::t();
+        let cx = g.content_x;
+        let pg = perf_geometry(g, s, p.groups.len(), self.perf_scroll);
+        k.text(cx, g.title_y, "Rendimiento", Text::title(), g.content_w - 40.0 * s);
+        k.text(cx, g.title_y + 22.0 * s, "Límites de memoria para Telar completo y para cada grupo", Text::small(), g.content_w);
+        k.text(cx, g.themes_y, "LÍMITE DE MEMORIA", Text::caption(), g.content_w);
+
+        // Una fila: nombre, uso actual y el − valor + del límite.
+        let row = |k: &mut Kit, r: Rect, d: Rect, u: Rect, name: &str, used: u64, limit: u64, over: bool, i: usize, card: bool| {
+            if card {
+                k.bordered(r, 8.0, th.chrome, if over { th.danger } else { th.border });
+            } else if over {
+                k.rounded(r, 6.0, theme::alpha(th.danger, 0.10));
+            }
+            let used_text = format!("usa {}", crate::stats::human_bytes(used));
+            let name_style = if card { Text::label() } else { Text::body() };
+            let right = d.x - 12.0 * s;
+            let nw = k.measure(name, name_style).min(right - r.x - 140.0 * s);
+            let ty = r.y + (r.h - k.line_h(name_style)) / 2.0;
+            if over {
+                k.icon(r.x + 16.0 * s, r.y + r.h / 2.0, icons::CIRCLE_ALERT, 14.0, th.danger);
+            }
+            let x = r.x + if over { 30.0 } else { 12.0 } * s;
+            k.text(x, ty, name, name_style, nw);
+            k.text(x + nw + 10.0 * s, ty + 1.5 * s, &used_text, Text::small().color(if over { th.danger } else { th.text_dim }), right - x - nw - 10.0 * s);
+            k.button(d, "", Some(icons::MINUS), Variant::Subtle, self.hover == Some(Hit::LimitDown(i)));
+            k.button(u, "", Some(icons::PLUS), Variant::Subtle, self.hover == Some(Hit::LimitUp(i)));
+            let value = Rect { x: d.x + d.w, y: d.y, w: u.x - d.x - d.w, h: d.h };
+            let style = if limit == 0 { Text::body().color(th.text_dim) } else { Text::label() };
+            k.text_center(value, &crate::limits::label(limit), style);
+        };
+        row(k, pg.total, pg.total_down, pg.total_up, "Telar completo", p.total_used, p.total_limit_mb, p.over_total, 0, true);
+
+        k.text(cx, pg.groups_y, "POR GRUPO", Text::caption(), g.content_w);
+        for (gi, r, d, u) in &pg.rows {
+            let (name, limit, used, over) = &p.groups[*gi];
+            row(k, *r, *d, *u, name, *used, *limit, *over, gi + 1, false);
+        }
+        if p.groups.len() > pg.capacity {
+            let top = pg.rows.first().map_or(pg.groups_y, |r| r.1.y);
+            let track = pg.capacity as f32 * PERF_ROW_H * s;
+            let h = (track * pg.capacity as f32 / p.groups.len() as f32).max(20.0 * s);
+            let y = top + (track - h) * self.perf_scroll as f32 / (p.groups.len() - pg.capacity) as f32;
+            k.rounded(Rect { x: cx + g.content_w + 6.0 * s, y, w: 3.0 * s, h }, 1.5, th.border);
+        }
+
+        // Suspensión automática.
+        let a = pg.auto;
+        k.bordered(a, 8.0, th.chrome, if self.hover == Some(Hit::AutoSuspend) { theme::mix(th.border, th.text, 0.25) } else { th.border });
+        k.switch(pg.switch, p.auto_suspend);
+        let tx = pg.switch.x + pg.switch.w + 14.0 * s;
+        k.text(tx, a.y + 9.0 * s, "Suspender tabs inactivos al pasar un límite", Text::label(), a.x + a.w - tx - 10.0 * s);
+        let sub = if p.auto_suspend {
+            "Se suspende el que más memoria usa; nunca el visible ni donde Claude trabaja"
+        } else {
+            "Solo avisa: el límite marca los indicadores en ámbar y rojo"
+        };
+        k.text(tx, a.y + 29.0 * s, sub, Text::small(), a.x + a.w - tx - 10.0 * s);
+        k.text(cx, pg.note_y, "macOS no permite un tope duro de memoria para otros procesos: Telar lo hace", Text::small(), g.content_w);
+        k.text(cx, pg.note_y + 16.0 * s, "cumplir suspendiendo tabs, que liberan su memoria y se retoman con Enter.", Text::small(), g.content_w);
+    }
+
     fn draw_icons(&self, k: &mut Kit, g: &Geometry, current: &str) {
         let s = k.s;
         let th = theme::t();
@@ -412,7 +575,7 @@ mod tests {
         let st = Settings::default();
         let fonts = crate::font::Fonts::new("Menlo", 13.0);
         for (i, r) in g.themes.iter().enumerate() {
-            assert_eq!(st.hit(r.x + 5.0, r.y + 5.0, &l, &fonts), Hit::Theme(i));
+            assert_eq!(st.hit(r.x + 5.0, r.y + 5.0, &l, &fonts, 0), Hit::Theme(i));
         }
     }
 }

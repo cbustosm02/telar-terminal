@@ -50,6 +50,8 @@ pub enum Kind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     pub kind: Kind,
+    /// Pasado de su límite de memoria (grupos).
+    pub over: bool,
     pub name: String,
     pub detail: String,
     /// % de un núcleo.
@@ -63,6 +65,7 @@ pub fn rows(sample: &Sample, ws: &Workspace, terms: &HashMap<u64, Terminal>) -> 
     let mut out = Vec::new();
     let Some(app) = sample.procs.first() else { return out };
     out.push(Row {
+        over: false,
         kind: Kind::App,
         name: "Telar (interfaz)".into(),
         detail: format!("pid {} · GPU {:.0} %", app.pid, sample.gpu),
@@ -72,7 +75,7 @@ pub fn rows(sample: &Sample, ws: &Workspace, terms: &HashMap<u64, Terminal>) -> 
     let mut claimed = vec![app.pid];
     for g in &ws.groups {
         let start = out.len();
-        out.push(Row { kind: Kind::Group, name: g.name.clone(), detail: String::new(), cpu: 0.0, mem: 0 });
+        out.push(Row { kind: Kind::Group, over: false, name: g.name.clone(), detail: String::new(), cpu: 0.0, mem: 0 });
         let (mut gcpu, mut gmem) = (0.0, 0);
         for (i, id) in g.tabs.iter().enumerate() {
             let Some(t) = terms.get(id) else { continue };
@@ -101,10 +104,11 @@ pub fn rows(sample: &Sample, ws: &Workspace, terms: &HashMap<u64, Terminal>) -> 
                 (icons::TERMINAL, th.text_dim, dir.unwrap_or_else(|| "shell".into()))
             };
             let name = t.label().map(String::from).unwrap_or_else(|| format!("Tab {}", i + 1));
-            out.push(Row { kind: Kind::Tab { icon, color }, name, detail: state, cpu, mem });
+            out.push(Row { kind: Kind::Tab { icon, color }, over: false, name, detail: state, cpu, mem });
             let mut procs = procs;
             procs.sort_by(|a, b| b.mem.cmp(&a.mem));
             out.extend(procs.into_iter().map(|p| Row {
+                over: false,
                 kind: Kind::Proc,
                 name: p.name.clone(),
                 detail: format!("pid {}", p.pid),
@@ -114,18 +118,24 @@ pub fn rows(sample: &Sample, ws: &Workspace, terms: &HashMap<u64, Terminal>) -> 
         }
         out[start].cpu = gcpu;
         out[start].mem = gmem;
-        out[start].detail = format!("{} tabs", g.tabs.len());
+        out[start].over = g.ram_limit_mb > 0 && gmem > g.ram_limit_mb * 1024 * 1024;
+        out[start].detail = if g.ram_limit_mb > 0 {
+            format!("{} tabs · límite {}", g.tabs.len(), crate::limits::label(g.ram_limit_mb))
+        } else {
+            format!("{} tabs", g.tabs.len())
+        };
     }
     let others: Vec<_> = sample.procs.iter().filter(|p| p.readable && !claimed.contains(&p.pid)).collect();
     if !others.is_empty() {
         out.push(Row {
+            over: false,
             kind: Kind::Group,
             name: "Otros procesos de Telar".into(),
             detail: format!("{}", others.len()),
             cpu: others.iter().map(|p| p.cpu).sum(),
             mem: others.iter().map(|p| p.mem).sum(),
         });
-        out.extend(others.iter().map(|p| Row { kind: Kind::Proc, name: p.name.clone(), detail: format!("pid {}", p.pid), cpu: p.cpu, mem: p.mem }));
+        out.extend(others.iter().map(|p| Row { over: false, kind: Kind::Proc, name: p.name.clone(), detail: format!("pid {}", p.pid), cpu: p.cpu, mem: p.mem }));
     }
     out
 }
@@ -179,7 +189,7 @@ impl Detail {
         self.scroll = (self.scroll as isize + delta).clamp(0, max as isize) as usize;
     }
 
-    pub fn draw(&self, out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, sample: &Sample, rows: &[Row]) {
+    pub fn draw(&self, out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, sample: &Sample, rows: &[Row], ram_limit_mb: u64) {
         let s = l.s();
         let g = geometry(l);
         let th = theme::t();
@@ -197,7 +207,16 @@ impl Detail {
         let n_tabs = rows.iter().filter(|r| matches!(r.kind, Kind::Tab { .. })).count();
         let cards = [
             ("CPU", format!("{:.0} %", sample.cpu), format!("de {} núcleos", sample.cores), Some(0)),
-            ("MEMORIA", human_bytes(sample.mem), format!("de {} del Mac", human_bytes(sample.mem_machine)), Some(1)),
+            (
+                "MEMORIA",
+                human_bytes(sample.mem),
+                if ram_limit_mb > 0 {
+                    format!("límite {}", crate::limits::label(ram_limit_mb))
+                } else {
+                    format!("de {} del Mac", human_bytes(sample.mem_machine))
+                },
+                Some(1),
+            ),
             ("GPU", format!("{:.0} %", sample.gpu), format!("GPU total {:.0} %", sample.gpu_device), Some(2)),
             ("PROCESOS", sample.procs.iter().filter(|p| p.readable).count().to_string(), format!("en {n_tabs} tabs"), None),
         ];
@@ -207,11 +226,14 @@ impl Detail {
             k.text(r.x + 12.0 * s, r.y + 26.0 * s, &value, Text::title().weight(590), r.w - 24.0 * s);
             k.text(r.x + 12.0 * s, r.y + 48.0 * s, &sub, Text::small(), r.w - 24.0 * s);
             if let Some(i) = meter {
-                let (warn, crit) = THRESHOLDS[i];
-                let level = if i == 1 { levels[i] * 2.0 } else { levels[i] };
+                let (level, warn, crit, fill) = if i == 1 {
+                    crate::limits::ram_meter(sample.mem, sample.mem_machine, ram_limit_mb)
+                } else {
+                    (levels[i], THRESHOLDS[i].0, THRESHOLDS[i].1, levels[i])
+                };
                 let bar = Rect { x: r.x + 12.0 * s, y: r.y + r.h - 8.0 * s, w: r.w - 24.0 * s, h: 3.0 * s };
                 k.rounded(bar, 1.5, th.border);
-                k.rounded(Rect { w: (bar.w * level.clamp(0.0, 1.0)).max(bar.h), ..bar }, 1.5, level_color(levels[i], warn, crit));
+                k.rounded(Rect { w: (bar.w * fill.clamp(0.0, 1.0)).max(bar.h), ..bar }, 1.5, level_color(level, warn, crit));
             }
         }
 
@@ -254,7 +276,7 @@ impl Detail {
             let cpu_text = format!("{:.1} %", row.cpu.max(0.0) + 0.0).replace('.', ",");
             right(&mut k, col_cpu, ty, &cpu_text, Text::body().color(if row.cpu >= 50.0 { cpu_color } else { style.color }));
             let mem = if row.mem == 0 && matches!(row.kind, Kind::Tab { .. }) { "—".to_string() } else { human_bytes(row.mem) };
-            right(&mut k, col_mem, ty, &mem, Text::body().color(style.color));
+            right(&mut k, col_mem, ty, &mem, Text::body().color(if row.over { th.danger } else { style.color }));
         }
         if rows.len() > g.rows {
             let track = g.list;

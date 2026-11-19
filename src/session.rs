@@ -23,6 +23,8 @@ pub struct SavedTab {
 pub struct SavedGroup {
     pub name: String,
     pub dir: Option<PathBuf>,
+    /// Límite de memoria en MB (0: sin límite).
+    pub ram_limit_mb: u64,
     pub active: usize,
     pub tabs: Vec<SavedTab>,
 }
@@ -53,6 +55,7 @@ impl Saved {
             "groups": self.groups.iter().map(|g| json!({
                 "name": g.name,
                 "dir": g.dir,
+                "ram_limit_mb": g.ram_limit_mb,
                 "active": g.active,
                 "tabs": g.tabs.iter().map(|t| json!({
                     "title": t.title,
@@ -84,6 +87,7 @@ impl Saved {
                 (!tabs.is_empty()).then(|| SavedGroup {
                     name: g["name"].as_str().unwrap_or("Grupo").to_string(),
                     dir: g["dir"].as_str().map(PathBuf::from),
+                    ram_limit_mb: g["ram_limit_mb"].as_u64().unwrap_or(0),
                     active: g["active"].as_u64().unwrap_or(0) as usize,
                     tabs,
                 })
@@ -128,13 +132,14 @@ mod tests {
                 SavedGroup {
                     name: "telar".into(),
                     dir: Some("/Users/x/telar".into()),
+                    ram_limit_mb: 2048,
                     active: 1,
                     tabs: vec![
                         SavedTab { title: Some("✳ Refactor".into()), name: None, cwd: Some("/Users/x/telar".into()), claude: Some("ses-1".into()), screen: None },
                         SavedTab { title: None, name: Some("logs".into()), cwd: Some("/tmp".into()), claude: None, screen: Some("\x1b[31mhola".into()) },
                     ],
                 },
-                SavedGroup { name: "Grupo 2".into(), dir: None, active: 0, tabs: vec![SavedTab { title: None, name: None, cwd: None, claude: None, screen: None }] },
+                SavedGroup { name: "Grupo 2".into(), dir: None, ram_limit_mb: 0, active: 0, tabs: vec![SavedTab { title: None, name: None, cwd: None, claude: None, screen: None }] },
             ],
         }
     }

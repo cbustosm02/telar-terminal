@@ -100,7 +100,7 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 
 ## Fuentes y configuración (2026-11-18)
 
-- cmux no define fuente (`fontFamily` vacío en `~/.config/cmux/cmux.json`, tamaño 13): usa la de Ghostty por defecto, **JetBrains Mono**, que va dentro de su binario (su nombre aparece en UTF-16 en `/Applications/cmux.app/Contents/MacOS/cmux`) junto con «Symbols Nerd Font». Telar hace lo mismo: incluye JetBrains Mono 2.304 (cuatro estilos, OFL) y Symbols Nerd Font Mono 3.4.0 (MIT) con `include_bytes!`. Suman ~3,6 MB al binario, pero se mapean y solo se leen las páginas que se usan.
+- **JetBrains Mono** es la fuente por defecto de Ghostty, que la lleva dentro de su binario junto con «Symbols Nerd Font». Telar hace lo mismo: incluye JetBrains Mono 2.304 (cuatro estilos, OFL) y Symbols Nerd Font Mono 3.4.0 (MIT) con `include_bytes!`. Suman ~3,6 MB al binario, pero se mapean y solo se leen las páginas que se usan.
 - `fontlist`: para listar las fuentes del sistema se mapea cada archivo de `/System/Library/Fonts`, `Supplemental`, `/Library/Fonts` y `~/Library/Fonts`, y solo se leen las tablas de nombre y métricas. Una fuente es monoespaciada si `i M W l . a 0` miden lo mismo; la marca `isFixedPitch` no alcanza (Hoefler Text la trae mal). La familia se agrupa por nombre tipográfico; se eligen las caras más cercanas a 400/700 con y sin itálica. Las familias que empiezan con «.» son internas de Apple (p. ej. SF Mono del sistema) y no se listan.
 - `config.json` va por secciones (`appearance`, …), las mismas del modal. Lo inválido o faltante toma el valor por defecto. Para sumar una sección: `settings::SECTIONS`, su dibujo en `Settings::draw` y su campo en `Config`.
 
@@ -124,3 +124,13 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 - `telar install` y `update::ensure_bundle` (al abrir) escriben `Contents/Resources/Telar.icns` y `CFBundleIconFile`. El actualizador solo cambia el binario, así que una app que viene de una versión sin ícono lo recibe al abrirse.
 - Cambiar el ícono: `NSApplication.setApplicationIconImage` (Dock, al instante) y `NSWorkspace setIcon:forFile:` sobre Telar.app (Finder y Dock con la app cerrada; con el de por defecto se quita y vuelve el `.icns`). Las llamadas a AppKit van con `objc2::msg_send!`, sin crates de AppKit (`objc2` ya estaba en el árbol de dependencias).
 - Ícono propio: `NSOpenPanel` para elegir el archivo; `sips` lo convierte a PNG de 1024 px en `~/.config/telar/icono.png`. Las vistas previas se decodifican con `png` (ya en el árbol), se reducen a mano y se suben al atlas como imágenes de color (`Fonts::image`).
+
+## Límites de memoria (2026-11-18)
+
+- En macOS no se puede fijar un tope duro de memoria a otros procesos sin privilegios: no hay cgroups, el kernel no aplica `RLIMIT_RSS`, y los límites de jetsam son del sistema. Aun si se pudiera, Claude o node fallarían al pedir memoria en vez de liberarla.
+- Por eso el límite se hace cumplir con lo que ya existe: **suspender tabs**, que cierra sus procesos y libera la memoria de verdad. `limits::pick` elige, entre los grupos pasados (o todos, si lo está Telar completo), el tab elegible que más usa (al menos 32 MB). No es elegible el tab visible, uno suspendido ni uno donde Claude trabaja o espera respuesta. Se suspende uno cada 4 s como máximo, para dejar que la memoria se libere antes de volver a medir. Probado con un proceso de 600 MB y un límite de 512 MB: suspendió ese tab en la siguiente muestra.
+- El límite de cada grupo se guarda con el grupo en la sesión (`ram_limit_mb`); el general y la suspensión automática, en `config.json` (`performance`). El medidor de RAM usa el límite como 100 % (`limits::ram_meter`).
+
+## Capturas en una textura propia (2026-11-18)
+
+- Con la ventana de prueba abierta sin foco, a veces quedaba tapada por otras y macOS no entregaba su superficie (`get_current_texture` sin frame): la captura no se guardaba. Ahora el modo captura dibuja en una textura propia, del mismo formato y tamaño, y la copia de ahí.

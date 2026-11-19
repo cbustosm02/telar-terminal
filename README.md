@@ -21,7 +21,7 @@ cargo build --release
 **⌘,** (o el engranaje ⚙ junto a «GRUPOS») abre la configuración. Los cambios se aplican al instante (la terminal de atrás sirve de vista previa) y se guardan solos en `~/.config/telar/config.json`.
 
 - **Apariencia · Tema:** 10 temas predefinidos (Telar, Tokyo Night, Catppuccin Mocha y Latte, Dracula, Nord, Gruvbox Dark, One Dark, Rosé Pine y GitHub Light). Cambian la interfaz y los colores de la terminal. ←/→ los recorre.
-- **Apariencia · Fuente:** la fuente de la terminal y su tamaño (la interfaz usa SF Pro). La lista muestra JetBrains Mono (incluida en Telar; es la que usan Ghostty y cmux por defecto) y las fuentes monoespaciadas instaladas en el Mac. Escribe para filtrar; ↑↓ cambian la fuente; − y + el tamaño (⌘0 vuelve a ese tamaño).
+- **Apariencia · Fuente:** la fuente de la terminal y su tamaño (la interfaz usa SF Pro). La lista muestra JetBrains Mono (incluida en Telar; es la que usa Ghostty por defecto) y las fuentes monoespaciadas instaladas en el Mac. Escribe para filtrar; ↑↓ cambian la fuente; − y + el tamaño (⌘0 vuelve a ese tamaño).
 - **Ícono:** el ícono de la app. Por defecto, «Ventana con grupos»; hay otras tres propuestas y uno propio desde un archivo (PNG, JPEG, HEIC o ICNS). Cambia en el Dock al instante y queda guardado en Telar.app. Los íconos incluidos se generan con `scripts/iconos.py`.
 - Los íconos de prompts (Nerd Fonts) se ven con cualquier fuente: Telar incluye «Symbols Nerd Font» como respaldo.
 
@@ -98,6 +98,13 @@ Para tener muchas sesiones a la vista sin que consuman recursos:
 Sobre la línea del pie de la barra lateral hay tres medidores de **Telar completo** (la app y todo lo que corre en sus tabs): CPU y GPU en % de la máquina, y RAM. Cambian de verde a ámbar y a rojo según el uso. Se miden cada 2 s, en un hilo aparte, y solo se repinta si cambia lo que se ve.
 
 Con un clic se abre el detalle: tarjetas con los totales (núcleos, memoria del Mac, uso total de la GPU, procesos) y una tabla por grupo, tab y proceso con su CPU (en % de un núcleo, como el Monitor de Actividad) y su memoria. Esc o un clic fuera lo cierran.
+
+### Límites de memoria
+
+En **Configuración › Rendimiento** se fija un límite de memoria para Telar completo y otro para cada grupo (de 512 MB a 32 GB, o sin límite).
+
+- macOS no permite un tope duro de memoria para otros procesos. Por eso Telar hace cumplir el límite **suspendiendo tabs**: al pasarlo, suspende el tab inactivo que más memoria usa (uno cada pocos segundos, hasta volver por debajo) y avisa con una notificación. Nunca suspende el tab que estás mirando ni uno donde Claude trabaja o espera tu respuesta.
+- Con la suspensión automática apagada, el límite solo avisa: el medidor de RAM lo toma como 100 % (ámbar desde 75 %, rojo desde 90 %) y los grupos pasados de su límite muestran un aviso rojo en la barra lateral.
 
 ## Mantener el Mac despierto
 

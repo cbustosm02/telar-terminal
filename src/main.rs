@@ -9,6 +9,7 @@ mod fontlist;
 mod hooks;
 mod input;
 mod kit;
+mod limits;
 mod ipc;
 mod proc;
 mod renderer;
@@ -155,6 +156,11 @@ struct State {
     list_scroll_px: f32,
     /// Buscador de la barra lateral abierto (⌘P): texto y resultado elegido.
     search: Option<(String, usize)>,
+    /// Límites de memoria: uso por grupo, qué está pasado y la última suspensión automática.
+    usage: Option<limits::Usage>,
+    over_total: bool,
+    over_groups: Vec<bool>,
+    last_auto_suspend: Instant,
     update: update::Status,
     /// La búsqueda automática al abrir no muestra errores (p. ej. sin conexión).
     update_quiet: bool,
@@ -203,6 +209,10 @@ impl ApplicationHandler<UserEvent> for App {
             list_scroll: 0,
             list_scroll_px: 0.0,
             search: None,
+            usage: None,
+            over_total: false,
+            over_groups: Vec::new(),
+            last_auto_suspend: Instant::now(),
             palette: theme::t().palette(),
             window,
             renderer,
@@ -1121,7 +1131,7 @@ impl State {
             return;
         }
         if let Some(st) = self.settings.as_mut() {
-            let hit = st.hit(self.cursor.0, self.cursor.1, &l, &self.fonts);
+            let hit = st.hit(self.cursor.0, self.cursor.1, &l, &self.fonts, self.ws.groups.len());
             let hover = Some(hit);
             if hover != st.hover {
                 st.hover = hover;
@@ -1408,6 +1418,13 @@ impl State {
                 MouseScrollDelta::LineDelta(_, y) => -y.round() as isize,
                 MouseScrollDelta::PixelDelta(p) => (-p.y as f32 / (26.0 * l.s())).round() as isize,
             };
+            if st.section == settings::PERF_SECTION {
+                let n = self.ws.groups.len();
+                let max = n.saturating_sub(st.perf_capacity(&l, n));
+                st.perf_scroll = (st.perf_scroll as isize + rows).clamp(0, max as isize) as usize;
+                self.window.request_redraw();
+                return;
+            }
             let page = st.page(&l, &self.fonts);
             st.scroll_by(rows, page);
             self.window.request_redraw();
@@ -1701,8 +1718,66 @@ impl State {
         let changed = shown != self.meters_shown;
         self.meters_shown = shown;
         self.stats = Some(sample);
-        if changed || self.stats_detail.is_some() {
+        let over_changed = self.enforce_limits();
+        if changed || over_changed || self.stats_detail.is_some() || self.settings.is_some() {
             self.window.request_redraw();
+        }
+    }
+
+    /// Revisa los límites de memoria con la última muestra. Con suspensión automática,
+    /// suspende un tab (el inactivo que más usa) si algo está pasado; uno cada 4 s, para
+    /// darle tiempo a la memoria a liberarse antes de decidir otro. Devuelve si cambió
+    /// qué está pasado.
+    fn enforce_limits(&mut self) -> bool {
+        let Some(sample) = &self.stats else { return false };
+        let u = limits::usage(sample, &self.ws, &self.terms, self.ws.active_term());
+        let group_limits: Vec<u64> = self.ws.groups.iter().map(|g| g.ram_limit_mb).collect();
+        let (over_total, over_groups) = limits::over(&u, &group_limits, self.config.ram_limit_mb);
+        let changed = over_total != self.over_total || over_groups != self.over_groups;
+        let pick = limits::pick(&u, over_total, &over_groups);
+        self.over_total = over_total;
+        self.over_groups = over_groups;
+        self.usage = Some(u);
+        let due = self.last_auto_suspend.elapsed() > Duration::from_secs(4);
+        if let Some(id) = pick.filter(|_| self.config.auto_suspend && due) {
+            let name = self.terms.get(&id).and_then(|t| t.label().map(String::from)).unwrap_or_else(|| "un tab".into());
+            let place = self.place_of(id);
+            if self.suspend(id) {
+                self.last_auto_suspend = Instant::now();
+                notify_macos(&place, &format!("Se suspendió «{name}» para respetar el límite de memoria"));
+            }
+        }
+        changed
+    }
+
+    /// − / + de un límite: 0 es Telar completo (configuración); 1.. el grupo i-1 (sesión).
+    fn step_limit(&mut self, i: usize, delta: i32) {
+        if i == 0 {
+            self.config.ram_limit_mb = limits::step(self.config.ram_limit_mb, delta);
+            self.config.save();
+        } else if let Some(g) = self.ws.groups.get_mut(i - 1) {
+            g.ram_limit_mb = limits::step(g.ram_limit_mb, delta);
+            self.save_session();
+        }
+        self.enforce_limits();
+        self.window.request_redraw();
+    }
+
+    /// Datos de la sección Rendimiento del modal.
+    fn perf_view(&self) -> settings::Perf {
+        let used = |gi: usize| self.usage.as_ref().and_then(|u| u.groups.get(gi).copied()).unwrap_or(0);
+        settings::Perf {
+            total_limit_mb: self.config.ram_limit_mb,
+            total_used: self.stats.as_ref().map_or(0, |s| s.mem),
+            over_total: self.over_total,
+            auto_suspend: self.config.auto_suspend,
+            groups: self
+                .ws
+                .groups
+                .iter()
+                .enumerate()
+                .map(|(gi, g)| (g.name.clone(), g.ram_limit_mb, used(gi), self.over_groups.get(gi).copied().unwrap_or(false)))
+                .collect(),
         }
     }
 
@@ -1799,7 +1874,7 @@ impl State {
     fn settings_click(&mut self) {
         let l = self.layout();
         let Some(st) = self.settings.as_mut() else { return };
-        match st.hit(self.cursor.0, self.cursor.1, &l, &self.fonts) {
+        match st.hit(self.cursor.0, self.cursor.1, &l, &self.fonts, self.ws.groups.len()) {
             settings::Hit::Outside | settings::Hit::Close => self.settings = None,
             settings::Hit::Section(i) => st.section = i,
             settings::Hit::Font(i) => {
@@ -1822,6 +1897,13 @@ impl State {
                 }
             }
             settings::Hit::PickIcon => self.pick_app_icon(),
+            settings::Hit::LimitDown(i) => self.step_limit(i, -1),
+            settings::Hit::LimitUp(i) => self.step_limit(i, 1),
+            settings::Hit::AutoSuspend => {
+                self.config.auto_suspend = !self.config.auto_suspend;
+                self.config.save();
+                self.enforce_limits();
+            }
             settings::Hit::SizeDown => self.set_font_size(self.font_pt - 1.0),
             settings::Hit::SizeUp => self.set_font_size(self.font_pt + 1.0),
             settings::Hit::Inside => {}
@@ -2000,6 +2082,7 @@ impl State {
             .map(|g| SavedGroup {
                 name: g.name.clone(),
                 dir: g.dir.clone(),
+                ram_limit_mb: g.ram_limit_mb,
                 active: g.active,
                 tabs: g
                     .tabs
@@ -2071,7 +2154,7 @@ impl State {
             }
             if !tabs.is_empty() {
                 let active = g.active.min(tabs.len() - 1);
-                groups.push(Group { name: g.name, tabs, active, dir: g.dir });
+                groups.push(Group { name: g.name, tabs, active, dir: g.dir, ram_limit_mb: g.ram_limit_mb });
             }
         }
         self.ws.restore(groups, saved.active);
@@ -2165,8 +2248,12 @@ impl State {
         // TELAR_SNAPSHOT_SETTINGS=1: captura con la configuración abierta.
         if let Ok(section) = std::env::var("TELAR_SNAPSHOT_SETTINGS") {
             self.toggle_settings();
-            if let (Some(st), "icono") = (self.settings.as_mut(), section.as_str()) {
-                st.section = settings::ICON_SECTION;
+            if let Some(st) = self.settings.as_mut() {
+                match section.as_str() {
+                    "icono" => st.section = settings::ICON_SECTION,
+                    "rendimiento" => st.section = settings::PERF_SECTION,
+                    _ => {}
+                }
             }
         }
         // TELAR_SNAPSHOT_MENU=tab|group: captura con el menú contextual abierto.
@@ -2209,15 +2296,23 @@ impl State {
             update: &self.update,
             stats: self.stats.as_ref(),
             search: self.search.as_ref().map(|(q, sel)| (q.as_str(), *sel, results.as_slice())),
+            ram_limit_mb: self.config.ram_limit_mb,
+            over_groups: &self.over_groups,
         };
         let mut ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
         if let Some(st) = &self.settings {
-            st.draw(&mut self.quads, &mut self.fonts, &l, &self.config.font_family, self.font_pt, &self.config.app_icon);
+            let ctx = settings::Ctx {
+                family: &self.config.font_family,
+                size: self.font_pt,
+                app_icon: &self.config.app_icon,
+                perf: self.perf_view(),
+            };
+            st.draw(&mut self.quads, &mut self.fonts, &l, &ctx);
             ime_cell = None;
         }
         if let (Some(d), Some(sample)) = (&self.stats_detail, &self.stats) {
             let rows = statsview::rows(sample, &self.ws, &self.terms);
-            d.draw(&mut self.quads, &mut self.fonts, &l, sample, &rows);
+            d.draw(&mut self.quads, &mut self.fonts, &l, sample, &rows, self.config.ram_limit_mb);
             ime_cell = None;
         }
         if let Some((col, row)) = ime_cell {

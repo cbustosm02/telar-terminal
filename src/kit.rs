@@ -290,7 +290,6 @@ impl<'a> Kit<'a> {
     }
 
     /// Interruptor encendido/apagado.
-    #[allow(dead_code)] // parte del kit; aún sin uso
     pub fn switch(&mut self, r: Rect, on: bool) {
         let th = theme::t();
         self.out.push(Quad::rounded(r.x, r.y, r.w, r.h, r.h / 2.0, if on { th.accent } else { th.border }));
