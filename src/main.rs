@@ -13,6 +13,8 @@ mod proc;
 mod renderer;
 mod screen;
 mod session;
+mod stats;
+mod statsview;
 mod settings;
 mod terminal;
 mod theme;
@@ -61,6 +63,8 @@ pub enum UserEvent {
     Term(u64, u64, TermEvent),
     /// Avance de la búsqueda o instalación de una actualización.
     Update(update::Status),
+    /// Uso de recursos (cada 2 s).
+    Stats(Box<stats::Sample>),
     Ipc(ipc::Request),
 }
 
@@ -139,6 +143,11 @@ struct State {
     config: config::Config,
     /// Modal de configuración abierto (⌘,).
     settings: Option<settings::Settings>,
+    /// Última muestra de uso de recursos y el panel de detalle, si está abierto.
+    stats: Option<stats::Sample>,
+    stats_detail: Option<statsview::Detail>,
+    /// Lo que muestran los medidores: solo se repinta si cambia.
+    meters_shown: String,
     update: update::Status,
     /// La búsqueda automática al abrir no muestra errores (p. ej. sin conexión).
     update_quiet: bool,
@@ -181,6 +190,9 @@ impl ApplicationHandler<UserEvent> for App {
             font_pt: config.font_size,
             config,
             settings: None,
+            stats: None,
+            stats_detail: None,
+            meters_shown: String::new(),
             palette: theme::t().palette(),
             window,
             renderer,
@@ -248,6 +260,7 @@ impl ApplicationHandler<UserEvent> for App {
             state.snapshot_setup();
         }
         state.update_awake();
+        stats::spawn(state.proxy.clone());
         if state.snapshot.is_none() {
             update::cleanup_leftovers();
             update::check(state.proxy.clone());
@@ -261,6 +274,10 @@ impl ApplicationHandler<UserEvent> for App {
             // De un proceso anterior del mismo tab (suspendido o reanudado): se ignora.
             UserEvent::Term(id, generation, _) if st.terms.get(&id).is_none_or(|t| t.generation != generation) => return,
             UserEvent::Term(id, _, event) => (id, event),
+            UserEvent::Stats(sample) => {
+                st.on_stats(*sample);
+                return;
+            }
             UserEvent::Update(status) => {
                 // La búsqueda automática no molesta con errores; la pedida con clic sí los muestra.
                 st.update = match status {
@@ -801,6 +818,14 @@ impl State {
             self.settings_key(event);
             return false;
         }
+        if self.stats_detail.is_some() {
+            let close = event.logical_key == Key::Named(NamedKey::Escape)
+                || (self.mods.super_key() && matches!(event.key_without_modifiers(), Key::Character(ref c) if c.as_str() == "w"));
+            if close {
+                self.toggle_stats();
+            }
+            return false;
+        }
 
         // Renombrando un grupo o un tab: el teclado edita el nombre.
         if let Some((target, buf)) = self.editing.as_mut() {
@@ -958,6 +983,15 @@ impl State {
     fn on_cursor_moved(&mut self, pos: PhysicalPosition<f64>) {
         self.cursor = (pos.x as f32, pos.y as f32);
         let l = self.layout();
+        if let Some(d) = self.stats_detail.as_mut() {
+            let hover = Some(d.hit(self.cursor.0, self.cursor.1, &l));
+            if hover != d.hover {
+                d.hover = hover;
+                self.window.set_cursor(if hover == Some(statsview::Hit::Close) { CursorIcon::Pointer } else { CursorIcon::Default });
+                self.window.request_redraw();
+            }
+            return;
+        }
         if let Some(st) = self.settings.as_mut() {
             let hit = st.hit(self.cursor.0, self.cursor.1, &l, &self.fonts);
             let hover = Some(hit);
@@ -984,7 +1018,15 @@ impl State {
             self.hover = hit;
             let icon = match hit {
                 Hit::Terminal => CursorIcon::Text,
-                Hit::Group(_) | Hit::NewGroup | Hit::Tab(_) | Hit::CloseTab(_) | Hit::NewTab | Hit::Awake | Hit::Update | Hit::Settings => {
+                Hit::Group(_)
+                | Hit::NewGroup
+                | Hit::Tab(_)
+                | Hit::CloseTab(_)
+                | Hit::NewTab
+                | Hit::Awake
+                | Hit::Update
+                | Hit::Settings
+                | Hit::Stats => {
                     CursorIcon::Pointer
                 }
                 _ => CursorIcon::Default,
@@ -1019,6 +1061,14 @@ impl State {
         let n_tabs = self.ws.group().map_or(0, |g| g.tabs.len());
         let hit = l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs);
         let pressed = state == ElementState::Pressed;
+
+        // Detalle de uso abierto: un clic fuera o en la ✕ lo cierra.
+        if let Some(d) = &self.stats_detail {
+            if pressed && button == MouseButton::Left && d.hit(self.cursor.0, self.cursor.1, &l) != statsview::Hit::Inside {
+                self.toggle_stats();
+            }
+            return;
+        }
 
         // Configuración abierta: los clics son del modal.
         if self.settings.is_some() {
@@ -1108,6 +1158,7 @@ impl State {
             (Hit::Awake, MouseButton::Left) => self.cycle_awake(),
             (Hit::Update, MouseButton::Left) => self.update_action(),
             (Hit::Settings, MouseButton::Left) => self.toggle_settings(),
+            (Hit::Stats, MouseButton::Left) => self.toggle_stats(),
             (Hit::Drag, MouseButton::Left) => {
                 if count == 2 {
                     let max = self.window.is_maximized();
@@ -1172,6 +1223,18 @@ impl State {
 
     fn on_scroll(&mut self, delta: MouseScrollDelta) {
         let l = self.layout();
+        if self.stats_detail.is_some() {
+            let rows = match delta {
+                MouseScrollDelta::LineDelta(_, y) => -y.round() as isize,
+                MouseScrollDelta::PixelDelta(p) => (-p.y as f32 / (28.0 * l.s())).round() as isize,
+            };
+            let total = self.stats.as_ref().map_or(0, |sm| statsview::rows(sm, &self.ws, &self.terms).len());
+            if let Some(d) = self.stats_detail.as_mut() {
+                d.scroll_by(rows, total, &l);
+            }
+            self.window.request_redraw();
+            return;
+        }
         if let Some(st) = self.settings.as_mut() {
             let rows = match delta {
                 MouseScrollDelta::LineDelta(_, y) => -y.round() as isize,
@@ -1461,6 +1524,29 @@ impl State {
             }
             Status::Checking | Status::Downloading(..) | Status::Applying(_) => {}
         }
+        self.window.request_redraw();
+    }
+
+    /// Nueva muestra de uso. Solo se repinta si cambia lo que se ve.
+    fn on_stats(&mut self, sample: stats::Sample) {
+        let shown = format!("{:.0}|{}|{:.0}", sample.cpu, stats::human_bytes(sample.mem), sample.gpu);
+        let changed = shown != self.meters_shown;
+        self.meters_shown = shown;
+        self.stats = Some(sample);
+        if changed || self.stats_detail.is_some() {
+            self.window.request_redraw();
+        }
+    }
+
+    /// Clic en los medidores: abre o cierra el detalle de uso.
+    fn toggle_stats(&mut self) {
+        self.menu = None;
+        self.settings = None;
+        self.stats_detail = match self.stats_detail {
+            Some(_) => None,
+            None => Some(statsview::Detail::default()),
+        };
+        self.window.set_cursor(CursorIcon::Default);
         self.window.request_redraw();
     }
 
@@ -1854,6 +1940,10 @@ impl State {
             let text = text.replace("\\n", "\r");
             self.send_input(text.into_bytes());
         }
+        // TELAR_SNAPSHOT_STATS=1: captura con el detalle de uso abierto.
+        if std::env::var_os("TELAR_SNAPSHOT_STATS").is_some() {
+            self.toggle_stats();
+        }
         // TELAR_SNAPSHOT_SETTINGS=1: captura con la configuración abierta.
         if std::env::var_os("TELAR_SNAPSHOT_SETTINGS").is_some() {
             self.toggle_settings();
@@ -1892,10 +1982,16 @@ impl State {
             awake: (self.awake.mode, self.awake.active()),
             menu: self.menu.as_ref(),
             update: &self.update,
+            stats: self.stats.as_ref(),
         };
         let mut ime_cell = ui::draw(&mut self.quads, &mut self.fg_quads, &mut self.fonts, &l, &view);
         if let Some(st) = &self.settings {
             st.draw(&mut self.quads, &mut self.fonts, &l, &self.config.font_family, self.font_pt);
+            ime_cell = None;
+        }
+        if let (Some(d), Some(sample)) = (&self.stats_detail, &self.stats) {
+            let rows = statsview::rows(sample, &self.ws, &self.terms);
+            d.draw(&mut self.quads, &mut self.fonts, &l, sample, &rows);
             ime_cell = None;
         }
         if let Some((col, row)) = ime_cell {

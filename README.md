@@ -92,6 +92,12 @@ Para tener muchas sesiones a la vista sin que consuman recursos:
 - Al suspender un grupo se saltan los tabs donde Claude está trabajando o esperando un permiso (por CLI, `--force` los incluye).
 - Los tabs suspendidos siguen suspendidos al reabrir Telar, sin arrancar nada; reabrir con muchas sesiones dormidas es instantáneo.
 
+## Uso de recursos
+
+Sobre la línea del pie de la barra lateral hay tres medidores de **Telar completo** (la app y todo lo que corre en sus tabs): CPU y GPU en % de la máquina, y RAM. Cambian de verde a ámbar y a rojo según el uso. Se miden cada 2 s, en un hilo aparte, y solo se repinta si cambia lo que se ve.
+
+Con un clic se abre el detalle: tarjetas con los totales (núcleos, memoria del Mac, uso total de la GPU, procesos) y una tabla por grupo, tab y proceso con su CPU (en % de un núcleo, como el Monitor de Actividad) y su memoria. Esc o un clic fuera lo cierran.
+
 ## Mantener el Mac despierto
 
 Abajo en la barra lateral, **Despierto** (clic o **⌘⇧C**) alterna entre los modos. La taza se ve a color con un círculo verde mientras `caffeinate` corre, y atenuada con un círculo gris si no:

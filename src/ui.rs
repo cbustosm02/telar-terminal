@@ -17,6 +17,7 @@ use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 
 use crate::awake;
+use crate::statsview;
 use crate::kit::{Kit, Text, Variant, icons};
 use crate::update::{self, Status};
 use crate::font::{self, Fonts, Glyph};
@@ -66,6 +67,8 @@ pub enum Hit {
     Update,
     /// Engranaje: abre la configuración.
     Settings,
+    /// Medidores de uso: abren el detalle.
+    Stats,
     /// Zona vacía de la barra de título: arrastra la ventana.
     Drag,
     Terminal,
@@ -160,6 +163,12 @@ impl Layout {
         Rect { x: 8.0 * s, y: self.h - 52.0 * s, w: (SIDEBAR_W - 16.0) * s, h: 46.0 * s }
     }
 
+    /// Medidores de uso (CPU, RAM, GPU), encima de la línea del pie.
+    fn meters_rect(&self) -> Rect {
+        let s = self.s;
+        Rect { x: 8.0 * s, y: self.awake_rect().y - 54.0 * s, w: (SIDEBAR_W - 16.0) * s, h: 40.0 * s }
+    }
+
     /// Bloque de «Despierto», encima del de la versión.
     fn awake_rect(&self) -> Rect {
         let s = self.s;
@@ -176,6 +185,9 @@ impl Layout {
             }
             if self.settings_rect().contains(x, y) {
                 return Hit::Settings;
+            }
+            if self.meters_rect().contains(x, y) {
+                return Hit::Stats;
             }
             if let Some(i) = (0..n_groups).find(|i| self.group_rect(*i).contains(x, y)) {
                 return Hit::Group(i);
@@ -334,6 +346,7 @@ pub struct View<'a> {
     pub awake: (awake::Mode, bool),
     pub menu: Option<&'a Menu>,
     pub update: &'a Status,
+    pub stats: Option<&'a crate::stats::Sample>,
 }
 
 /// Prioridad y color del indicador de un tab (None = sin indicador).
@@ -526,11 +539,44 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
     k.icon(r.x + 18.0 * s, r.y + r.h / 2.0, icons::PLUS, 14.0, color);
     k.text_in(r, r.x + 32.0 * s, "Nuevo grupo", Text::body().color(color));
 
-    // Pie.
+    // Pie: medidores, línea, Despierto y versión.
+    draw_meters(&mut k, l, v);
     let top = l.awake_rect().y - 8.0 * s;
     k.rect(Rect { x: 12.0 * s, y: top, w: l.sidebar_w() - 24.0 * s, h: s }, th.border);
     draw_awake(&mut k, l, v);
     draw_update(&mut k, l, v);
+}
+
+/// Medidores compactos de Telar completo: CPU y GPU en % de la máquina, RAM en GB.
+fn draw_meters(k: &mut Kit, l: &Layout, v: &View) {
+    let s = l.s;
+    let th = theme::t();
+    let r = l.meters_rect();
+    if v.hover == Hit::Stats {
+        k.rounded(r, 7.0, th.hover);
+    }
+    let Some(sample) = v.stats else {
+        k.text_in(r, r.x + 12.0 * s, "Midiendo uso…", Text::small());
+        return;
+    };
+    let levels = sample.levels();
+    let values = [format!("{:.0}%", sample.cpu), crate::stats::human_bytes(sample.mem), format!("{:.0}%", sample.gpu)];
+    let labels = ["CPU", "RAM", "GPU"];
+    let pad = 10.0 * s;
+    let gap = 10.0 * s;
+    let col_w = (r.w - 2.0 * pad - 2.0 * gap) / 3.0;
+    for i in 0..3 {
+        let x = r.x + pad + i as f32 * (col_w + gap);
+        let (warn, crit) = statsview::THRESHOLDS[i];
+        let color = statsview::level_color(levels[i], warn, crit);
+        k.text(x, r.y + 3.0 * s, labels[i], Text::caption(), col_w);
+        k.text(x, r.y + 15.0 * s, &values[i], Text::small().weight(590).color(th.text), col_w);
+        // RAM: la barra llena equivale a la mitad de la memoria del Mac.
+        let fill = if i == 1 { levels[i] * 2.0 } else { levels[i] };
+        let bar = Rect { x, y: r.y + r.h - 12.0 * s, w: col_w, h: 4.0 * s };
+        k.rounded(bar, 2.0, th.border);
+        k.rounded(Rect { w: (bar.w * fill.clamp(0.0, 1.0)).max(bar.h), ..bar }, 2.0, color);
+    }
 }
 
 /// Caja de ícono de 28 pt con un círculo de estado abajo a la derecha (pie de la barra).

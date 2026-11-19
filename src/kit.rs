@@ -18,6 +18,11 @@ use crate::ui::Rect;
 /// Para sumar uno: buscar su código en `font/info.json` del paquete `lucide-static`.
 #[allow(dead_code)] // catálogo: no todos se usan todavía
 pub mod icons {
+    pub const ACTIVITY: char = '\u{e038}';
+    pub const CPU: char = '\u{e0a9}';
+    pub const FOLDER: char = '\u{e0d7}';
+    pub const GAUGE: char = '\u{e1bf}';
+    pub const MEMORY: char = '\u{e445}';
     pub const ARROW_DOWN_CIRCLE: char = '\u{e078}';
     pub const BOT: char = '\u{e1bb}';
     pub const CHECK: char = '\u{e06c}';

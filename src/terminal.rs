@@ -281,6 +281,12 @@ impl Terminal {
         self.foreground().and_then(crate::proc::cwd)
     }
 
+    /// Proceso en primer plano del tab (su grupo de procesos). Para saber qué procesos
+    /// son del tab se sube desde él hasta la shell (ver `Sample::tab_root`).
+    pub fn foreground_pid(&self) -> Option<i32> {
+        self.foreground()
+    }
+
     pub fn refresh_process(&mut self) {
         self.process = self.foreground().and_then(crate::proc::name);
     }
