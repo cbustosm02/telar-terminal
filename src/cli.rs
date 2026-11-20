@@ -38,6 +38,7 @@ Sin comando abre la terminal. Comandos (dentro de Telar):
                                      vincular este Mac a tu cuenta
   remote logout|on|off|status        cierra la sesión, conecta o desconecta el puente, o
                                      muestra quién está conectado y quién mira
+  remote readonly [on|off]           solo ver desde la web: no deja escribir ni cambiar nada
   update [--check]                   busca la última versión y la instala (--check: solo busca)
   version                            versión instalada
   wait <tab> [--state S] [--timeout SEG]
@@ -417,6 +418,11 @@ fn remote(raw: &[String]) -> Result<String, String> {
         "logout" => {
             call(json!({ "cmd": "remote-logout" }))?;
             Ok("Sesión de Telar web cerrada en este Mac.".into())
+        }
+        "readonly" | "solo-ver" => {
+            let on = !matches!(a.positional.get(1).map(String::as_str), Some("off" | "no"));
+            call(json!({ "cmd": "remote-control", "view_only": on }))?;
+            Ok(if on { "Telar web: solo ver (la web no puede escribir ni cambiar nada en este Mac).".into() } else { "Telar web: la web puede volver a actuar en este Mac.".into() })
         }
         "on" => {
             let v = control(true)?;

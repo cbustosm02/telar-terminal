@@ -81,7 +81,7 @@ impl State {
             match mode.as_str() {
                 "login" => {
                     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    self.remote_login = Some(remote::LoginUi { user_code: Some("K7QX-M2PD".into()), url: String::new(), cancel });
+                    self.remote_login = Some(remote::LoginUi { generation: 0, user_code: Some("K7QX-M2PD".into()), url: String::new(), cancel });
                     self.bridge_status = ("login".into(), String::new());
                 }
                 _ => {

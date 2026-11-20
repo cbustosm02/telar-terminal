@@ -373,7 +373,8 @@ impl State {
             Ok(path) => {
                 if let Some(t) = self.terms.get(&id) {
                     let mode = *t.term.lock().mode();
-                    t.write(input::paste_bytes(&format!("{path} "), mode));
+                    // Escapada: la ruta la armó el servidor (por si trae espacios u otra cosa).
+                    t.write(input::paste_bytes(&format!("{} ", input::shell_escape(&path)), mode));
                 }
             }
             Err(e) => notify_macos("No se pudo pegar por SSH", &e),

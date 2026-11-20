@@ -124,13 +124,26 @@ pub struct ScanReader {
     scanner: Scanner,
     tab: u64,
     proxy: EventLoopProxy<UserEvent>,
+    /// Tope de avisos por segundo (un `yes` con la secuencia no satura la app).
+    window: (std::time::Instant, u32),
 }
+
+/// Más avisos por segundo que esto, de un mismo tab, no son de Claude: se ignoran.
+const MAX_PER_SECOND: u32 = 30;
 
 impl Read for ScanReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.file.read(buf)?;
         for payload in self.scanner.feed(&buf[..n]) {
+            let now = std::time::Instant::now();
+            if now.duration_since(self.window.0) >= std::time::Duration::from_secs(1) {
+                self.window = (now, 0);
+            }
+            if self.window.1 >= MAX_PER_SECOND {
+                continue;
+            }
             if let Some(v) = decode(&payload) {
+                self.window.1 += 1;
                 let _ = self.proxy.send_event(UserEvent::InbandHook(self.tab, v));
             }
         }
@@ -148,7 +161,7 @@ impl ScanPty {
     pub fn new(inner: Pty, tab: u64, proxy: EventLoopProxy<UserEvent>) -> io::Result<Self> {
         // Otro descriptor del mismo PTY (misma descripción de archivo: también sin bloqueo).
         let file = inner.file().try_clone()?;
-        Ok(Self { inner, reader: ScanReader { file, scanner: Scanner::default(), tab, proxy } })
+        Ok(Self { inner, reader: ScanReader { file, scanner: Scanner::default(), tab, proxy, window: (std::time::Instant::now(), 0) } })
     }
 }
 

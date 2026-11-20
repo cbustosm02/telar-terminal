@@ -384,3 +384,43 @@ El usuario pidió una revisión de optimizaciones e integraciones (la hizo Fable
 - **Costo:** el escáner solo salta de ESC en ESC; sin ESC no hace nada más por byte. Payload de 8 KB como máximo.
 - **Seguridad:** cualquier programa (o un `cat` de un archivo) puede escribir esa secuencia. Por eso solo se acepta con ssh, mosh o autossh en primer plano en el tab, verificado en el momento. Del JSON solo se usan `hook_event_name`, `notification_type` y `message`: nunca `session_id` (se usaría para retomar una sesión local) ni `cwd` (se usaría para adoptar carpetas). Lo peor que se puede falsear es el punto de estado y una notificación.
 - `polling` se agregó como dependencia directa en la misma versión que usa alacritty_terminal: el binario no suma código.
+
+## Revisión de Telar web con Fable (2026-11-20)
+
+Hallazgos del lado de Telar y cómo se resolvieron. El lado web lo atiende homeLabFix en telar-remoto.
+
+- **Cerrar sesión no revocaba.** La tubería de la fd 3 no tenía FD_CLOEXEC: curl heredaba el extremo de escritura y quedaba colgado esperando el fin del archivo. Ahora los dos extremos llevan CLOEXEC; si `pipe` devuelve justo la fd 3, se le quita en el hijo. Si la revocación falla, la zona lo avisa. Prueba: `secretos_por_fd3_sin_colgarse`.
+- **Modelo de confianza.** Un relevo comprometido podía actuar en el Mac sin que se notara.
+  - Ahora el bridge marca sus pedidos con `"remote": true`, y en modo «Solo ver desde la web» (menú de la zona o `telar remote readonly`) Telar rechaza todo lo que actúa: send, paste, answer, crear, cerrar, suspender, reanudar y pegar imágenes.
+  - La primera acción de cada navegador en una conexión dispara una notificación en el Mac. La genera el bridge, no `viewers`.
+- **Conexión:**
+  - `connect_timeout` de 10 s y handshake con límites de lectura y escritura;
+  - `client_tls_with_config`, que no sigue redirecciones (con `connect`, un 302 se llevaba el Bearer y el service token);
+  - mensajes de hasta 24 MiB (una imagen de 15 MB llega como ~20 MB en base64; antes el tope era de 16 MiB por trama).
+- **Conexión medio abierta.** Sin recibir nada en 50 s, se reconecta.
+- **Espera entre intentos.** Solo vuelve a cero si la conexión duró 30 s.
+- **Solo una revocación desvincula.** Código `revoked` o cierre 4003. Otros rechazos definitivos (4000–4002) dejan el estado «fatal»: sin relanzar solo, pero conservando la sesión. Al revocar se cierra el proceso hijo, que antes quedaba zombi.
+- **`remote-sync` idempotente.** El bridge le manda a Telar el conjunto completo de tabs mirados con su tamaño (el más chico por tab) y Telar suelta los demás. Un pedido perdido ya no deja un tab encogido. Los tamaños fuera de rango se ajustan en vez de rechazarse.
+- **Pantallas.**
+  - Se reenvían sin volver a interpretarlas: el tab se lee del comienzo de la línea, y serde_json conserva el orden de las claves.
+  - Con la salida atascada, de cada par cliente-tab se guarda solo la última.
+- **Reposo.** Sin navegadores (`viewers` vacío), el estado ya no se arma cada segundo: solo cuando algo avisa (hooks, acciones) o al llegar un navegador.
+- **`Session::from_json`.**
+  - Los secretos solo pueden tener caracteres de token: iban a la configuración de curl y una comilla permitía inyectar opciones.
+  - `server` debe ser https.
+  - `localhost` se compara por host exacto.
+- **Pegado por SSH.**
+  - Carpeta remota del usuario (`${XDG_RUNTIME_DIR:-$HOME/.cache}/telar-pegado`), creada con `sh -c` (la shell del usuario puede ser fish), con limpieza de lo de más de un día. La ruta la imprime el servidor y se pega escapada.
+  - Opciones seguras primero (en ssh gana la primera): BatchMode, ClearAllForwardings, RemoteCommand=none, PermitLocalCommand=no y RequestTTY=no; `--` antes del destino.
+  - Tiempo límite de 60 s; el archivo se escribe en otro hilo, para llegar al error real de ssh.
+  - La extensión de un archivo soltado se reduce a letras y números.
+- **Menores.**
+  - Login: generación por intento (un intento cancelado no pisa al nuevo); los cortes de red y los 5xx en poll se reintentan.
+  - Hooks en banda: 30 por segundo por tab como máximo.
+  - Nombres de grupo y de dispositivo: sin caracteres de control y con tope de largo.
+  - paste-image: valida que el tab exista y los bytes mágicos; `sips` con tiempo límite.
+  - `remote-paste-file` solo acepta archivos de la carpeta del bridge.
+  - El Llavero solo se consulta una vez por minuto si no hay sesión.
+  - `bridge.log` rota al pasar de 1 MB.
+- **No aplicado:** pasar el Llavero a la API nativa (`security-framework`). Los ítems existentes los creó `/usr/bin/security`, y leerlos desde Telar con la API haría que macOS pidiera permiso. La sesión pesa unos 2 KB, lejos del límite de 4 KB que obligaba a pasar el secreto por argumentos.
+- **Mensaje nuevo:** `{"type":"paste","tab","data"}`. Texto de varias líneas que Telar pega con `paste_bytes` (bracketed paste si el programa lo pidió, sin ESC).

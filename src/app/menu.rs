@@ -107,11 +107,16 @@ impl State {
                 self.config.remote = !self.config.remote;
                 self.config.save();
                 self.bridge_started = None;
+                self.bridge_hold = false;
                 if !self.config.remote {
                     self.remote_release_all();
                     self.remote_viewers.clear();
                 }
                 self.sync_bridge();
+            }
+            (Action::WebViewOnly, _) => {
+                self.config.remote_view_only = !self.config.remote_view_only;
+                self.config.save();
             }
             (Action::WebLogout, _) => self.remote_logout(),
             (Action::WebShowTab(id), _) => {

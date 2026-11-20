@@ -45,6 +45,9 @@ pub struct Config {
     pub remote: bool,
     /// Servidor de Telar web (`None`: el de siempre, `bridge::DEFAULT_SERVER`).
     pub remote_server: Option<String>,
+    /// Desde la web solo se mira: Telar rechaza escribir, responder, crear, cerrar,
+    /// suspender y pegar.
+    pub remote_view_only: bool,
 }
 
 /// Valores del historial por tab que se eligen con − / +.
@@ -74,6 +77,7 @@ impl Default for Config {
             scrollback: 10_000,
             remote: false,
             remote_server: None,
+            remote_view_only: false,
         }
     }
 }
@@ -99,6 +103,7 @@ impl Config {
             "remote": {
                 "enabled": self.remote,
                 "server": self.remote_server,
+                "view_only": self.remote_view_only,
             },
             "appearance": {
                 "theme": self.theme,
@@ -146,6 +151,7 @@ impl Config {
             scrollback: v["general"]["scrollback_lines"].as_u64().map_or(d.scrollback, |n| (n as usize).clamp(SCROLLBACK_STEPS[0], 100_000)),
             remote: v["remote"]["enabled"].as_bool().unwrap_or(d.remote),
             remote_server: v["remote"]["server"].as_str().filter(|s| !s.is_empty()).map(String::from),
+            remote_view_only: v["remote"]["view_only"].as_bool().unwrap_or(d.remote_view_only),
         }
     }
 
@@ -197,6 +203,7 @@ mod tests {
             scrollback: 50_000,
             remote: true,
             remote_server: Some("https://telar.ejemplo.dev".into()),
+            remote_view_only: true,
         };
         assert_eq!(Config::from_json(&c.to_json()), c);
     }

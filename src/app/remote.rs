@@ -72,10 +72,58 @@ impl State {
         self.window.request_redraw();
     }
 
+    /// Alguien empieza a mirar el tab (o cambió su tamaño): toma ese tamaño.
+    fn remote_attach(&mut self, tab: u64, cols: usize, rows: usize) -> Result<(), String> {
+        if !remote::COLS.contains(&cols) || !remote::ROWS.contains(&rows) {
+            return Err(format!("tamaño fuera de rango: {cols}×{rows}"));
+        }
+        // Un tab que esperaba a mostrarse (reanudación perezosa) arranca ya.
+        self.wake_lazy(tab);
+        if self.terms.get(&tab).is_none_or(Terminal::is_suspended) {
+            return Err(if self.terms.contains_key(&tab) { "el tab está suspendido".into() } else { "el tab ya no existe".into() });
+        }
+        let t = self.terms.get_mut(&tab).unwrap();
+        if t.remote_size != Some((cols, rows)) {
+            t.set_remote_size(Some((cols, rows)));
+            self.remote.state_dirty = true;
+            self.window.request_redraw();
+        }
+        let w = self.remote.watches.entry(tab).or_insert(remote::Watch { seq: 0, dirty: true, sent: None });
+        w.dirty = true;
+        Ok(())
+    }
+
+    /// `remote-sync`: el conjunto completo de tabs que se miran y su tamaño. Lo que no
+    /// está, se suelta. Es idempotente: si se perdió un pedido, el siguiente lo corrige.
+    fn remote_sync(&mut self, body: &Value) -> Value {
+        let wanted: HashMap<u64, (usize, usize)> = body["tabs"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| Some((k.parse().ok()?, (v[0].as_u64()? as usize, v[1].as_u64()? as usize))))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let stale: Vec<u64> = self.remote.watches.keys().filter(|id| !wanted.contains_key(id)).copied().collect();
+        for id in stale {
+            self.remote_release(id);
+        }
+        let mut errors = serde_json::Map::new();
+        for (tab, (cols, rows)) in wanted {
+            if let Err(e) = self.remote_attach(tab, cols, rows) {
+                errors.insert(tab.to_string(), json!(e));
+            }
+        }
+        json!({ "ok": true, "errors": errors })
+    }
+
     /// Pedidos `remote-*` del bridge.
     pub(crate) fn ipc_remote(&mut self, cmd: &str, body: &Value) -> Value {
         if cmd == "remote-new" {
             return self.remote_new(body);
+        }
+        if cmd == "remote-sync" {
+            return self.remote_sync(body);
         }
         if cmd == "remote-delete-group" {
             let name = body["group"].as_str().unwrap_or_default();
@@ -94,22 +142,10 @@ impl State {
             "remote-attach" => {
                 let cols = body["cols"].as_u64().unwrap_or(0) as usize;
                 let rows = body["rows"].as_u64().unwrap_or(0) as usize;
-                if !remote::COLS.contains(&cols) || !remote::ROWS.contains(&rows) {
-                    return json!({ "ok": false, "error": format!("tamaño fuera de rango: {cols}×{rows}") });
+                match self.remote_attach(tab, cols, rows) {
+                    Ok(()) => json!({ "ok": true, "id": tab }),
+                    Err(e) => json!({ "ok": false, "error": e }),
                 }
-                // Un tab que esperaba a mostrarse (reanudación perezosa) arranca ya.
-                self.wake_lazy(tab);
-                if self.terms.get(&tab).is_none_or(Terminal::is_suspended) {
-                    return json!({ "ok": false, "error": "el tab está suspendido" });
-                }
-                if let Some(t) = self.terms.get_mut(&tab) {
-                    t.set_remote_size(Some((cols, rows)));
-                }
-                let w = self.remote.watches.entry(tab).or_insert(remote::Watch { seq: 0, dirty: true, sent: None });
-                w.dirty = true;
-                self.remote.state_dirty = true;
-                self.window.request_redraw();
-                json!({ "ok": true, "id": tab })
             }
             "remote-release" => {
                 self.remote_release(tab);
@@ -132,6 +168,17 @@ impl State {
                 t.write(digit.as_bytes().to_vec());
                 json!({ "ok": true, "id": tab })
             }
+            "remote-paste" => {
+                let text = body["text"].as_str().unwrap_or_default();
+                let t = &self.terms[&tab];
+                if t.is_suspended() {
+                    return json!({ "ok": false, "error": "el tab está suspendido" });
+                }
+                let mode = *t.term.lock().mode();
+                t.touch();
+                t.write(input::paste_bytes(text, mode));
+                json!({ "ok": true, "id": tab })
+            }
             "remote-close" => {
                 if self.close_term(tab) {
                     // Era el último tab: Telar sigue con un grupo nuevo en lugar de cerrarse.
@@ -148,6 +195,13 @@ impl State {
                 let Some(path) = body["path"].as_str().map(PathBuf::from).filter(|p| p.is_file()) else {
                     return json!({ "ok": false, "error": "no llegó el archivo" });
                 };
+                // Solo lo que dejó el bridge (no cualquier archivo del Mac, que por SSH se
+                // subiría al servidor).
+                let dir = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches/Telar/pegado"));
+                let inside = dir.and_then(|d| d.canonicalize().ok()).zip(path.canonicalize().ok()).is_some_and(|(d, p)| p.starts_with(d));
+                if !inside {
+                    return json!({ "ok": false, "error": "ese archivo no vino de Telar web" });
+                }
                 if self.terms.get(&tab).is_some_and(Terminal::is_remote) {
                     let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
                     return match self.ssh_upload_to(tab, move || std::fs::read(&path).map(|b| (b, ext)).map_err(|e| e.to_string())) {
@@ -183,20 +237,27 @@ impl State {
         if let Some(mut c) = self.bridge.take() {
             let _ = c.wait();
         }
-        // Si se cayó, no se relanza en bucle: como mucho una vez por minuto.
-        if self.bridge_started.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+        // Si se cayó, no se relanza en bucle: como mucho una vez por minuto. Tras un rechazo
+        // definitivo del servidor, solo a mano.
+        if self.bridge_hold || self.bridge_started.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
             return;
         }
+        // También cuenta sin sesión: así no se consulta el Llavero cada 5 s.
+        self.bridge_started = Some(Instant::now());
         if bridge::Session::load().is_none() {
             self.bridge_status = ("off".into(), "sin sesión".into());
             return;
         }
         let (Ok(exe), Some(server)) = (std::env::current_exe(), self.server.as_ref()) else { return };
-        self.bridge_started = Some(Instant::now());
         // Su bitácora, para diagnosticar una conexión que falla.
         let log = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/Logs/Telar")).and_then(|dir| {
             std::fs::create_dir_all(&dir).ok()?;
-            std::fs::OpenOptions::new().create(true).append(true).open(dir.join("bridge.log")).ok()
+            let path = dir.join("bridge.log");
+            // Rota al pasar de 1 MB (queda la anterior como bridge.log.1).
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1024 * 1024) {
+                let _ = std::fs::rename(&path, dir.join("bridge.log.1"));
+            }
+            std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
         });
         match std::process::Command::new(exe)
             .arg("bridge")
@@ -236,13 +297,33 @@ impl State {
                     self.config.remote = false;
                     self.config.save();
                     let _ = bridge::Session::forget();
+                    self.stop_bridge();
+                }
+                // Otro rechazo definitivo (versión, otra conexión de este Mac): no se relanza
+                // solo, pero la sesión se conserva (se reintenta al conectar a mano).
+                if status == "fatal" {
+                    self.bridge_hold = true;
+                    self.stop_bridge();
                 }
                 self.bridge_status = (status, detail);
                 self.window.request_redraw();
                 json!({ "ok": true })
             }
+            // La primera acción de un dispositivo en esta conexión: se avisa en el Mac (por si
+            // no fuiste tú, el aviso lo genera el bridge, no el relevo).
+            "remote-notice" => {
+                let device = body["device"].as_str().unwrap_or("un navegador").chars().take(60).collect::<String>();
+                let what = body["action"].as_str().unwrap_or("actuar");
+                let tab = body["tab"].as_u64().filter(|id| self.terms.contains_key(id));
+                let place = tab.and_then(|id| self.terms.get(&id)).and_then(Terminal::label).map(|l| format!(" en «{l}»")).unwrap_or_default();
+                notify::send("Telar web", &format!("{device} empezó a {what}{place}"), tab);
+                json!({ "ok": true })
+            }
             "remote-viewers" => {
                 self.remote_viewers = remote::viewers_from(&body["list"]);
+                // Con alguien mirando, el estado se revisa cada segundo; sin nadie, solo por eventos.
+                self.remote.poll = !self.remote_viewers.is_empty();
+                self.remote.state_dirty = true;
                 self.window.request_redraw();
                 json!({ "ok": true })
             }
@@ -259,9 +340,15 @@ impl State {
                 json!({ "ok": true })
             }
             "remote-control" => {
+                if let Some(v) = body["view_only"].as_bool() {
+                    self.config.remote_view_only = v;
+                    self.config.save();
+                }
                 if let Some(on) = body["enabled"].as_bool() {
                     self.config.remote = on;
                     self.config.save();
+                    // Conectar a mano vuelve a intentar aunque el servidor lo haya rechazado.
+                    self.bridge_hold = false;
                     // Un cambio de credenciales (setup) se aplica relanzando.
                     if body["restart"] == json!(true) || !on {
                         self.bridge_started = None;
@@ -280,6 +367,7 @@ impl State {
         json!({
             "ok": true,
             "enabled": self.config.remote,
+            "view_only": self.config.remote_view_only,
             "who": self.remote_session.as_ref().map(|s| s.who.clone()),
             "server": self.remote_server(),
             "login": self.remote_login.as_ref().map(|l| json!({ "user_code": l.user_code, "url": l.url })),
@@ -306,7 +394,9 @@ impl State {
             l.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.remote_login = Some(remote::LoginUi { user_code: None, url: String::new(), cancel: cancel.clone() });
+        let generation = self.remote_login_generation.wrapping_add(1);
+        self.remote_login_generation = generation;
+        self.remote_login = Some(remote::LoginUi { generation, user_code: None, url: String::new(), cancel: cancel.clone() });
         self.bridge_status = ("login".into(), "pidiendo el código…".into());
         let server = self.remote_server();
         let proxy = self.proxy.clone();
@@ -316,13 +406,13 @@ impl State {
         std::thread::spawn(move || {
             let start = match bridge::login_start(&server) {
                 Ok(s) => s,
-                Err(e) => return send(remote::LoginEvent::Failed(e)),
+                Err(e) => return send(remote::LoginEvent::Failed(generation, e)),
             };
             // TELAR_REMOTE_NO_BROWSER: para pruebas (la autorización la hace otro).
             if std::env::var_os("TELAR_REMOTE_NO_BROWSER").is_none() {
                 let _ = std::process::Command::new("/usr/bin/open").arg(&start.verification_url).status();
             }
-            send(remote::LoginEvent::Started { user_code: start.user_code.clone(), url: start.verification_url.clone() });
+            send(remote::LoginEvent::Started { generation, user_code: start.user_code.clone(), url: start.verification_url.clone() });
             let mut interval = start.interval;
             loop {
                 std::thread::sleep(interval);
@@ -330,20 +420,20 @@ impl State {
                     return;
                 }
                 if Instant::now() >= start.expires {
-                    return send(remote::LoginEvent::Failed("el código venció: vuelve a iniciar sesión".into()));
+                    return send(remote::LoginEvent::Failed(generation, "el código venció: vuelve a iniciar sesión".into()));
                 }
                 match bridge::login_poll(&server, &start.device_code) {
                     bridge::Poll::Pending => {}
                     bridge::Poll::SlowDown => interval += Duration::from_secs(2),
-                    bridge::Poll::Failed(e) => return send(remote::LoginEvent::Failed(e)),
+                    bridge::Poll::Failed(e) => return send(remote::LoginEvent::Failed(generation, e)),
                     bridge::Poll::Done(session) => {
                         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                             return;
                         }
                         let info = remote::SessionInfo { who: session.who(), server: session.server.clone() };
                         return match session.save() {
-                            Ok(()) => send(remote::LoginEvent::Done(info)),
-                            Err(e) => send(remote::LoginEvent::Failed(e)),
+                            Ok(()) => send(remote::LoginEvent::Done(generation, info)),
+                            Err(e) => send(remote::LoginEvent::Failed(generation, e)),
                         };
                     }
                 }
@@ -377,37 +467,51 @@ impl State {
         if let Some(s) = session {
             let proxy = self.proxy.clone();
             std::thread::spawn(move || {
-                s.revoke();
-                let _ = proxy.send_event(UserEvent::RemoteLogin(remote::LoginEvent::LoggedOut));
+                let result = s.revoke().err();
+                let _ = proxy.send_event(UserEvent::RemoteLogin(remote::LoginEvent::LoggedOut(result)));
             });
         }
         self.window.request_redraw();
     }
 
     pub(crate) fn on_remote_login(&mut self, ev: remote::LoginEvent) {
+        // Avisos de un intento anterior (cancelado o reemplazado): no pisan al actual.
+        let current = self.remote_login.as_ref().map(|l| l.generation);
+        let stale = match &ev {
+            remote::LoginEvent::Started { generation, .. } | remote::LoginEvent::Done(generation, _) | remote::LoginEvent::Failed(generation, _) => current != Some(*generation),
+            remote::LoginEvent::LoggedOut(_) => false,
+        };
+        if stale {
+            return;
+        }
         match ev {
-            remote::LoginEvent::Started { user_code, url } => {
+            remote::LoginEvent::Started { user_code, url, .. } => {
                 if let Some(l) = self.remote_login.as_mut() {
                     l.user_code = user_code;
                     l.url = url;
                 }
                 self.bridge_status = ("login".into(), "autorízalo en el navegador".into());
             }
-            remote::LoginEvent::Done(info) => {
+            remote::LoginEvent::Done(_, info) => {
                 self.remote_login = None;
                 log::info!("telar remoto: sesión iniciada como {}", info.who);
                 self.remote_session = Some(info);
                 self.config.remote = true;
                 self.config.save();
                 self.bridge_started = None;
+                self.bridge_hold = false;
                 self.stop_bridge();
                 self.sync_bridge();
             }
-            remote::LoginEvent::Failed(e) => {
+            remote::LoginEvent::Failed(_, e) => {
                 self.remote_login = None;
                 self.bridge_status = ("error".into(), e);
             }
-            remote::LoginEvent::LoggedOut => {}
+            remote::LoginEvent::LoggedOut(None) => {}
+            remote::LoginEvent::LoggedOut(Some(e)) => {
+                log::warn!("telar remoto: no se pudo revocar el dispositivo: {e}");
+                self.bridge_status = ("error".into(), "Sesión cerrada aquí, pero el servidor no respondió: quita este Mac en Telar web (Mis Macs)".into());
+            }
         }
         self.window.request_redraw();
     }
@@ -424,12 +528,12 @@ impl State {
             let status = match self.bridge_status.0.as_str() {
                 "connected" => "conectado",
                 "connecting" => "conectando",
-                "error" => "con error",
+                "error" | "fatal" => "con error",
                 _ if !self.config.remote => "desconectado",
                 _ => "",
             };
             items.push(MenuItem::owned(icons::USER, session.who.clone(), Action::WebOpen).with_detail(status.to_string()));
-            if self.bridge_status.0 == "error" && !self.bridge_status.1.is_empty() {
+            if matches!(self.bridge_status.0.as_str(), "error" | "fatal") && !self.bridge_status.1.is_empty() {
                 items.push(MenuItem::owned(icons::CIRCLE_ALERT, self.bridge_status.1.clone(), Action::WebOpen));
             }
             items.push(MenuItem::separator());
@@ -449,6 +553,9 @@ impl State {
             items.push(MenuItem::new(icons::EXTERNAL_LINK, "Abrir Telar web", &[], Action::WebOpen));
             let (icon, label) = if self.config.remote { (icons::UNPLUG, "Desconectar este Mac") } else { (icons::PLUG, "Conectar este Mac") };
             items.push(MenuItem::new(icon, label, &[], Action::WebToggle));
+            // Desde la web solo se mira (no se escribe, ni se crea, cierra o suspende nada).
+            let icon = if self.config.remote_view_only { icons::CHECK } else { icons::EYE };
+            items.push(MenuItem::new(icon, "Solo ver desde la web", &[], Action::WebViewOnly).with_detail(if self.config.remote_view_only { "activo".into() } else { String::new() }));
             items.push(MenuItem::new(icons::LOG_OUT, "Cerrar sesión", &[], Action::WebLogout));
         } else {
             items.push(MenuItem::new(icons::LOG_IN, "Iniciar sesión en Telar web", &[], Action::WebLogin));
@@ -474,7 +581,13 @@ impl State {
             "claude" => true,
             other => return json!({ "ok": false, "error": format!("tipo desconocido: {other} (usa shell o claude)") }),
         };
-        let name = body["name"].as_str().or(body["group"].as_str()).map(str::trim).filter(|n| !n.is_empty()).map(String::from);
+        // Nombre de grupo desde la web: sin caracteres de control y de 80 como máximo.
+        let name = body["name"]
+            .as_str()
+            .or(body["group"].as_str())
+            .map(|n| n.chars().filter(|c| !c.is_control()).take(80).collect::<String>())
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty());
         let existing = (!body["new_group"].as_bool().unwrap_or(false))
             .then(|| name.as_ref().and_then(|n| self.ws.groups.iter().position(|g| g.name.eq_ignore_ascii_case(n))))
             .flatten();

@@ -396,6 +396,7 @@ pub enum Action {
     WebOpen,
     WebOpenLogin,
     WebToggle,
+    WebViewOnly,
     WebLogout,
     WebShowTab(u64),
 }
@@ -1143,7 +1144,7 @@ fn draw_web(k: &mut Kit, l: &Layout, v: &View) {
     let count = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
     let (icon, color, dot) = match (w.who, w.status) {
         (_, "login") => (icons::LOG_IN, th.attention, Some(th.attention)),
-        (_, "error") => (icons::CLOUD_OFF, th.danger, Some(th.danger)),
+        (_, "error" | "fatal") => (icons::CLOUD_OFF, th.danger, Some(th.danger)),
         (Some(_), "connected") if watching => (icons::SMARTPHONE, th.done, Some(th.done)),
         (Some(_), "connected") => (icons::CLOUD, th.text, Some(th.accent)),
         (Some(_), "connecting") => (icons::CLOUD, th.text_dim, Some(th.attention)),
@@ -1159,7 +1160,7 @@ fn draw_web(k: &mut Kit, l: &Layout, v: &View) {
             Some(code) => format!("Código {code}"),
             None => "Abriendo el navegador…".to_string(),
         },
-        (_, "error") if !w.detail.is_empty() => w.detail.to_string(),
+        (_, "error" | "fatal") if !w.detail.is_empty() => w.detail.to_string(),
         (_, "revoked") => "Sesión cerrada desde la web".to_string(),
         // Alguien mira un tab, o solo tiene Telar web abierto.
         (Some(_), "connected") if w.watching > 0 => match (w.watching, w.device) {

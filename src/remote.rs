@@ -41,6 +41,8 @@ pub struct SessionInfo {
 
 /// Inicio de sesión en curso: esperando que lo autorices en el navegador.
 pub struct LoginUi {
+    /// Número de este intento: los avisos de uno anterior (cancelado) se ignoran.
+    pub generation: u64,
     pub user_code: Option<String>,
     pub url: String,
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -48,10 +50,11 @@ pub struct LoginUi {
 
 #[derive(Debug)]
 pub enum LoginEvent {
-    Started { user_code: Option<String>, url: String },
-    Done(SessionInfo),
-    Failed(String),
-    LoggedOut,
+    Started { generation: u64, user_code: Option<String>, url: String },
+    Done(u64, SessionInfo),
+    Failed(u64, String),
+    /// Se cerró la sesión; con el error si no se pudo avisar al servidor.
+    LoggedOut(Option<String>),
 }
 
 /// Un navegador que mira este Mac (según el relevo).
@@ -68,8 +71,8 @@ pub struct Viewer {
 pub fn viewers_from(list: &Value) -> Vec<Viewer> {
     let mut out: Vec<(String, Viewer)> = Vec::new();
     for v in list.as_array().into_iter().flatten() {
-        let device = v["device"].as_str().unwrap_or("Navegador").to_string();
-        let key = v["browser"].as_str().map_or_else(|| device.clone(), String::from);
+        let device: String = v["device"].as_str().unwrap_or("Navegador").chars().filter(|c| !c.is_control()).take(60).collect();
+        let key = v["browser"].as_str().map_or_else(|| device.clone(), |b| b.chars().take(80).collect());
         let tab = v["tab"].as_u64();
         match out.iter_mut().find(|(k, _)| *k == key) {
             Some((_, seen)) => seen.tab = seen.tab.or(tab),
@@ -94,6 +97,9 @@ pub struct Hub {
     /// Algo cambió (un hook, un tab nuevo…): el estado se manda en cuanto se pueda.
     pub state_dirty: bool,
     pub watches: HashMap<u64, Watch>,
+    /// Hay alguien con Telar web abierto: el estado se revisa cada `STATE_EVERY` (títulos,
+    /// preguntas que aparecen en pantalla…). Sin nadie, solo cuando algo avisa (un hook).
+    pub poll: bool,
 }
 
 impl Hub {
@@ -126,7 +132,7 @@ impl Hub {
         match since {
             None => true,
             Some(d) if d < STATE_MIN => false,
-            Some(d) => self.state_dirty || d >= STATE_EVERY,
+            Some(d) => self.state_dirty || (self.poll && d >= STATE_EVERY),
         }
     }
 
@@ -147,9 +153,17 @@ impl Hub {
         if !self.active() {
             return None;
         }
-        let state = self.state_sent.map_or(now, |t| t + if self.state_dirty { STATE_MIN } else { STATE_EVERY });
+        let state = match (self.state_dirty, self.poll) {
+            (true, _) => Some(self.state_sent.map_or(now, |t| t + STATE_MIN)),
+            (false, true) => Some(self.state_sent.map_or(now, |t| t + STATE_EVERY)),
+            // Nadie mira y nada cambió: no hay por qué despertar.
+            (false, false) => None,
+        };
         let screens = self.watches.values().filter(|w| w.dirty).map(|w| w.sent.map_or(now, |t| t + SCREEN_EVERY)).min();
-        Some(screens.map_or(state, |s| s.min(state)))
+        match (state, screens) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 }
 
@@ -265,6 +279,7 @@ mod tests {
         let mut hub = Hub::default();
         let (tx, rx) = mpsc::channel();
         hub.subscribe(tx);
+        hub.poll = true;
         let t0 = Instant::now();
         assert!(hub.state_due(t0));
         assert!(hub.send_state(json!({"a":1}), t0));
@@ -276,6 +291,13 @@ mod tests {
         hub.state_dirty = true;
         assert!(!hub.state_due(t0 + STATE_EVERY + Duration::from_millis(10)));
         assert!(hub.state_due(t0 + STATE_EVERY + STATE_MIN));
+        // Sin nadie con la web abierta, no se revisa por tiempo: solo si algo cambió.
+        hub.poll = false;
+        hub.state_dirty = false;
+        assert!(!hub.state_due(t0 + STATE_EVERY * 2));
+        assert_eq!(hub.next_wake(t0 + STATE_EVERY * 2), None);
+        hub.state_dirty = true;
+        assert!(hub.state_due(t0 + STATE_EVERY * 2));
         // Se fue el suscriptor: ya no hay nadie.
         drop(rx);
         assert!(!hub.send_state(json!({"a":2}), t0 + STATE_EVERY * 3));

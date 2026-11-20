@@ -4,6 +4,17 @@ use crate::*;
 
 impl State {
     pub(crate) fn on_ipc(&mut self, body: &Value) -> Value {
+        // Pedidos que vienen de Telar web (el bridge los marca): en modo «solo ver», nada
+        // que cambie algo en el Mac.
+        if body["remote"] == json!(true) && self.config.remote_view_only {
+            let acts = matches!(
+                body["cmd"].as_str(),
+                Some("send" | "suspend" | "resume" | "remote-new" | "remote-close" | "remote-delete-group" | "remote-paste-file" | "remote-paste" | "remote-answer")
+            );
+            if acts {
+                return json!({ "ok": false, "code": "view-only", "error": "Este Mac solo deja mirar desde Telar web (modo «Solo ver»)" });
+            }
+        }
         match body["cmd"].as_str() {
             Some("hook") => {
                 if let Some(tab) = body["tab"].as_u64() {
@@ -14,10 +25,10 @@ impl State {
             }
             Some("tabs") => self.tabs_json(),
             Some("browser") => self.ipc_browser(body),
-            Some(cmd @ ("remote-attach" | "remote-release" | "remote-answer" | "remote-new" | "remote-close" | "remote-delete-group" | "remote-paste-file")) => {
+            Some(cmd @ ("remote-attach" | "remote-release" | "remote-answer" | "remote-new" | "remote-close" | "remote-delete-group" | "remote-paste-file" | "remote-paste" | "remote-sync")) => {
                 self.ipc_remote(cmd, body)
             }
-            Some(cmd @ ("remote-status" | "remote-control" | "remote-info" | "remote-viewers" | "remote-login" | "remote-logout")) => {
+            Some(cmd @ ("remote-status" | "remote-control" | "remote-info" | "remote-viewers" | "remote-login" | "remote-logout" | "remote-notice")) => {
                 self.ipc_remote_admin(cmd, body)
             }
             Some("status") => match self.resolve_tab(&body["tab"]) {

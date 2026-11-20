@@ -270,10 +270,13 @@ struct State {
     /// Proceso `telar bridge` (si Telar remoto está activo), cuándo se lanzó y su estado.
     bridge: Option<std::process::Child>,
     bridge_started: Option<Instant>,
+    /// El servidor rechazó al bridge de forma definitiva: no se relanza solo.
+    bridge_hold: bool,
     bridge_status: (String, String),
     /// Sesión de Telar web (quién y en qué servidor), inicio de sesión en curso y quién mira.
     remote_session: Option<remote::SessionInfo>,
     remote_login: Option<remote::LoginUi>,
+    remote_login_generation: u64,
     remote_viewers: Vec<remote::Viewer>,
     /// Diálogo de confirmación abierto (eliminar un grupo).
     confirm: Option<confirm::Confirm>,
@@ -385,9 +388,11 @@ impl ApplicationHandler<UserEvent> for App {
             remote: remote::Hub::default(),
             bridge: None,
             bridge_started: None,
+            bridge_hold: false,
             bridge_status: ("off".into(), String::new()),
             remote_session: None,
             remote_login: None,
+            remote_login_generation: 0,
             remote_viewers: Vec::new(),
             confirm: None,
             link_cell: None,

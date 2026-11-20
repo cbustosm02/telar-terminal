@@ -8,7 +8,11 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 /// Carpeta remota donde quedan los archivos subidos.
-const REMOTE_DIR: &str = "/tmp/telar-pegado";
+/// Carpeta remota, del usuario (no `/tmp`, compartido entre usuarios): la que el sistema
+/// le da al usuario o, si no hay, su caché.
+const REMOTE_DIR: &str = "${XDG_RUNTIME_DIR:-$HOME/.cache}/telar-pegado";
+/// Tiempo máximo para subir un archivo.
+const UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Más grande que esto no se sube (es para imágenes y archivos chicos).
 pub const MAX_BYTES: usize = 50 * 1024 * 1024;
 
@@ -68,38 +72,92 @@ fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Lo que corre la shell del servidor: guarda stdin en `path` (solo para el usuario).
-fn remote_command(path: &str) -> String {
-    format!("umask 077; mkdir -p {REMOTE_DIR} && cat > {} && echo ok", quote(path))
+/// Extensión segura (solo letras y números, hasta 8): viene del nombre de un archivo
+/// soltado, que puede traer cualquier cosa.
+pub fn safe_ext(ext: &str) -> String {
+    let e = ext.trim_start_matches('.');
+    if !e.is_empty() && e.len() <= 8 && e.bytes().all(|b| b.is_ascii_alphanumeric()) { format!(".{}", e.to_ascii_lowercase()) } else { String::new() }
 }
+
+/// Lo que corre el servidor: con `sh` (la shell del usuario puede ser fish), guarda stdin
+/// en su carpeta (solo para él), borra lo de más de un día e imprime la ruta.
+fn remote_command(name: &str) -> String {
+    let script = format!(
+        "umask 077; d=\"{REMOTE_DIR}\"; mkdir -p \"$d\" && find \"$d\" -type f -mtime +0 -exec rm -f {{}} + 2>/dev/null; cat > \"$d\"/{name} && printf '%s\\n' \"$d\"/{name}"
+    );
+    format!("sh -c {}", quote(&script))
+}
+
+/// Opciones que van primero (en ssh gana el primer valor de cada una): sin preguntar
+/// nada, sin reenvíos de puertos ni comandos de `~/.ssh/config` (chocarían con la
+/// conexión abierta o con la subida), sin terminal.
+const SAFE_OPTS: &[&str] = &[
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=10",
+    "-o", "ClearAllForwardings=yes",
+    "-o", "RemoteCommand=none",
+    "-o", "PermitLocalCommand=no",
+    "-o", "RequestTTY=no",
+    "-o", "ForwardAgent=no",
+    "-o", "ForwardX11=no",
+];
 
 /// Sube `bytes` al servidor de `target` y devuelve la ruta remota.
 pub fn upload(target: &[String], bytes: &[u8], ext: &str) -> Result<String, String> {
+    use std::io::Read;
     if bytes.len() > MAX_BYTES {
         return Err(format!("el archivo pasa de {} MB", MAX_BYTES / 1024 / 1024));
     }
-    let path = format!("{REMOTE_DIR}/{}", remote_name(ext));
-    let remote = remote_command(&path);
+    let name = remote_name(&safe_ext(ext));
     let (opts, dest) = target.split_at(target.len() - 1);
     let mut child = Command::new("/usr/bin/ssh")
+        .args(SAFE_OPTS)
         .args(opts)
-        // Sin preguntar nada (no hay dónde): con llave o con una conexión compartida.
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-T"])
+        .arg("--")
         .args(dest)
-        .arg(remote)
+        .arg(remote_command(&name))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("no se pudo ejecutar ssh: {e}"))?;
+    // El archivo se escribe en otro hilo: si ssh falla antes de leerlo todo, igual se
+    // llega a su mensaje de error (en vez de un «broken pipe»).
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(bytes).map_err(|e| format!("no se pudo enviar el archivo: {e}"))?;
+        let bytes = bytes.to_vec();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&bytes);
+        });
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "ok" {
+    let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
+    let reader = std::thread::spawn(move || {
+        let (mut o, mut e) = (String::new(), String::new());
+        if let Some(s) = out.as_mut() {
+            let _ = s.read_to_string(&mut o);
+        }
+        if let Some(s) = err.as_mut() {
+            let _ = s.read_to_string(&mut e);
+        }
+        (o, e)
+    });
+    let deadline = std::time::Instant::now() + UPLOAD_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("el servidor no respondió a tiempo".into());
+            }
+        }
+    };
+    let (stdout, stderr) = reader.join().unwrap_or_default();
+    let path = stdout.trim().lines().last().unwrap_or_default().to_string();
+    if status.success() && path.starts_with('/') && path.ends_with(&name) {
         return Ok(path);
     }
-    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let err = stderr.trim().to_string();
     Err(if err.contains("Permission denied") || err.contains("password") {
         "el servidor pide contraseña: con una llave SSH (o ControlMaster) Telar puede subirlo".into()
     } else if err.is_empty() {
@@ -147,19 +205,40 @@ mod tests {
         assert_eq!(target(&v(&["ssh", "--", "srv"])), Some(v(&["srv"])));
     }
 
-    /// El comando remoto, corrido con la shell de este Mac: guarda el archivo tal cual.
+    /// El comando remoto, corrido con la shell de este Mac (con otro HOME): guarda el
+    /// archivo tal cual, solo para el usuario, e imprime la ruta.
     #[test]
     fn comando_remoto_guarda_el_archivo() {
-        let path = format!("{REMOTE_DIR}/{}", remote_name(".png"));
+        let home = std::env::temp_dir().join(format!("telar-sshpaste-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let name = remote_name(".png");
         let bytes: Vec<u8> = (0..=255u8).cycle().take(70_000).collect();
-        let mut child = Command::new("/bin/sh").arg("-c").arg(remote_command(&path)).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        // La cadena entera pasa por /bin/sh -c, como la recibe la shell del servidor.
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(remote_command(&name))
+            .env("HOME", &home)
+            .env_remove("XDG_RUNTIME_DIR")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
         child.stdin.take().unwrap().write_all(&bytes).unwrap();
         let out = child.wait_with_output().unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(path, home.join(".cache/telar-pegado").join(&name).display().to_string());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn extensiones_seguras() {
+        assert_eq!(safe_ext(".PNG"), ".png");
+        assert_eq!(safe_ext("png;curl x|sh"), "");
+        assert_eq!(safe_ext(".a\nb"), "");
+        assert_eq!(safe_ext(""), "");
     }
 
     #[test]

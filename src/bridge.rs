@@ -54,8 +54,25 @@ pub struct Session {
     pub name: Option<String>,
 }
 
+/// La URL apunta a este mismo Mac (pruebas con el relevo local): el host exacto, sin
+/// puerto. `http://localhost.evil.com` no cuenta.
 fn local(url: &str) -> bool {
-    ["://127.0.0.1", "://localhost"].iter().any(|h| url.contains(h))
+    let host = host(url);
+    let host = host.rsplit_once('@').map_or(host.as_str(), |(_, h)| h);
+    let name = if host.starts_with('[') { host.split(']').next().map(|h| format!("{h}]")).unwrap_or_default() } else { host.split(':').next().unwrap_or_default().to_string() };
+    matches!(name.as_str(), "127.0.0.1" | "localhost" | "[::1]")
+}
+
+/// `https://` (o `http://` a este Mac).
+fn secure_http(url: &str) -> bool {
+    url.starts_with("https://") || (url.starts_with("http://") && local(url))
+}
+
+/// Un secreto (token, service token) solo con caracteres de token: va dentro de una
+/// cabecera y de la configuración de curl, donde una comilla o un salto de línea
+/// permitiría inyectar opciones.
+fn token_chars(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 4096 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._~+/=-:".contains(&b))
 }
 
 impl Session {
@@ -63,6 +80,10 @@ impl Session {
     pub fn from_json(v: &Value, server: &str) -> Result<Self, String> {
         let s = |k: &str| v[k].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
         let server = s("server").unwrap_or_else(|| server.trim_end_matches('/').to_string());
+        // A este servidor van las credenciales al cerrar sesión: cifrado siempre.
+        if !server.is_empty() && !secure_http(&server) {
+            return Err("el servidor debe ser https://".into());
+        }
         let bridge_url = s("bridge_url").ok_or("el servidor no mandó bridge_url")?;
         // Cifrado siempre, salvo a este mismo Mac (pruebas con el relevo local).
         if !(bridge_url.starts_with("wss://") || (bridge_url.starts_with("ws://") && local(&bridge_url))) {
@@ -70,13 +91,22 @@ impl Session {
         }
         let user = |k: &str| v["user"][k].as_str().or_else(|| v[k].as_str()).map(String::from);
         let access = match (v["access"]["client_id"].as_str(), v["access"]["client_secret"].as_str()) {
-            (Some(id), Some(secret)) if !id.is_empty() && !secret.is_empty() => Some((id.to_string(), secret.to_string())),
+            (Some(id), Some(secret)) if !id.is_empty() && !secret.is_empty() => {
+                if !token_chars(id) || !token_chars(secret) {
+                    return Err("el service token tiene caracteres no válidos".into());
+                }
+                Some((id.to_string(), secret.to_string()))
+            }
             _ => None,
         };
+        let token = s("token").ok_or("el servidor no mandó token")?;
+        if !token_chars(&token) {
+            return Err("el token tiene caracteres no válidos".into());
+        }
         Ok(Self {
             server,
             bridge_url,
-            token: s("token").ok_or("el servidor no mandó token")?,
+            token,
             access,
             device_id: s("device_id"),
             email: user("email"),
@@ -86,7 +116,7 @@ impl Session {
 
     fn to_json(&self) -> String {
         let access = self.access.as_ref().map(|(id, secret)| json!({ "client_id": id, "client_secret": secret }));
-        json!({ "server": self.server, "bridge_url": self.bridge_url, "token": self.token, "access": access, "device_id": self.device_id, "email": self.email, "name": self.name, "user": { "email": self.email, "name": self.name } }).to_string()
+        json!({ "server": self.server, "bridge_url": self.bridge_url, "token": self.token, "access": access, "device_id": self.device_id, "user": { "email": self.email, "name": self.name } }).to_string()
     }
 
     /// Del Llavero; para pruebas, de `TELAR_REMOTE_CODE` (el mismo JSON).
@@ -109,10 +139,13 @@ impl Session {
         crate::cuentas::kc_delete(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
     }
 
-    /// Le avisa al servidor que este dispositivo cerró sesión (si responde; si no, la web
-    /// lo puede revocar a mano).
-    pub fn revoke(&self) {
-        let _ = post(&format!("{}/api/devices/revoke", self.server), &json!({}), Some(self));
+    /// Le avisa al servidor que este dispositivo cerró sesión. Si no responde, la web lo
+    /// puede revocar a mano (la app lo avisa).
+    pub fn revoke(&self) -> Result<(), String> {
+        match post(&format!("{}/api/devices/revoke", self.server), &json!({}), Some(self))? {
+            (code, _) if (200..300).contains(&code) || code == 401 => Ok(()),
+            (code, v) => Err(http_error(code, &v)),
+        }
     }
 
     /// Quién está conectado, para mostrar: el correo o, si no, el servidor.
@@ -174,9 +207,16 @@ fn spawn_with_fd3(mut cmd: Command, extra: Option<String>) -> Result<std::proces
         return Err("no se pudo crear la tubería".into());
     }
     let (read, write) = (fds[0], fds[1]);
+    // Que el hijo no herede ninguno de los dos extremos (si heredara el de escritura,
+    // curl nunca vería el fin del archivo y quedaría colgado leyendo su configuración).
+    // `dup2` a la fd 3 deja esa copia sin FD_CLOEXEC.
+    for fd in [read, write] {
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
     unsafe {
         cmd.pre_exec(move || {
-            if libc::dup2(read, 3) < 0 {
+            let ok = if read == 3 { libc::fcntl(3, libc::F_SETFD, 0) } else { libc::dup2(read, 3) };
+            if ok < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -203,7 +243,7 @@ pub struct LoginStart {
 
 pub fn login_start(server: &str) -> Result<LoginStart, String> {
     let server = server.trim_end_matches('/');
-    if !(server.starts_with("https://") || (server.starts_with("http://") && local(server))) {
+    if !secure_http(server) {
         return Err("el servidor debe ser https://".into());
     }
     let (code, v) = post(&format!("{server}/api/devices/start"), &json!({ "name": mac_name(), "version": crate::update::VERSION }), None)?;
@@ -215,7 +255,7 @@ pub fn login_start(server: &str) -> Result<LoginStart, String> {
     }
     let device_code = v["device_code"].as_str().ok_or("el servidor no mandó device_code")?.to_string();
     let url = v["verification_url"].as_str().ok_or("el servidor no mandó verification_url")?.to_string();
-    if !(url.starts_with("https://") || (url.starts_with("http://") && local(&url))) {
+    if !secure_http(&url) {
         return Err("la página de autorización no es https://".into());
     }
     Ok(LoginStart {
@@ -239,7 +279,10 @@ pub enum Poll {
 pub fn login_poll(server: &str, device_code: &str) -> Poll {
     let server = server.trim_end_matches('/');
     match post(&format!("{server}/api/devices/poll"), &json!({ "device_code": device_code }), None) {
-        Ok((code, v)) if !(200..300).contains(&code) && code != 429 => Poll::Failed(http_error(code, &v)),
+        Ok((429, _)) => Poll::SlowDown,
+        // Un 5xx o un corte de red es pasajero: se vuelve a preguntar (hasta que venza).
+        Ok((code, _)) if code >= 500 => Poll::Pending,
+        Ok((code, v)) if !(200..300).contains(&code) => Poll::Failed(http_error(code, &v)),
         Ok((_, v)) => match v["status"].as_str() {
             Some("pending") => Poll::Pending,
             Some("slow_down") => Poll::SlowDown,
@@ -251,7 +294,10 @@ pub fn login_poll(server: &str, device_code: &str) -> Poll {
             Some("expired") => Poll::Failed("el código venció: vuelve a iniciar sesión".into()),
             _ => Poll::Failed("respuesta inesperada del servidor".into()),
         },
-        Err(e) => Poll::Failed(e),
+        Err(e) => {
+            log::warn!("telar remoto: poll: {e}");
+            Poll::Pending
+        }
     }
 }
 
@@ -297,6 +343,18 @@ fn save_image(msg: &Value) -> Result<PathBuf, String> {
         return Err(format!("la imagen pasa de {} MB", MAX_IMAGE / 1024 / 1024));
     }
     let bytes = base64_decode(data)?;
+    // Que sea de verdad una imagen del tipo que dice (no un archivo cualquiera renombrado).
+    let magic_ok = match ext {
+        "png" => bytes.starts_with(b"\x89PNG"),
+        "jpg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "gif" => bytes.starts_with(b"GIF8"),
+        "webp" => bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        "heic" => bytes.len() > 12 && &bytes[4..8] == b"ftyp",
+        _ => false,
+    };
+    if !magic_ok {
+        return Err("el archivo no es una imagen válida".into());
+    }
     let dir = paste_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
@@ -319,7 +377,24 @@ fn save_image(msg: &Value) -> Result<PathBuf, String> {
     }
     // Claude no lee HEIC (las fotos del iPhone): se pasa a JPEG con `sips`.
     let jpg = dir.join(format!("{stem}.jpg"));
-    let ok = Command::new("/usr/bin/sips").args(["-s", "format", "jpeg"]).arg(&path).arg("--out").arg(&jpg).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    // Con tiempo límite: una imagen rara no deja colgado al bridge.
+    let ok = match Command::new("/usr/bin/sips").args(["-s", "format", "jpeg"]).arg(&path).arg("--out").arg(&jpg).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        Ok(mut child) => {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(st)) => break st.success(),
+                    Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break false;
+                    }
+                }
+            }
+        }
+        Err(_) => false,
+    };
     let _ = std::fs::remove_file(&path);
     if !ok {
         return Err("no se pudo convertir la foto HEIC".into());
@@ -388,67 +463,115 @@ impl Clients {
     fn watchers(&self, tab: u64) -> Vec<String> {
         self.watching.iter().filter(|(_, (t, ..))| *t == tab).map(|(c, _)| c.clone()).collect()
     }
+
+    /// Tab → tamaño, de todos los que alguien mira (lo que se le manda a Telar entero).
+    fn sizes(&self) -> serde_json::Map<String, Value> {
+        let mut tabs: Vec<u64> = self.watching.values().map(|(t, ..)| *t).collect();
+        tabs.sort_unstable();
+        tabs.dedup();
+        tabs.into_iter().filter_map(|t| self.size_for(t).map(|(c, r)| (t.to_string(), json!([c, r])))).collect()
+    }
+}
+
+/// Columnas y filas que Telar acepta (ver `remote::COLS` y `remote::ROWS`): lo de fuera
+/// se ajusta en vez de rechazarse (un celular girado con letra grande pide 19 columnas).
+fn clamp_size(cols: u64, rows: u64) -> (usize, usize) {
+    let c = (cols as usize).clamp(*crate::remote::COLS.start(), *crate::remote::COLS.end());
+    let r = (rows as usize).clamp(*crate::remote::ROWS.start(), *crate::remote::ROWS.end());
+    (c, r)
 }
 
 struct Bridge {
     socket: PathBuf,
     clients: Clients,
     last_state: Option<Value>,
+    /// Dispositivo de cada cliente (de `viewers`) y los que ya actuaron (ya se avisó).
+    devices: HashMap<String, String>,
+    noticed: std::collections::HashSet<String>,
 }
 
 impl Bridge {
-    fn telar(&self, body: Value) -> Value {
+    /// Pedido al Telar local, marcado como de Telar web (para el modo «solo ver»).
+    fn telar(&self, mut body: Value) -> Value {
+        body["remote"] = json!(true);
         ipc::request_to(&self.socket, &body, true).unwrap_or_else(|e| json!({ "ok": false, "error": e }))
+    }
+
+    /// La primera acción de cada navegador en esta conexión se avisa en el Mac.
+    fn notice(&mut self, client: &str, action: &str, tab: Option<u64>) {
+        if !self.noticed.insert(client.to_string()) {
+            return;
+        }
+        let device = self.devices.get(client).cloned().unwrap_or_else(|| "Un navegador".into());
+        let _ = ipc::request_to(&self.socket, &json!({ "cmd": "remote-notice", "device": device, "action": action, "tab": tab }), false);
     }
 
     fn status(&self, status: &str, detail: &str) {
         let _ = ipc::request_to(&self.socket, &json!({ "cmd": "remote-status", "status": status, "detail": detail }), false);
     }
 
-    fn viewers(&self, list: &Value) {
+    fn viewers(&mut self, list: &Value) {
+        for v in list.as_array().into_iter().flatten() {
+            if let (Some(c), Some(d)) = (v["client"].as_str(), v["device"].as_str()) {
+                self.devices.insert(c.to_string(), d.to_string());
+            }
+        }
         let _ = ipc::request_to(&self.socket, &json!({ "cmd": "remote-viewers", "list": list }), false);
     }
 
-    /// Ajusta el tamaño de un tab a quienes lo miran; sin nadie, lo suelta.
-    fn sync_tab(&self, tab: u64) -> Value {
-        match self.clients.size_for(tab) {
-            Some((cols, rows)) => self.telar(json!({ "cmd": "remote-attach", "tab": tab, "cols": cols, "rows": rows })),
-            None => self.telar(json!({ "cmd": "remote-release", "tab": tab })),
-        }
+    /// Le pasa a Telar el conjunto completo de tabs mirados y su tamaño (idempotente: un
+    /// pedido perdido se corrige con el siguiente). Devuelve los tabs que no se pudieron
+    /// abrir (suspendidos, cerrados) con el motivo.
+    fn sync(&self) -> HashMap<u64, String> {
+        let r = self.telar(json!({ "cmd": "remote-sync", "tabs": self.clients.sizes() }));
+        r["errors"]
+            .as_object()
+            .map(|m| m.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v.as_str().unwrap_or("no se pudo abrir el tab").to_string()))).collect())
+            .unwrap_or_default()
     }
 
     fn release_all(&mut self) {
-        let tabs: Vec<u64> = self.clients.watching.values().map(|(t, ..)| *t).collect();
         self.clients.watching.clear();
-        for tab in tabs {
-            self.sync_tab(tab);
-        }
+        self.noticed.clear();
+        self.devices.clear();
+        self.sync();
     }
 
     /// Un pedido de un navegador. Devuelve los mensajes para ese navegador.
     fn on_client(&mut self, client: &str, msg: &Value) -> Vec<Value> {
         let tab = msg["tab"].as_u64();
         let err = |m: String| vec![json!({ "type": "error", "message": m, "tab": tab })];
-        match msg["type"].as_str().unwrap_or_default() {
+        let kind = msg["type"].as_str().unwrap_or_default();
+        let action = match kind {
+            "input" | "paste" => Some("escribir"),
+            "answer" => Some("responder a Claude"),
+            "new-tab" | "new-group" => Some("crear tabs"),
+            "close-tab" | "delete-group" => Some("cerrar tabs"),
+            "suspend" | "resume" => Some("suspender o reanudar tabs"),
+            "paste-image" => Some("pegar imágenes"),
+            _ => None,
+        };
+        if let Some(action) = action {
+            self.notice(client, action, tab);
+        }
+        match kind {
             "hello" => self.last_state.clone().into_iter().collect(),
             "attach" | "resize" => {
                 let (Some(tab), Some(cols), Some(rows)) = (tab, msg["cols"].as_u64(), msg["rows"].as_u64()) else {
                     return err("faltan tab, cols o rows".into());
                 };
-                let before = self.clients.watching.insert(client.to_string(), (tab, cols as usize, rows as usize));
-                if let Some((old, ..)) = before.filter(|(old, ..)| *old != tab) {
-                    self.sync_tab(old);
-                }
-                let r = self.sync_tab(tab);
-                if r["ok"] == json!(false) {
+                let (cols, rows) = clamp_size(cols, rows);
+                self.clients.watching.insert(client.to_string(), (tab, cols, rows));
+                if let Some(e) = self.sync().remove(&tab) {
                     self.clients.watching.remove(client);
-                    return err(r["error"].as_str().unwrap_or("no se pudo abrir el tab").into());
+                    self.sync();
+                    return err(e);
                 }
                 Vec::new()
             }
             "detach" => {
-                if let Some((t, ..)) = self.clients.watching.remove(client) {
-                    self.sync_tab(t);
+                if self.clients.watching.remove(client).is_some() {
+                    self.sync();
                 }
                 Vec::new()
             }
@@ -459,6 +582,16 @@ impl Bridge {
                 }
                 let r = self.telar(json!({ "cmd": "send", "tab": tab, "text": data, "raw": true }));
                 if r["ok"] == json!(false) { err(r["error"].as_str().unwrap_or("no se pudo escribir").into()) } else { Vec::new() }
+            }
+            // Texto pegado (varias líneas): como pegado del Mac, con bracketed paste si el
+            // programa lo pidió y sin ESC (no se puede cerrar el modo desde el texto).
+            "paste" => {
+                let (Some(tab), Some(data)) = (tab, msg["data"].as_str()) else { return err("faltan tab o data".into()) };
+                if data.len() > MAX_INPUT {
+                    return err(format!("el texto pasa de {} KB", MAX_INPUT / 1024));
+                }
+                let r = self.telar(json!({ "cmd": "remote-paste", "tab": tab, "text": data }));
+                if r["ok"] == json!(false) { err(r["error"].as_str().unwrap_or("no se pudo pegar").into()) } else { Vec::new() }
             }
             "answer" => {
                 let Some(tab) = tab else { return err("falta tab".into()) };
@@ -488,6 +621,13 @@ impl Bridge {
             // Imagen pegada en la web: se guarda aquí y Telar pega su ruta (Claude la adjunta).
             "paste-image" => {
                 let Some(tab) = tab else { return err("falta tab".into()) };
+                // Antes de guardar nada: que el tab exista.
+                let exists = self.last_state.as_ref().is_some_and(|st| {
+                    st["groups"].as_array().into_iter().flatten().flat_map(|g| g["tabs"].as_array().into_iter().flatten()).any(|t| t["id"].as_u64() == Some(tab))
+                });
+                if !exists {
+                    return err("el tab ya no existe".into());
+                }
                 let path = match save_image(msg) {
                     Ok(p) => p,
                     Err(e) => return err(e),
@@ -524,26 +664,50 @@ impl Bridge {
 
     /// Un navegador se fue: suelta lo que miraba.
     fn on_closed(&mut self, client: &str) {
-        if let Some((t, ..)) = self.clients.watching.remove(client) {
-            self.sync_tab(t);
+        if self.clients.watching.remove(client).is_some() {
+            self.sync();
         }
     }
 
-    /// Una línea del Telar local: a quién va. `None` = a nadie.
-    fn route(&mut self, line: &str) -> Vec<Value> {
+    /// Una línea del Telar local: a quién va. Las pantallas no se vuelven a interpretar:
+    /// se envuelven tal cual (pueden pesar cientos de KB y llegar 10 por segundo).
+    fn route(&mut self, line: &str) -> Vec<Out> {
+        if let Some(tab) = screen_tab(line) {
+            return self.clients.watchers(tab).into_iter().map(|c| Out::Screen { client: c, tab, line: line.to_string() }).collect();
+        }
         let Ok(msg) = serde_json::from_str::<Value>(line) else { return Vec::new() };
         match msg["type"].as_str() {
             Some("state") => {
-                self.last_state = Some(msg.clone());
-                vec![json!({ "broadcast": true, "msg": msg })]
-            }
-            Some("screen") => {
-                let Some(tab) = msg["tab"].as_u64() else { return Vec::new() };
-                self.clients.watchers(tab).into_iter().map(|c| json!({ "client": c, "msg": msg })).collect()
+                let out = vec![Out::Now(json!({ "broadcast": true, "msg": msg }).to_string())];
+                self.last_state = Some(msg);
+                out
             }
             _ => Vec::new(),
         }
     }
+}
+
+/// Lo que sale hacia el relevo: ya, o una pantalla (de la que basta la última).
+enum Out {
+    Now(String),
+    Screen { client: String, tab: u64, line: String },
+}
+
+impl Out {
+    fn text(&self) -> String {
+        match self {
+            Out::Now(t) => t.clone(),
+            Out::Screen { client, line, .. } => format!("{{\"client\":{},\"msg\":{line}}}", Value::from(client.as_str())),
+        }
+    }
+}
+
+/// El tab de una línea de pantalla de Telar (`{"type":"screen","tab":N,…}`, siempre en ese
+/// orden), sin interpretar el resto.
+fn screen_tab(line: &str) -> Option<u64> {
+    let rest = line.strip_prefix(r#"{"type":"screen","tab":"#)?;
+    let end = rest.find(|c: char| !c.is_ascii_digit())?;
+    rest[..end].parse().ok()
 }
 
 type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
@@ -555,7 +719,12 @@ enum ConnectError {
     Other(String),
 }
 
+/// Tamaño máximo de un mensaje del relevo (una imagen de 15 MB llega como ~20 MB en base64).
+const MAX_MESSAGE: usize = 24 * 1024 * 1024;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn connect(session: &Session) -> Result<Ws, ConnectError> {
+    use std::net::ToSocketAddrs;
     let other = |e: String| ConnectError::Other(e);
     let mut req = session.bridge_url.as_str().into_client_request().map_err(|e| other(format!("URL inválida: {e}")))?;
     let h = req.headers_mut();
@@ -566,8 +735,23 @@ fn connect(session: &Session) -> Result<Ws, ConnectError> {
         h.insert("cf-access-client-secret", header(secret)?);
     }
     h.insert("user-agent", header(&format!("telar-bridge/{}", crate::update::VERSION))?);
-    let (ws, resp) = tungstenite::connect(req).map_err(|e| match e {
-        tungstenite::Error::Http(r) => {
+    // TCP con tiempo límite (un portal cautivo o un servidor mudo no lo dejan colgado).
+    let uri = req.uri().clone();
+    let host = uri.host().ok_or_else(|| other("URL sin host".into()))?.trim_matches(|c| c == '[' || c == ']').to_string();
+    let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("wss") { 443 } else { 80 });
+    let addrs: Vec<_> = (host.as_str(), port).to_socket_addrs().map_err(|e| other(format!("no se pudo resolver {host}: {e}")))?.collect();
+    let tcp = addrs
+        .iter()
+        .find_map(|a| TcpStream::connect_timeout(a, CONNECT_TIMEOUT).ok())
+        .ok_or_else(|| other(format!("no se pudo conectar con {host}")))?;
+    // El handshake (TLS y HTTP) también con tiempo límite; después, sin bloqueo.
+    let _ = tcp.set_read_timeout(Some(Duration::from_secs(15)));
+    let _ = tcp.set_write_timeout(Some(Duration::from_secs(15)));
+    let config = tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE)).max_frame_size(Some(MAX_MESSAGE));
+    // `client_tls_with_config` no sigue redirecciones: con `connect`, un 302 se llevaría
+    // el Bearer y el service token a otra dirección (incluso sin cifrar).
+    let (ws, resp) = tungstenite::client_tls_with_config(req, tcp, Some(config), None).map_err(|e| match e {
+        tungstenite::HandshakeError::Failure(tungstenite::Error::Http(r)) => {
             let status = r.status().as_u16();
             let body = r.body().as_deref().map(String::from_utf8_lossy).unwrap_or_default().to_string();
             let v: Value = serde_json::from_str(&body).unwrap_or_default();
@@ -583,10 +767,10 @@ fn connect(session: &Session) -> Result<Ws, ConnectError> {
             log::warn!("telar remoto: /bridge respondió {status}: {why}");
             other(format!("el servidor respondió {status}{}", if why.is_empty() { String::new() } else { format!(": {why}") }))
         }
-        e => other(e.to_string()),
+        tungstenite::HandshakeError::Failure(e) => other(e.to_string()),
+        tungstenite::HandshakeError::Interrupted(_) => other("el servidor no completó la conexión".into()),
     })?;
     log::info!("telar remoto: conectado ({})", resp.status());
-    // Lecturas con tiempo límite: el mismo hilo atiende al relevo y a Telar.
     let tcp = match ws.get_ref() {
         MaybeTlsStream::Plain(s) => s,
         MaybeTlsStream::NativeTls(s) => s.get_ref(),
@@ -594,22 +778,14 @@ fn connect(session: &Session) -> Result<Ws, ConnectError> {
     };
     // Sin bloqueo: el hilo duerme en `poll` hasta que llega algo (ver `serve`).
     tcp.set_nonblocking(true).map_err(|e| other(e.to_string()))?;
+    let _ = tcp.set_read_timeout(None);
+    let _ = tcp.set_write_timeout(None);
     let _ = tcp.set_nodelay(true);
     Ok(ws)
 }
 
 fn would_block(e: &tungstenite::Error) -> bool {
     matches!(e, tungstenite::Error::Io(io) if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
-}
-
-/// Encola y envía; si el socket está lleno queda en el búfer de tungstenite y sale con
-/// el próximo `flush` (cuando `poll` dice que se puede escribir).
-fn send(ws: &mut Ws, value: &Value) -> Result<(), String> {
-    match ws.send(Message::text(value.to_string())) {
-        Ok(()) => Ok(()),
-        Err(e) if would_block(&e) => Ok(()),
-        Err(e) => Err(e.to_string()),
-    }
 }
 
 fn raw_fd(ws: &Ws) -> i32 {
@@ -674,6 +850,12 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(base * 1000 / 2 + jitter * base / 2)
 }
 
+/// Sin recibir nada en este tiempo, la conexión se da por muerta (el relevo manda pings
+/// cada 25 s y responde los nuestros): p. ej. el Mac cambió de red o despertó.
+const SILENCE: Duration = Duration::from_secs(50);
+/// Una conexión que duró esto ya cuenta como buena: la espera vuelve a empezar de cero.
+const STABLE: Duration = Duration::from_secs(30);
+
 /// `telar bridge`. Termina cuando se cierra Telar.
 pub fn run() -> Result<String, String> {
     let socket = std::env::var_os("TELAR_SOCKET").map(PathBuf::from).ok_or("TELAR_SOCKET no está definido")?;
@@ -681,9 +863,23 @@ pub fn run() -> Result<String, String> {
     let (tx, rx) = mpsc::channel();
     let wake = Wake::new()?;
     subscribe(&socket, tx, wake.write)?;
-    let mut bridge = Bridge { socket, clients: Clients::default(), last_state: None };
+    let mut bridge = Bridge { socket, clients: Clients::default(), last_state: None, devices: HashMap::new(), noticed: Default::default() };
     let name = mac_name();
     let mut attempt = 0u32;
+    // Espera antes de reconectar; mientras, igual vacía lo que manda Telar (y nota si se cerró).
+    let wait = |bridge: &mut Bridge, d: Duration| -> bool {
+        let until = Instant::now() + d;
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(Event::Telar(line)) => {
+                    bridge.route(&line);
+                }
+                Ok(Event::TelarGone) | Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+            }
+        }
+        true
+    };
     loop {
         bridge.status("connecting", "");
         let mut ws = match connect(&session) {
@@ -701,35 +897,32 @@ pub fn run() -> Result<String, String> {
                 } else {
                     bridge.status("error", &e);
                 }
-                let wait = backoff(attempt);
+                let d = backoff(attempt);
                 attempt += 1;
-                // Mientras espera, igual vacía lo que manda Telar (y nota si se cerró).
-                let until = Instant::now() + wait;
-                while let Some(left) = until.checked_duration_since(Instant::now()) {
-                    match rx.recv_timeout(left) {
-                        Ok(Event::Telar(line)) => {
-                            bridge.route(&line);
-                        }
-                        Ok(Event::TelarGone) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(String::new()),
-                        Err(mpsc::RecvTimeoutError::Timeout) => break,
-                    }
+                if !wait(&mut bridge, d) {
+                    return Ok(String::new());
                 }
                 continue;
             }
         };
+        let connected = Instant::now();
         let hello = json!({ "type": "bridge-hello", "proto": PROTO, "name": name, "version": crate::update::VERSION });
-        if send(&mut ws, &hello).is_err() {
-            continue;
-        }
-        if let Some(state) = bridge.last_state.clone() {
-            let _ = send(&mut ws, &json!({ "broadcast": true, "msg": state }));
-        }
-        attempt = 0;
-        bridge.status("connected", "");
-        let reason = serve(&mut ws, &mut bridge, &rx, &wake);
+        let greeted = send_text(&mut ws, hello.to_string()).is_ok()
+            && bridge.last_state.clone().is_none_or(|state| send_text(&mut ws, json!({ "broadcast": true, "msg": state }).to_string()).is_ok());
+        let reason = if greeted {
+            bridge.status("connected", "");
+            serve(&mut ws, &mut bridge, &rx, &wake)
+        } else {
+            Exit::Lost("no se pudo saludar al relevo".into())
+        };
         // Lo que miraban los navegadores vuelve a su tamaño en el Mac, y ya nadie mira.
         bridge.release_all();
         bridge.viewers(&json!([]));
+        // Solo una conexión que duró reinicia la espera: un relevo que acepta y corta en
+        // seguida no recibe una reconexión por segundo.
+        if connected.elapsed() >= STABLE {
+            attempt = 0;
+        }
         match reason {
             Exit::TelarGone => {
                 let _ = ws.close(None);
@@ -738,11 +931,21 @@ pub fn run() -> Result<String, String> {
             Exit::Lost(e) => {
                 log::warn!("telar remoto: se cortó la conexión: {e}");
                 bridge.status("error", &format!("se cortó: {e}"));
-                std::thread::sleep(backoff(attempt));
+                let d = backoff(attempt);
                 attempt += 1;
+                if !wait(&mut bridge, d) {
+                    return Ok(String::new());
+                }
             }
-            Exit::Rejected(e) => {
+            // Solo una revocación de verdad desvincula el Mac.
+            Exit::Revoked(e) => {
                 bridge.status("revoked", &e);
+                return Err(e);
+            }
+            // Otro rechazo definitivo (versión, otra conexión del mismo Mac): no se
+            // reintenta, pero la sesión se conserva.
+            Exit::Fatal(e) => {
+                bridge.status("fatal", &e);
                 return Err(e);
             }
         }
@@ -752,59 +955,85 @@ pub fn run() -> Result<String, String> {
 enum Exit {
     TelarGone,
     Lost(String),
-    /// El relevo rechazó al bridge (versión, credenciales): no tiene sentido reintentar.
-    Rejected(String),
+    /// El servidor revocó este dispositivo (código `revoked` o cierre 4003).
+    Revoked(String),
+    /// El relevo no quiere que se reconecte, por otro motivo (4000–4002 u otro `fatal`).
+    Fatal(String),
+}
+
+fn send_text(ws: &mut Ws, text: String) -> Result<(), String> {
+    match ws.send(Message::text(text)) {
+        Ok(()) => Ok(()),
+        Err(e) if would_block(&e) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 fn serve(ws: &mut Ws, bridge: &mut Bridge, rx: &mpsc::Receiver<Event>, wake: &Wake) -> Exit {
     let mut last_ping = Instant::now();
+    let mut last_rx = Instant::now();
+    // Pantallas que esperan a que se vacíe la salida: de cada (cliente, tab), solo la última.
+    let mut deferred: HashMap<(String, u64), String> = HashMap::new();
+    let mut pending = false;
     let fd = raw_fd(ws);
     loop {
         // Del relevo: todo lo que haya (TLS puede tener más de un mensaje ya descifrado).
         loop {
-            match ws.read() {
-            Ok(Message::Text(text)) => {
-                let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-                if v["type"] == "error" && v.get("client").is_none() {
-                    let msg = v["message"].as_str().unwrap_or("el relevo rechazó la conexión").to_string();
-                    return if v["fatal"] == json!(true) { Exit::Rejected(msg) } else { Exit::Lost(msg) };
+            let msg = match ws.read() {
+                Ok(m) => m,
+                Err(e) if would_block(&e) => break,
+                Err(e) => return Exit::Lost(e.to_string()),
+            };
+            last_rx = Instant::now();
+            let text = match msg {
+                Message::Text(t) => t,
+                // 4000–4003: el relevo no quiere que se reconecte.
+                Message::Close(frame) => {
+                    let code = frame.as_ref().map(|f| u16::from(f.code));
+                    let reason = frame.map(|f| f.reason.to_string()).filter(|r| !r.is_empty());
+                    return match code {
+                        Some(4003) => Exit::Revoked(reason.unwrap_or_else(|| "el servidor cerró la sesión".into())),
+                        Some(4000..=4002) => Exit::Fatal(reason.unwrap_or_else(|| "el servidor rechazó la conexión".into())),
+                        _ => Exit::Lost(reason.unwrap_or_else(|| "el relevo cerró la conexión".into())),
+                    };
                 }
-                // Ping de la aplicación (además de los del WebSocket).
-                if v["type"] == "ping" {
-                    if let Err(e) = send(ws, &json!({ "type": "pong" })) {
-                        return Exit::Lost(e);
-                    }
-                    continue;
-                }
-                // Quién mira este Mac desde el navegador: para el indicador de Telar.
-                if v["type"] == "viewers" {
-                    bridge.viewers(&v["list"]);
-                    continue;
-                }
-                let Some(client) = v["client"].as_str().map(String::from) else { continue };
-                if v["closed"] == json!(true) {
-                    bridge.on_closed(&client);
-                    continue;
-                }
-                for reply in bridge.on_client(&client, &v["msg"]) {
-                    if let Err(e) = send(ws, &json!({ "client": client, "msg": reply })) {
-                        return Exit::Lost(e);
-                    }
-                }
-            }
-            // 4000–4003: el relevo no quiere que se reconecte (sesión revocada, versión…).
-            Ok(Message::Close(frame)) => {
-                let code = frame.as_ref().map(|f| u16::from(f.code));
-                let reason = frame.map(|f| f.reason.to_string()).filter(|r| !r.is_empty());
-                return match code {
-                    Some(4000..=4003) => Exit::Rejected(reason.unwrap_or_else(|| "el servidor cerró la sesión".into())),
-                    _ => Exit::Lost(reason.unwrap_or_else(|| "el relevo cerró la conexión".into())),
+                _ => continue,
+            };
+            let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+            if v["type"] == "error" && v.get("client").is_none() {
+                let msg = v["message"].as_str().unwrap_or("el relevo rechazó la conexión").to_string();
+                return match (v["fatal"] == json!(true), v["code"].as_str()) {
+                    (true, Some("revoked")) => Exit::Revoked(msg),
+                    (true, _) => Exit::Fatal(msg),
+                    _ => Exit::Lost(msg),
                 };
             }
-            Ok(_) => {}
-            Err(e) if would_block(&e) => break,
-            Err(e) => return Exit::Lost(e.to_string()),
+            // Ping de la aplicación (además de los del WebSocket).
+            if v["type"] == "ping" {
+                if let Err(e) = send_text(ws, json!({ "type": "pong" }).to_string()) {
+                    return Exit::Lost(e);
+                }
+                continue;
             }
+            // Quién mira este Mac desde el navegador: para el indicador de Telar.
+            if v["type"] == "viewers" {
+                bridge.viewers(&v["list"]);
+                continue;
+            }
+            let Some(client) = v["client"].as_str().map(String::from) else { continue };
+            if v["closed"] == json!(true) {
+                bridge.on_closed(&client);
+                deferred.retain(|(c, _), _| *c != client);
+                continue;
+            }
+            for reply in bridge.on_client(&client, &v["msg"]) {
+                if let Err(e) = send_text(ws, json!({ "client": client, "msg": reply }).to_string()) {
+                    return Exit::Lost(e);
+                }
+            }
+        }
+        if last_rx.elapsed() >= SILENCE {
+            return Exit::Lost("el servidor dejó de responder".into());
         }
         // Del Telar local.
         wake.drain();
@@ -812,8 +1041,16 @@ fn serve(ws: &mut Ws, bridge: &mut Bridge, rx: &mpsc::Receiver<Event>, wake: &Wa
             match rx.try_recv() {
                 Ok(Event::Telar(line)) => {
                     for out in bridge.route(&line) {
-                        if let Err(e) = send(ws, &out) {
-                            return Exit::Lost(e);
+                        match out {
+                            // Con la salida atascada, solo se guarda la última pantalla.
+                            Out::Screen { ref client, tab, .. } if pending || deferred.contains_key(&(client.clone(), tab)) => {
+                                deferred.insert((client.clone(), tab), out.text());
+                            }
+                            out => {
+                                if let Err(e) = send_text(ws, out.text()) {
+                                    return Exit::Lost(e);
+                                }
+                            }
                         }
                     }
                 }
@@ -829,14 +1066,28 @@ fn serve(ws: &mut Ws, bridge: &mut Bridge, rx: &mpsc::Receiver<Event>, wake: &Wa
                 }
             }
         }
-        // Lo que quedó en el búfer de salida.
-        let pending = match ws.flush() {
+        // Lo que quedó en el búfer de salida; si se vació, salen las pantallas guardadas.
+        pending = match ws.flush() {
             Ok(()) => false,
             Err(e) if would_block(&e) => true,
             Err(e) => return Exit::Lost(e.to_string()),
         };
-        // A dormir hasta que llegue algo, se pueda escribir lo pendiente o toque el ping.
-        let timeout = PING_EVERY.saturating_sub(last_ping.elapsed()).as_millis().max(1) as i32;
+        if !pending && !deferred.is_empty() {
+            for (_, text) in deferred.drain() {
+                if let Err(e) = send_text(ws, text) {
+                    return Exit::Lost(e);
+                }
+            }
+            pending = match ws.flush() {
+                Ok(()) => false,
+                Err(e) if would_block(&e) => true,
+                Err(e) => return Exit::Lost(e.to_string()),
+            };
+        }
+        // A dormir hasta que llegue algo, se pueda escribir lo pendiente, toque el ping o
+        // se cumpla el plazo de silencio.
+        let next = PING_EVERY.saturating_sub(last_ping.elapsed()).min(SILENCE.saturating_sub(last_rx.elapsed()));
+        let timeout = next.as_millis().max(1) as i32;
         let mut fds = [
             libc::pollfd { fd, events: libc::POLLIN | if pending { libc::POLLOUT } else { 0 }, revents: 0 },
             libc::pollfd { fd: wake.read, events: libc::POLLIN, revents: 0 },
@@ -863,8 +1114,28 @@ mod tests {
         assert!(Session::from_json(&json!({"token":"t","bridge_url":"ws://telar.ejemplo.dev/bridge"}), "").is_err());
         assert!(Session::from_json(&json!({"token":"t","bridge_url":"ws://127.0.0.1:8787/bridge"}), "").is_ok());
         assert!(Session::from_json(&json!({"bridge_url":"wss://x/bridge"}), "").is_err());
+        // Nada de comillas ni saltos en los secretos (irían a la configuración de curl).
+        assert!(Session::from_json(&json!({"token":"t\"\noutput = /tmp/x","bridge_url":"wss://x/bridge"}), "").is_err());
+        assert!(Session::from_json(&json!({"token":"t","bridge_url":"wss://x/bridge","access":{"client_id":"a\nb","client_secret":"s"}}), "").is_err());
+        // El servidor también cifrado, y «localhost» de verdad.
+        assert!(Session::from_json(&json!({"token":"t","bridge_url":"wss://x/bridge","server":"http://telar.ejemplo.dev"}), "").is_err());
+        assert!(!local("http://localhost.evil.com/x") && !local("ws://127.0.0.1.evil.com/b") && !local("https://a.dev/?x=://localhost"));
+        assert!(local("ws://127.0.0.1:8787/bridge") && local("http://localhost/x"));
         // Sin Access (desarrollo): solo el Bearer.
         assert_eq!(Session::from_json(&json!({"token":"t","bridge_url":"wss://x/bridge"}), "").unwrap().access, None);
+    }
+
+    /// El hijo lee los secretos por la fd 3 y termina (si heredara el extremo de escritura
+    /// de la tubería, quedaría esperando para siempre: así se colgaba curl al revocar).
+    #[test]
+    fn secretos_por_fd3_sin_colgarse() {
+        let mut cmd = Command::new("/bin/cat");
+        cmd.arg("/dev/fd/3").stdout(Stdio::piped());
+        let child = spawn_with_fd3(cmd, Some("header = \"x: y\"\n".into())).unwrap();
+        let start = Instant::now();
+        let out = child.wait_with_output().unwrap();
+        assert!(start.elapsed() < Duration::from_secs(2), "el hijo quedó colgado");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "header = \"x: y\"\n");
     }
 
     #[test]
@@ -883,6 +1154,25 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         let _ = std::fs::remove_file(&path);
         assert!(save_image(&json!({"name":"a.pdf","mime":"application/pdf","data":"aG9sYQ=="})).is_err());
+    }
+
+    #[test]
+    fn pantallas_sin_volver_a_interpretar() {
+        // La línea que arma `remote::screen` (serde_json conserva el orden de las claves).
+        let line = json!({"type":"screen","tab":42,"cols":48,"rows":16,"ansi":"\u{1b}[0mhola","cursor":[0,0],"seq":1}).to_string();
+        assert_eq!(screen_tab(&line), Some(42));
+        assert_eq!(screen_tab(r#"{"type":"state","groups":[]}"#), None);
+        let out = Out::Screen { client: "c\"1".into(), tab: 42, line: line.clone() };
+        let v: Value = serde_json::from_str(&out.text()).unwrap();
+        assert_eq!(v["client"], "c\"1");
+        assert_eq!(v["msg"]["tab"], 42);
+    }
+
+    #[test]
+    fn tamanos_fuera_de_rango_se_ajustan() {
+        assert_eq!(clamp_size(19, 3), (20, 5));
+        assert_eq!(clamp_size(1000, 1000), (400, 200));
+        assert_eq!(clamp_size(48, 16), (48, 16));
     }
 
     #[test]
