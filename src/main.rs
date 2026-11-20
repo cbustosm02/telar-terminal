@@ -135,6 +135,7 @@ fn main() {
         Some(cmd) => return finish(cli::run(cmd, &args[1..])),
     }
 
+    forget_parent_session_env();
     env_logger::init();
     // El paquete se pone al día antes de abrir: si cambió, se reinicia para que macOS vea
     // la misma firma en el proceso y en el disco (y respete los permisos concedidos).
@@ -148,6 +149,35 @@ fn main() {
     event_loop.run_app(&mut app).expect("event loop");
     // Al salir se suelta el estado y, con él, el socket.
     drop(app);
+}
+
+/// Variables que Claude Code pone a los procesos que lanza. Si Telar se abrió desde una
+/// sesión de Claude (p. ej. la vista previa, o `open` desde un tab), sus tabs las
+/// heredarían y cada `claude` ahí se creería una sesión anidada: no guarda la
+/// conversación en disco y `/restart` se niega («It isn't saved to disk»).
+const PARENT_SESSION_ENV: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_CHILD_NOTES_DIR",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    // Las del tab desde el que se abrió (cada tab recibe las suyas).
+    "TELAR_TAB_ID",
+    "TELAR_SOCKET",
+    "TELAR_BIN",
+];
+
+fn forget_parent_session_env() {
+    for var in PARENT_SESSION_ENV {
+        // SAFETY: al empezar `main`, antes de crear hilos.
+        unsafe { std::env::remove_var(var) };
+    }
 }
 
 fn finish(result: Result<String, String>) {
@@ -887,34 +917,91 @@ impl State {
 /// Claude abierto sin escribirle nada deja un id sin conversación: `claude --resume`
 /// fallaría con «No conversation found».
 fn claude_session_exists(session: &str) -> bool {
+    claude_transcript(session).is_some()
+}
+
+/// El archivo de la conversación de Claude `session` (`~/.claude/projects/<carpeta>/<id>.jsonl`).
+fn claude_transcript(session: &str) -> Option<PathBuf> {
     if session.is_empty() || session.contains(['/', '.']) {
-        return false;
+        return None;
     }
     let base = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")));
-    let Some(projects) = base.map(|b| b.join("projects")) else { return false };
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))?;
     let file = format!("{session}.jsonl");
-    std::fs::read_dir(projects)
-        .map(|dirs| dirs.flatten().any(|d| d.path().join(&file).is_file()))
-        .unwrap_or(false)
+    std::fs::read_dir(base.join("projects")).ok()?.flatten().map(|d| d.path().join(&file)).find(|p| p.is_file())
+}
+
+/// Carpeta donde se abrió la sesión: la del proyecto de Claude Code. El primer `cwd` del
+/// transcript; los siguientes siguen a los `cd` de Claude, y Telar guarda el último.
+fn claude_session_dir(transcript: &Path) -> Option<PathBuf> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(transcript).ok()?;
+    std::io::BufReader::new(file).lines().take(200).map_while(Result::ok).find_map(|line| {
+        if !line.contains("\"cwd\"") {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(&line).ok()?;
+        v["cwd"].as_str().map(PathBuf::from)
+    })
+}
+
+/// Comando para retomar la sesión. Claude Code solo puede reiniciarla (`/restart`) y
+/// encontrarla desde la carpeta de su proyecto, así que se entra ahí si el tab estaba en
+/// otra (Claude había hecho `cd` a un subproyecto).
+fn resume_command(session: &str, project: Option<&Path>, cwd: Option<&Path>) -> String {
+    match project.filter(|p| Some(*p) != cwd && p.is_dir()) {
+        Some(dir) => {
+            let quoted = format!("'{}'", dir.display().to_string().replace('\'', r"'\''"));
+            format!("cd {quoted} && claude --resume {session}\r")
+        }
+        None => format!("claude --resume {session}\r"),
+    }
 }
 
 /// Retoma en `t` (recién abierto) la sesión de Claude `session`, si tiene conversación;
 /// si no, el tab queda en la shell. Devuelve si la retomó.
 fn resume_claude(t: &mut Terminal, session: &str, cwd: Option<&Path>) -> bool {
-    if !claude_session_exists(session) {
+    let Some(transcript) = claude_transcript(session) else {
         log::info!("la sesión de Claude {session} no tiene conversación: el tab abre en la shell");
         return false;
-    }
+    };
+    let project = claude_session_dir(&transcript);
     // La shell todavía arranca: lo escrito queda en el buffer del PTY y se ejecuta al estar lista.
-    t.write(format!("claude --resume {session}\r").into_bytes());
+    t.write(resume_command(session, project.as_deref(), cwd).into_bytes());
     // Ya cuenta como tab de Claude aunque su hook SessionStart aún no llegue:
     // si se cierra Telar antes, la sesión no se pierde.
     t.agent.session_id = Some(session.to_string());
-    t.agent.cwd = cwd.map(|c| c.display().to_string());
+    t.agent.cwd = project.as_deref().or(cwd).map(|c| c.display().to_string());
     t.agent.set_state(AgentState::Idle);
     true
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    #[test]
+    fn retoma_desde_la_carpeta_del_proyecto() {
+        let home = std::env::temp_dir();
+        let sub = home.join("sub");
+        // Misma carpeta (o sin dato): solo retoma.
+        assert_eq!(resume_command("abc", Some(&home), Some(&home)), "claude --resume abc\r");
+        assert_eq!(resume_command("abc", None, Some(&sub)), "claude --resume abc\r");
+        // Otra carpeta: entra a la del proyecto, con comillas.
+        let cmd = resume_command("abc", Some(&home), Some(&sub));
+        assert!(cmd.starts_with("cd '") && cmd.ends_with("' && claude --resume abc\r"), "{cmd}");
+        // Una carpeta que ya no existe no se usa.
+        assert_eq!(resume_command("abc", Some(Path::new("/no/existe")), Some(&sub)), "claude --resume abc\r");
+    }
+
+    #[test]
+    fn primer_cwd_del_transcript() {
+        let f = std::env::temp_dir().join(format!("telar-transcript-{}.jsonl", std::process::id()));
+        std::fs::write(&f, "{\"type\":\"summary\"}\n{\"cwd\":\"/a/b\"}\n{\"cwd\":\"/a/b/c\"}\n").unwrap();
+        assert_eq!(claude_session_dir(&f), Some(PathBuf::from("/a/b")));
+        let _ = std::fs::remove_file(&f);
+    }
 }
 
 /// Notificación de macOS que no lleva a ningún tab (ver `notify`).

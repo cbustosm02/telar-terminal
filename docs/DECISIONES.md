@@ -306,3 +306,10 @@ El usuario pidió una revisión de optimizaciones e integraciones (la hizo Fable
 - En los tabs con sesión de Claude (estado distinto de «shell»), `ui::draw_terminal` cambia exactamente esos colores por `mix(fondo, acento, 0.16)` (0.24 bajo el puntero) y dibuja una barrita del acento a la izquierda de esas filas.
 - Se compara el RGB exacto, solo en tabs con Claude, para no teñir otros programas.
 - Si Claude Code cambia esos colores, hay que actualizar `claude_user_bg`. Los temas ANSI de Claude usan colores de la paleta y no se tocan.
+
+## Retomar Claude desde la carpeta de su proyecto (2026-11-20)
+
+- Claude Code guarda cada conversación en `~/.claude/projects/<carpeta del proyecto>/<id>.jsonl`, según la carpeta donde se abrió. `/restart` (y `--resume` sin buscar en todos los proyectos) solo funciona desde esa carpeta: «Can't restart from here — this session is running in … but its transcript is in …».
+- Telar guardaba como carpeta del tab la última en la que estuvo, por ejemplo `pirani-reports-web` después de que Claude hiciera `cd`, y retomaba desde ahí.
+- Ahora `resume_claude` lee el primer `cwd` del transcript (la carpeta del proyecto) y, si es otra, escribe `cd '<proyecto>' && claude --resume <id>`.
+- La vista previa se abre desde una sesión de Claude, y `open --env` le pasa el entorno de quien la lanza. Sus tabs heredaban `CLAUDE_CODE_CHILD_SESSION=1` y otras variables, así que cada `claude` ahí se creía una sesión anidada: no guardaba la conversación en disco (`saving_off`) y `/restart` respondía «It isn't saved to disk». Ahora Telar borra al arrancar las variables que Claude Code pone a sus procesos hijos (`PARENT_SESSION_ENV`) y las `TELAR_*` del tab desde el que se abrió. No toca las de configuración, como `CLAUDE_CONFIG_DIR`.
