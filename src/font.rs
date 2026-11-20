@@ -33,6 +33,9 @@ const FALLBACKS: &[&str] = &[
     "/System/Library/Fonts/Apple Color Emoji.ttc",
 ];
 
+/// Texto de interfaz formado: glifos (x desde el inicio, y desde la línea base) y ancho.
+pub type UiLayout = (Vec<(Glyph, f32, f32)>, f32);
+
 #[derive(Clone, Copy, Debug)]
 pub struct Glyph {
     /// Región en el atlas, en píxeles: x, y, ancho, alto.
@@ -106,6 +109,9 @@ pub struct Fonts {
     sized: HashMap<(u8, u16, u32, u16), Option<Glyph>>,
     /// Imágenes subidas al atlas (vistas previas de íconos), por clave.
     images: HashMap<String, Option<Glyph>>,
+    /// Textos de interfaz ya formados (texto, tamaño, peso): la barra lateral y los tabs
+    /// se dibujan muchas veces por segundo con los mismos textos.
+    layouts: HashMap<(String, u32, u16), UiLayout>,
     /// El atlas se vació en este frame: hay que volver a dibujar.
     pub atlas_reset: bool,
 }
@@ -139,6 +145,7 @@ impl Fonts {
             shaper: ShapeContext::new(),
             sized: HashMap::new(),
             images: HashMap::new(),
+            layouts: HashMap::new(),
             family,
             primary,
             fallbacks,
@@ -174,6 +181,7 @@ impl Fonts {
         self.cache.clear();
         self.sized.clear();
         self.images.clear();
+        self.layouts.clear();
         self.atlas = Atlas::new();
         self.atlas_reset = true;
     }
@@ -283,7 +291,21 @@ impl Fonts {
 
     /// Texto de interfaz: glifos posicionados (x desde el inicio, y desde la línea base)
     /// y ancho total. SF Pro con kerning; lo que SF no tenga sale de los respaldos.
-    pub fn ui_layout(&mut self, text: &str, px: f32, weight: u16) -> (Vec<(Glyph, f32, f32)>, f32) {
+    pub fn ui_layout(&mut self, text: &str, px: f32, weight: u16) -> UiLayout {
+        let key = (text.to_string(), px.to_bits(), weight);
+        if let Some(l) = self.layouts.get(&key) {
+            return l.clone();
+        }
+        let l = self.shape_ui(text, px, weight);
+        // Textos que ya no se muestran (títulos que cambiaron) no se acumulan sin fin.
+        if self.layouts.len() > 4096 {
+            self.layouts.clear();
+        }
+        self.layouts.insert(key, l.clone());
+        l
+    }
+
+    fn shape_ui(&mut self, text: &str, px: f32, weight: u16) -> UiLayout {
         let mut out = Vec::new();
         let mut pen = 0.0f32;
         let ui_cmap = self.ui.charmap();

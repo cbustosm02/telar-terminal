@@ -36,6 +36,20 @@ pub struct Config {
     pub show_claude: bool,
     /// Barra lateral: los medidores de consumo (CPU, RAM, GPU).
     pub show_meters: bool,
+    /// Al abrir Telar, reanudar solo el tab visible: los demás quedan con su última
+    /// pantalla y arrancan al mostrarlos (no se lanzan todos los Claude a la vez).
+    pub lazy_restore: bool,
+    /// Líneas de historial de cada tab (ver `SCROLLBACK_STEPS`).
+    pub scrollback: usize,
+}
+
+/// Valores del historial por tab que se eligen con − / +.
+pub const SCROLLBACK_STEPS: &[usize] = &[1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000];
+
+/// Siguiente (o anterior) valor del historial.
+pub fn step_scrollback(current: usize, delta: i32) -> usize {
+    let i = SCROLLBACK_STEPS.iter().position(|&v| v >= current).unwrap_or(SCROLLBACK_STEPS.len() - 1) as i32;
+    SCROLLBACK_STEPS[(i + delta).clamp(0, SCROLLBACK_STEPS.len() as i32 - 1) as usize]
 }
 
 impl Default for Config {
@@ -52,6 +66,8 @@ impl Default for Config {
             start_dir: None,
             show_claude: true,
             show_meters: true,
+            lazy_restore: true,
+            scrollback: 10_000,
         }
     }
 }
@@ -71,6 +87,8 @@ impl Config {
                 "start_dir": self.start_dir,
                 "show_claude": self.show_claude,
                 "show_meters": self.show_meters,
+                "lazy_restore": self.lazy_restore,
+                "scrollback_lines": self.scrollback,
             },
             "appearance": {
                 "theme": self.theme,
@@ -114,6 +132,8 @@ impl Config {
             start_dir: v["general"]["start_dir"].as_str().map(PathBuf::from).filter(|p| p.is_absolute()),
             show_claude: v["general"]["show_claude"].as_bool().unwrap_or(d.show_claude),
             show_meters: v["general"]["show_meters"].as_bool().unwrap_or(d.show_meters),
+            lazy_restore: v["general"]["lazy_restore"].as_bool().unwrap_or(d.lazy_restore),
+            scrollback: v["general"]["scrollback_lines"].as_u64().map_or(d.scrollback, |n| (n as usize).clamp(SCROLLBACK_STEPS[0], 100_000)),
         }
     }
 
@@ -161,6 +181,8 @@ mod tests {
             start_dir: Some(PathBuf::from("/tmp/proyectos")),
             show_claude: false,
             show_meters: false,
+            lazy_restore: false,
+            scrollback: 50_000,
         };
         assert_eq!(Config::from_json(&c.to_json()), c);
     }
@@ -173,5 +195,17 @@ mod tests {
         assert_eq!(c.font_size, FONT_SIZE_MAX);
         let c = Config::from_json(&json!({ "general": { "start_dir": "relativa/no" } }));
         assert_eq!(c.start_dir, None, "solo rutas absolutas");
+        let c = Config::from_json(&json!({ "general": { "scrollback_lines": 5 } }));
+        assert_eq!(c.scrollback, 1_000);
+    }
+
+    #[test]
+    fn pasos_del_historial() {
+        assert_eq!(step_scrollback(10_000, 1), 20_000);
+        assert_eq!(step_scrollback(10_000, -1), 5_000);
+        assert_eq!(step_scrollback(1_000, -1), 1_000);
+        assert_eq!(step_scrollback(100_000, 1), 100_000);
+        // Un valor escrito a mano entre dos pasos sigue al más cercano hacia arriba.
+        assert_eq!(step_scrollback(7_000, 0), 10_000);
     }
 }

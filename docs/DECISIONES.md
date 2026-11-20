@@ -240,3 +240,30 @@ Con muchos tabs, el arranque de la shell se multiplica, sobre todo al restaurar 
 ## Botón de actualizar con la versión (2026-11-19)
 
 - El botón decía solo «Actualizar»: con el título y el ícono al lado, «Actualizar a X.Y.Z» no cabía en el ancho de la barra lateral. Con una versión disponible, el bloque es ahora un solo botón a todo el ancho, «Actualizar a X.Y.Z», con el ícono de descarga. `TELAR_SNAPSHOT_UPDATE=X.Y.Z` lo simula en el modo captura.
+
+## Revisión de rendimiento e integraciones (2026-11-19)
+
+El usuario pidió una revisión de optimizaciones e integraciones (la hizo Fable, de solo lectura). Telar abierto con 4 tabs usaba 3–6,5 % de CPU y 182 MB, cuando en reposo debería estar cerca de 0 %. Se implementó:
+
+- **Estado «trabajando» pegado.** Solo salía con `Stop`, `SessionEnd` o `Notification`. Interrumpir con Esc no dispara `Stop`, y un turno que muere por un error de la API o el límite de uso dispara `StopFailure`, que Telar no registraba. Se agregaron `StopFailure` (como `Stop`) y `PostToolUseFailure` (sigue trabajando). Los hooks se ponen al día solos al abrir (`hooks::upgrade_hooks`), solo si ya estaban instalados.
+  - Además, un vigilante (`unstick_working`): si un tab figura trabajando y lleva 10 s sin mostrar nada, pasa a terminado. Se midió con un Claude real en una pseudo-terminal: mientras trabaja (pensando o con una herramienta de 30 s en primer plano) escribe al menos cada 0,25 s; en reposo puede pasar varios segundos callado. Telar no le manda a Claude los eventos de foco (`?1004h`), así que su animación no se detiene en los tabs ocultos.
+- **Dibujo.** Con cualquier Claude trabajando se redibujaba todo a 12 fps, aun con la ventana tapada.
+  - Ahora: 12 fps con foco, 2 fps sin foco, nada con la ventana tapada (`WindowEvent::Occluded`).
+  - Los enlaces se buscaban en cada frame y en cada movimiento del mouse. Ahora se buscan solo cuando cambia la pantalla (`Terminal::version`, que sube con cada `Wakeup` y con ⌘K, más el desplazamiento y el tamaño) y se ubican por fila al dibujar.
+  - Los textos de la interfaz se formaban con swash en cada frame. Ahora quedan en un caché por texto, tamaño y peso, que se vacía con el atlas. El recorte con «…» usaba una forma por cada carácter quitado; ahora es una búsqueda binaria.
+- **Restauración perezosa** (Configuración › General › Sesiones, activada por defecto). Al cerrar Telar se guarda la pantalla de los tabs abiertos (`saved_state(screens)`, solo al salir: hacerlo cada 5 s reescribiría la sesión sin parar). Al abrir, solo arranca el tab visible; los demás quedan congelados con `Frozen::lazy` y arrancan en cuanto se muestran (`wake_lazy_active`, en cada vuelta del ciclo, así cubre cualquier forma de llegar al tab). Un tab suspendido a mano sigue suspendido hasta Enter.
+- **Resize diferido.** Al arrastrar el borde se redimensionaba cada tab, con su historial y un SIGWINCH a cada programa. Ahora se redimensiona solo el tab visible; los demás, 250 ms después del último cambio.
+- **Historial configurable** (de 1.000 a 100.000 líneas, 10.000 por defecto). Se aplica también a los tabs abiertos con `Term::set_options`.
+- **Partir `main.rs`.** Tenía unas 3.400 líneas y un solo `impl State`. Ahora los métodos de `State` están en `src/app/` por tema. Como esos módulos descienden de la raíz del crate, acceden a los campos privados de `State`; los métodos son `pub(crate)` y cada archivo hace `use crate::*`. Se corrigieron comentarios desfasados y se quitó el parámetro sin uso de `AccountDone`.
+- **Puertos por tab** (descartado): se implementó una etiqueta `:4200` en el tab con los puertos en escucha de su árbol de procesos (libproc, `PROC_PIDFDSOCKETINFO`), pero el usuario prefirió no tenerla y se quitó antes de publicar.
+- **`telar wait --match 'A|B'`.** Espera a que el tab muestre una línea *nueva* con alguno de los textos y la imprime, para que un agente espere el «Compiled successfully» o el «Failed to compile» de un `ng serve` sin leerlo una y otra vez. Lee las últimas 400 líneas cada 0,4 s y calcula qué apareció comparando con la lectura anterior (`cli::new_lines`): lo nuevo se agrega abajo y lo viejo sale por arriba, así que se busca el desplazamiento con que la lectura anterior sigue al comienzo de la nueva. La última línea solo cuenta si cambió (se seguía escribiendo); si no hay coincidencia (se borró la pantalla), todo es nuevo. Así una línea que ya estaba al empezar no dispara la espera.
+- **Notificaciones nativas** (`notify.rs`). Con `osascript` la notificación es de «Editor de Scripts» y un clic no sabe a qué tab volver. Desde Telar.app se usa `UNUserNotificationCenter`:
+  - Un delegado propio (`define_class!`) recibe el clic, con el id del tab en `userInfo`, y lo manda al ciclo de eventos (`NotificationClicked`): la ventana pasa al frente y se muestra el tab.
+  - El centro de notificaciones cierra la app con una excepción si no hay paquete con identificador: antes de usarlo se mira `NSBundle.mainBundle.bundleIdentifier`.
+  - Sin paquete o sin permiso se sigue usando `osascript`.
+  - Para probarlas sin tocar Telar.app, `scripts/vista-previa.sh` arma «Telar (vista previa).app» con otro identificador. Por eso `ensure_bundle` ahora solo reescribe el Info.plist de un paquete llamado `Telar.app`; antes le habría puesto el identificador real a cualquier `.app` desde la que corriera.
+- **Bandeja de agentes** (`inbox.rs`, ⌘⇧J). ⌘J va de un tab a otro; con 10–20 agentes faltaba una vista de conjunto.
+  - Lista las sesiones abiertas por urgencia: te necesita, terminó, trabajando, en espera. Dentro de cada estado, primero la que más espera.
+  - La pregunta y las opciones de un permiso se leen de la pantalla del tab: el último bloque de líneas numeradas «1.», «2.»… seguidas, sin los bordes de caja ni el «❯» de la elegida. Responder es mandarle al tab la tecla de la opción, igual que apretarla allí.
+  - El último paso es la última línea que empieza con ⏺.
+  - El hook `PermissionRequest` permitiría responder con una decisión formal, pero el hook tendría que esperar la respuesta de Telar y hoy no espera (`ipc::hook_main`). Leer la pantalla alcanza y no cambia los hooks.

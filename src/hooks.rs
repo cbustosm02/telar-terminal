@@ -21,8 +21,12 @@ const EVENTS: &[(&str, bool)] = &[
     ("UserPromptSubmit", false),
     ("PreToolUse", true),
     ("PostToolUse", true),
+    // Una herramienta que falló: Claude sigue trabajando.
+    ("PostToolUseFailure", true),
     ("Notification", false),
     ("Stop", false),
+    // El turno terminó por un error (de la API, por el límite de uso…): no llega `Stop`.
+    ("StopFailure", false),
     ("SessionEnd", false),
 ];
 
@@ -125,6 +129,26 @@ pub fn install_hooks() -> Result<String, String> {
     Ok(format!("Hooks agregados en {}: {}", path.display(), added.join(", ")))
 }
 
+/// Si los hooks de Telar ya están instalados, agrega los de eventos que una versión
+/// anterior no registraba (al actualizarse, Telar se pone al día solo). Sin instalar, no
+/// toca nada: eso lo decide `telar install`.
+pub fn upgrade_hooks() -> Result<Vec<&'static str>, String> {
+    let (path, mut root) = load()?;
+    if !has_ours(&root) {
+        return Ok(Vec::new());
+    }
+    let added = add_hooks(&mut root)?;
+    if !added.is_empty() {
+        save(&path, &root)?;
+    }
+    Ok(added)
+}
+
+/// Algún evento ya tiene el hook de Telar.
+fn has_ours(root: &Value) -> bool {
+    root["hooks"].as_object().is_some_and(|h| h.values().any(|l| l.as_array().is_some_and(|l| l.iter().any(is_ours))))
+}
+
 /// Agrega a `root` (el settings.json) un hook de Telar por evento, sin tocar los demás.
 /// Devuelve los eventos agregados (vacío si ya estaban todos).
 fn add_hooks(root: &mut Value) -> Result<Vec<&'static str>, String> {
@@ -211,6 +235,17 @@ mod tests {
         assert_eq!(remove_hooks(&mut root), EVENTS.len());
         assert_eq!(root, json!({ "hooks": { "Stop": [ajeno()] } }));
         assert_eq!(remove_hooks(&mut root), 0);
+    }
+
+    #[test]
+    fn se_pone_al_dia_solo_si_ya_estaba_instalado() {
+        let mut root = json!({ "hooks": { "Stop": [ajeno()] } });
+        assert!(!has_ours(&root), "sin instalar no se agrega nada");
+        add_hooks(&mut root).unwrap();
+        assert!(has_ours(&root));
+        // Una instalación vieja, sin StopFailure: al ponerse al día se agrega solo ese.
+        root["hooks"].as_object_mut().unwrap().remove("StopFailure");
+        assert_eq!(add_hooks(&mut root).unwrap(), vec!["StopFailure"]);
     }
 
     #[test]

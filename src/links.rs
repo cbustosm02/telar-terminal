@@ -1,6 +1,6 @@
 //! Enlaces en la pantalla de la terminal: los que el programa marca como hipervínculo
 //! (OSC 8) y las URL escritas como texto (`https://…`, `http://localhost:4200/`,
-//! `file://…`). Se buscan en lo visible en cada dibujo, uniendo las filas que la
+//! `file://…`). Se buscan en lo visible cuando cambia la pantalla (ver `visible_links`), uniendo las filas que la
 //! terminal partió por ancho (WRAPLINE), así una URL larga partida en dos se abre entera.
 
 use alacritty_terminal::grid::Dimensions;

@@ -63,6 +63,8 @@ pub mod icons {
     pub const LOG_IN: char = '\u{e10d}';
     pub const CHEVRONS_UP_DOWN: char = '\u{e211}';
     pub const ARROW_LEFT_RIGHT: char = '\u{e24a}';
+    pub const INBOX: char = '\u{e0f7}';
+    pub const CORNER_DOWN_LEFT: char = '\u{e0a1}';
 }
 
 /// Estilo de texto: tamaño en puntos, peso (400 normal, 510 medio, 590 seminegrita) y color.
@@ -175,13 +177,20 @@ impl<'a> Kit<'a> {
         let px = self.px(style.size);
         let (mut glyphs, mut w) = self.fonts.ui_layout(s, px, style.weight);
         if w > max_w {
+            // El corte más largo que cabe, por búsqueda binaria: unas pocas formas en vez de
+            // una por cada carácter quitado (y quedan en el caché para el próximo frame).
             let chars: Vec<char> = s.chars().collect();
-            let mut n = chars.len();
-            while n > 0 && w > max_w {
-                n -= 1;
-                let cut: String = chars[..n].iter().collect::<String>().trim_end().to_string() + "…";
-                (glyphs, w) = self.fonts.ui_layout(&cut, px, style.weight);
+            let cut = |n: usize| chars[..n].iter().collect::<String>().trim_end().to_string() + "…";
+            let (mut lo, mut hi) = (0, chars.len().saturating_sub(1));
+            while lo < hi {
+                let mid = (lo + hi).div_ceil(2);
+                if self.fonts.ui_layout(&cut(mid), px, style.weight).1 <= max_w {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
             }
+            (glyphs, w) = self.fonts.ui_layout(&cut(lo), px, style.weight);
         }
         let baseline = (y + self.fonts.ui_metrics(px).1).round();
         for (g, gx, gy) in glyphs {

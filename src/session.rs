@@ -16,7 +16,11 @@ pub struct SavedTab {
     /// `session_id` de Claude Code si en el tab había una sesión abierta.
     pub claude: Option<String>,
     /// Pantalla (texto ANSI) si el tab estaba suspendido: al reabrir sigue suspendido.
+    /// Con `lazy`, la última pantalla de un tab abierto (se guarda al cerrar Telar).
     pub screen: Option<String>,
+    /// El tab estaba abierto (no lo suspendiste tú): al reabrir Telar arranca recién al
+    /// mostrarlo, con su pantalla de vista previa mientras tanto.
+    pub lazy: bool,
     /// Comando a volver a ejecutar al reanudarlo (una TUI, un servidor…).
     pub command: Option<String>,
 }
@@ -69,6 +73,7 @@ impl Saved {
                     "claude_session": t.claude,
                     "suspended_screen": t.screen,
                     "suspended_command": t.command,
+                    "lazy": t.lazy,
                 })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         })
@@ -89,6 +94,7 @@ impl Saved {
                         claude: t["claude_session"].as_str().map(String::from),
                         screen: t["suspended_screen"].as_str().map(String::from),
                         command: t["suspended_command"].as_str().map(String::from),
+                        lazy: t["lazy"].as_bool().unwrap_or(false),
                     })
                     .collect();
                 (!tabs.is_empty()).then(|| SavedGroup {
@@ -144,11 +150,11 @@ mod tests {
                     idle_exempt: true,
                     active: 1,
                     tabs: vec![
-                        SavedTab { title: Some("✳ Refactor".into()), name: None, cwd: Some("/Users/x/telar".into()), claude: Some("ses-1".into()), screen: None, command: None },
-                        SavedTab { title: None, name: Some("logs".into()), cwd: Some("/tmp".into()), claude: None, screen: Some("\x1b[31mhola".into()), command: Some("htop -d 10".into()) },
+                        SavedTab { title: Some("✳ Refactor".into()), name: None, cwd: Some("/Users/x/telar".into()), claude: Some("ses-1".into()), screen: Some("\x1b[1mhola".into()), command: None, lazy: true },
+                        SavedTab { title: None, name: Some("logs".into()), cwd: Some("/tmp".into()), claude: None, screen: Some("\x1b[31mhola".into()), command: Some("htop -d 10".into()), lazy: false },
                     ],
                 },
-                SavedGroup { name: "Grupo 2".into(), dir: None, ram_limit_mb: 0, idle_exempt: false, active: 0, tabs: vec![SavedTab { title: None, name: None, cwd: None, claude: None, screen: None, command: None }] },
+                SavedGroup { name: "Grupo 2".into(), dir: None, ram_limit_mb: 0, idle_exempt: false, active: 0, tabs: vec![SavedTab { title: None, name: None, cwd: None, claude: None, screen: None, command: None, lazy: false }] },
             ],
         }
     }

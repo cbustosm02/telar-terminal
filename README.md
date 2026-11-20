@@ -44,6 +44,8 @@ Al cerrar Telar y volver a abrirlo se recuperan los grupos, los tabs y la carpet
 - El estado se guarda en `~/.config/telar/sesion.json`: al cerrar la app, y cada 5 s si algo cambió (por si se cae).
 - Si cierras el último tab a propósito, la próxima vez Telar abre limpio.
 - La carpeta de cada tab es la del proceso en primer plano (tu shell después de un `cd`). En los tabs de Claude se usa la carpeta donde empezó la sesión, que es la que necesita `--resume`.
+- **Solo el tab visible arranca al abrir** (Configuración › General › Sesiones, viene activado). Los demás muestran la última pantalla que tenían al cerrar Telar y arrancan (con su `claude --resume`) en cuanto los abres. Así no se lanzan todos los Claude, con sus servidores MCP, a la vez al abrir o al reiniciar por una actualización.
+- El **historial por tab** (líneas a las que se puede volver con el scroll) se elige ahí mismo, de 1.000 a 100.000 (10.000 por defecto). Menos líneas usan menos memoria con muchos tabs; el cambio se aplica también a los tabs abiertos.
 
 ## Claude Code
 
@@ -57,11 +59,13 @@ Cada tab sabe en qué está su sesión de Claude Code y lo muestra con un punto 
 | sin punto | shell normal, o sesión esperando tu prompt |
 
 - **⌘J** salta al siguiente tab que te necesita (o, si no hay, al siguiente que terminó).
-- Con la ventana sin foco llega una notificación de macOS y el ícono rebota en el Dock.
+- **Bandeja de agentes** (⌘⇧J, o el ícono de bandeja junto a «GRUPOS», que lleva un punto si alguien te necesita): todas las sesiones de Claude de todos los grupos, de la más urgente a la menos, con su estado, desde hace cuánto, y la pregunta pendiente o el último paso (la última línea con ⏺). Un permiso se responde desde ahí con los botones de las opciones que muestra Claude (o con las teclas 1–9), sin cambiar de tab; «Ir al tab» lo abre.
+- Si interrumpes a Claude con Esc o el turno se corta por un error de la API o por el límite de uso, el tab deja de figurar como trabajando: Telar escucha `StopFailure` y, además, si un Claude «trabajando» pasa 10 s sin mostrar nada (mientras trabaja, su indicador se redibuja varias veces por segundo), lo da por detenido.
+- Con la ventana sin foco llega una notificación de macOS y el ícono rebota en el Dock. Desde Telar.app las notificaciones son las nativas de macOS (la primera vez pide permiso): un clic en una trae Telar al frente y muestra el tab que avisó. Fuera del paquete (el binario de `target/`) o sin permiso, se usa `osascript`.
 
 Funcionamiento:
 1. Telar abre un socket (`$TMPDIR/telar-<pid>.sock`) y exporta `TELAR_SOCKET`, `TELAR_TAB_ID` y `TELAR_BIN` en cada tab.
-2. `install-hooks` agrega a `~/.claude/settings.json` un hook por evento, que corre `telar hook`. Respeta tus otros hooks y deja un respaldo en `settings.json.telar-bak`.
+2. `install-hooks` agrega a `~/.claude/settings.json` un hook por evento, que corre `telar hook`. Respeta tus otros hooks y deja un respaldo en `settings.json.telar-bak`. Si una versión nueva escucha eventos que la anterior no registraba, los agrega sola al abrir (solo si los hooks de Telar ya estaban instalados).
 3. Fuera de Telar el hook no hace nada.
 
 Para quitarlo todo (hooks, enlace y regla): `telar uninstall`.
@@ -75,6 +79,7 @@ telar read <tab> [-n 200]           # texto de la pantalla y el scrollback
 telar send <tab> "texto" [--enter]  # escribir en un tab (varias líneas van como pegado)
 telar new [--group G] [--cwd DIR] [--focus] -- <comando>   # abrir un tab; imprime su id
 telar wait <tab> [--state done] [--timeout 600]            # esperar a que Claude termine
+telar wait <tab> --match 'Compiled|Failed' [--timeout 300] # esperar una línea nueva con ese texto
 telar group [--group G] [--dir DIR] [--name N]             # ver o cambiar la carpeta y el nombre de un grupo
 telar suspend <tab> | --group G [--force]                  # suspender (ver abajo)
 telar resume <tab> | --group G                             # reanudar
@@ -162,6 +167,7 @@ Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina so
 | ⌘N | Nuevo grupo |
 | ⌘W | Cerrar tab |
 | ⌘J | Ir al siguiente tab que te necesita |
+| ⌘⇧J | Bandeja de agentes: todas las sesiones de Claude (↑↓ elige, Enter va al tab, 1–9 responde un permiso, Esc cierra) |
 | ⌘1…⌘9 | Ir al tab N |
 | ⌘⇧← / ⌘⇧→, ⌃Tab | Tab anterior / siguiente |
 | ⌘⇧↑ / ⌘⇧↓ | Grupo anterior / siguiente |
@@ -181,21 +187,34 @@ Mouse:
 
 | Archivo | Qué hace |
 |---|---|
-| `src/main.rs` | Ciclo de eventos (winit), atajos, mouse, eventos de las terminales |
+| `src/main.rs` | Ciclo de eventos (winit), el estado de la app (`State`), el reloj periódico y el dibujo |
+| `src/app/` | Los métodos de `State` por tema: `tabs`, `agents` (estados de Claude), `commands` (pedidos de la CLI), `mouse`, `keys`, `menu`, `search`, `claude` (cuenta y uso), `resources` (límites e inactividad), `preferences` (configuración), `persist` (sesión) y `snapshot` |
 | `src/terminal.rs` | Una terminal: `alacritty_terminal` (emulador VT y PTY, con un hilo lector propio) |
 | `src/workspace.rs` | Grupos y tabs (solo ids) |
 | `src/ui.rs` | Layout, dibujo y hit-testing |
+| `src/kit.rs` | Kit de interfaz: botones, interruptores, etiquetas, íconos Lucide y texto con «…» |
 | `src/renderer.rs` | wgpu (Metal): quads instanciados, **un solo draw call por frame** |
-| `src/font.rs` | swash: rasterizado, atlas de glifos y fuentes de respaldo (mmap) |
+| `src/font.rs` | swash: rasterizado, atlas de glifos, textos de interfaz formados (con caché) y respaldos (mmap) |
+| `src/fontlist.rs` | Fuentes instaladas para elegir en la configuración |
 | `src/input.rs` | Teclado → secuencias xterm |
-| `src/theme.rs` | Paleta y colores de la interfaz |
+| `src/theme.rs` | Temas: paleta y colores de la interfaz |
+| `src/screen.rs` | Pantalla de una terminal como texto ANSI (vista previa de los tabs suspendidos) |
+| `src/links.rs` | Enlaces en pantalla (OSC 8 y URL de texto) |
 | `src/ipc.rs` | Socket Unix, cliente y `telar hook` |
-| `src/hooks.rs` | `install` / `uninstall`: hooks, enlace y regla |
-| `src/cli.rs` | Comandos `tabs`, `status`, `read`, `send`, `new`, `wait` |
+| `src/hooks.rs` | `install` / `uninstall`: hooks, enlace y regla; se pone al día solo al actualizarse |
+| `src/cli.rs` | Comandos `tabs`, `status`, `read`, `send`, `new`, `wait`, `group`, `suspend`, `resume`, `awake` |
 | `src/session.rs` | Guardar y restaurar grupos, tabs y sesiones de Claude |
 | `src/proc.rs` | Proceso en primer plano de cada tab: nombre y carpeta |
+| `src/stats.rs` / `src/statsview.rs` | Muestreo de CPU, RAM y GPU, y el panel de detalle |
+| `src/limits.rs` / `src/idle.rs` | Límites de memoria y suspensión por inactividad |
+| `src/awake.rs` | `caffeinate` para mantener el Mac despierto |
+| `src/settings.rs` / `src/config.rs` | Modal de configuración y `~/.config/telar/config.json` |
+| `src/claude_usage.rs` / `src/cuentas.rs` | Uso de Claude (API de uso) y cuentas guardadas (Llavero) |
+| `src/confirm.rs` | Diálogo de confirmación |
+| `src/update.rs` | Actualizaciones desde los releases de GitHub |
+| `src/appicon.rs` / `src/logo.rs` | Ícono de la app, paneles de macOS y el logo de Claude |
 
-Solo se dibuja cuando hay cambios (`ControlFlow::Wait`). Los tabs que no se ven no consumen GPU. En reposo usa 0 % de CPU y unos 50 MB de memoria.
+Solo se dibuja cuando hay cambios (`ControlFlow::Wait`). Los tabs que no se ven no consumen GPU. En reposo usa 0 % de CPU y unos 50 MB de memoria. Mientras algún Claude trabaja, el indicador late a ~12 fps con la ventana al frente, a ~2 fps sin foco y nada con la ventana tapada.
 
 Ver `docs/DECISIONES.md` (por qué este stack) y `docs/CLAUDE-CODE.md` (plan de integración con Claude Code).
 
@@ -210,7 +229,11 @@ Este comando:
 2. escribe el texto en la shell;
 3. guarda el frame leído desde la GPU en un BMP y cierra la app.
 
-No necesita el permiso de grabación de pantalla.
+No necesita el permiso de grabación de pantalla. Otras variables del modo captura: `TELAR_SNAPSHOT_SETTINGS=general|apariencia|icono|rendimiento|inactividad`, `TELAR_SNAPSHOT_MENU=tab|group|cuentas`, `TELAR_SNAPSHOT_INBOX=1` (la bandeja con estados de prueba), `TELAR_SNAPSHOT_UPDATE=X.Y.Z`, `TELAR_SNAPSHOT_DELETE=n`, `TELAR_SNAPSHOT_HOVER=x,y`.
+
+### Vista previa
+
+`scripts/vista-previa.sh` compila y abre la versión en desarrollo como «Telar (vista previa).app», con su propia sesión (`~/.config/telar/vista-previa.json`) y su propio identificador de paquete: no toca Telar.app ni tu sesión, y permite probar lo que necesita un paquete (las notificaciones nativas). `TELAR_NOTIFY_TEST=segundos` manda una notificación de prueba del tab visible.
 
 ## Uso de Claude en la barra lateral
 

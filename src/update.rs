@@ -327,6 +327,11 @@ fn write_bundle_files(app: &Path) -> Result<(), String> {
 pub fn ensure_bundle() {
     let Ok(exe) = current_exe() else { return };
     let Some(app) = app_bundle(&exe) else { return };
+    // Solo el paquete de Telar: otro (p. ej. una vista previa con su propio identificador)
+    // se deja como está.
+    if app.file_name().is_none_or(|n| n != "Telar.app") {
+        return;
+    }
     let plist = app.join("Contents").join("Info.plist");
     let current = std::fs::read_to_string(&plist).unwrap_or_default();
     if current == info_plist() && app.join("Contents/Resources/Telar.icns").is_file() {

@@ -77,6 +77,8 @@ pub struct Ctx<'a> {
     /// Qué muestra la barra lateral abajo: el bloque de Claude y los medidores de consumo.
     pub show_claude: bool,
     pub show_meters: bool,
+    pub lazy_restore: bool,
+    pub scrollback: usize,
 }
 
 /// Sección del ícono de la app.
@@ -127,6 +129,10 @@ pub enum Hit {
     /// Interruptores de la barra lateral: bloque de Claude y medidores de consumo.
     ShowClaude,
     ShowMeters,
+    /// Sesiones: reanudar al abrir solo el tab visible, y − / + del historial por tab.
+    LazyRestore,
+    ScrollbackDown,
+    ScrollbackUp,
 }
 
 #[derive(Default)]
@@ -159,6 +165,19 @@ struct PerfGeometry {
     auto: Rect,
     switch: Rect,
     note_y: f32,
+}
+
+/// Número con punto de miles: 10000 → «10.000».
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('.');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// − y + a la derecha de una fila.
@@ -260,6 +279,12 @@ struct Geometry {
     sidebar_y: f32,
     show_claude: Rect,
     show_meters: Rect,
+    /// Sección General: al abrir Telar y el historial por tab.
+    sessions_y: f32,
+    lazy_restore: Rect,
+    scrollback: Rect,
+    scrollback_down: Rect,
+    scrollback_up: Rect,
 }
 
 fn geometry(l: &Layout) -> Geometry {
@@ -310,6 +335,10 @@ fn geometry(l: &Layout) -> Geometry {
     let sidebar_y = start_pick.y + start_pick.h + 22.0 * s + 3.0 * 18.0 * s + 20.0 * s;
     let show_claude = Rect { x: content_x, y: sidebar_y + 22.0 * s, w: content_w, h: 46.0 * s };
     let show_meters = Rect { y: show_claude.y + show_claude.h + 8.0 * s, ..show_claude };
+    let sessions_y = show_meters.y + show_meters.h + 22.0 * s;
+    let lazy_restore = Rect { y: sessions_y + 22.0 * s, ..show_claude };
+    let scrollback = Rect { y: lazy_restore.y + lazy_restore.h + 8.0 * s, ..show_claude };
+    let (scrollback_down, scrollback_up) = stepper(scrollback, s);
     Geometry {
         panel,
         close,
@@ -334,6 +363,11 @@ fn geometry(l: &Layout) -> Geometry {
         sidebar_y,
         show_claude,
         show_meters,
+        sessions_y,
+        lazy_restore,
+        scrollback,
+        scrollback_down,
+        scrollback_up,
     }
 }
 
@@ -415,6 +449,12 @@ impl Settings {
                 Hit::ShowClaude
             } else if g.show_meters.contains(x, y) {
                 Hit::ShowMeters
+            } else if g.lazy_restore.contains(x, y) {
+                Hit::LazyRestore
+            } else if g.scrollback_down.contains(x, y) {
+                Hit::ScrollbackDown
+            } else if g.scrollback_up.contains(x, y) {
+                Hit::ScrollbackUp
             } else {
                 Hit::Inside
             };
@@ -788,6 +828,26 @@ impl Settings {
         };
         toggle(k, g.show_claude, ctx.show_claude, "Uso de Claude", "Sesión y semana con su reinicio, correo y plan de la cuenta", Hit::ShowClaude);
         toggle(k, g.show_meters, ctx.show_meters, "Consumo de recursos", "CPU, RAM y GPU de Telar y lo que corre en sus tabs", Hit::ShowMeters);
+
+        k.text(cx, g.sessions_y, "SESIONES", Text::caption(), g.content_w);
+        toggle(
+            k,
+            g.lazy_restore,
+            ctx.lazy_restore,
+            "Al abrir, reanudar solo el tab visible",
+            "Los demás muestran su última pantalla y arrancan al abrirlos",
+            Hit::LazyRestore,
+        );
+        let r = g.scrollback;
+        k.bordered(r, 8.0, th.chrome, th.border);
+        let right = g.scrollback_down.x - 12.0 * s;
+        k.text(r.x + 14.0 * s, r.y + 7.0 * s, "Historial por tab", Text::label(), right - r.x - 14.0 * s);
+        k.text(r.x + 14.0 * s, r.y + 26.0 * s, "Menos líneas, menos memoria con muchos tabs", Text::small(), right - r.x - 14.0 * s);
+        k.button(g.scrollback_down, "", Some(icons::MINUS), Variant::Subtle, self.hover == Some(Hit::ScrollbackDown));
+        k.button(g.scrollback_up, "", Some(icons::PLUS), Variant::Subtle, self.hover == Some(Hit::ScrollbackUp));
+        let d = g.scrollback_down;
+        let value = Rect { x: d.x + d.w, y: d.y, w: g.scrollback_up.x - d.x - d.w, h: d.h };
+        k.text_center(value, &format!("{} líneas", thousands(ctx.scrollback)), Text::label());
     }
 
     fn draw_icons(&self, k: &mut Kit, g: &Geometry, current: &str) {

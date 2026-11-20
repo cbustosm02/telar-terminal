@@ -77,6 +77,8 @@ pub enum Hit {
     Update,
     /// Engranaje: abre la configuración.
     Settings,
+    /// Bandeja: abre el panel con todas las sesiones de Claude.
+    Agents,
     /// Medidores de uso: abren el detalle.
     Stats,
     /// Campo de búsqueda de tabs y grupos.
@@ -147,6 +149,11 @@ impl Layout {
     /// «+» fijo junto a «GRUPOS»: grupo nuevo sin bajar hasta el final de la lista.
     fn new_group_button(&self) -> Rect {
         Rect { x: self.settings_rect().x - 28.0 * self.s, ..self.settings_rect() }
+    }
+
+    /// Bandeja de agentes, a la izquierda del «+».
+    fn agents_button(&self) -> Rect {
+        Rect { x: self.new_group_button().x - 28.0 * self.s, ..self.settings_rect() }
     }
 
     pub fn search_rect(&self) -> Rect {
@@ -279,6 +286,9 @@ impl Layout {
             }
             if self.new_group_button().contains(x, y) {
                 return Hit::NewGroup;
+            }
+            if self.agents_button().contains(x, y) {
+                return Hit::Agents;
             }
             if self.search_rect().contains(x, y) {
                 return Hit::Search;
@@ -504,6 +514,8 @@ pub struct View<'a> {
     /// Celda de la terminal bajo el puntero (columna, fila), si al hacer clic se abriría
     /// un enlace ahí: el enlace se resalta.
     pub link_cell: Option<(usize, usize)>,
+    /// Enlaces de la pantalla del tab visible (se buscan solo cuando cambia).
+    pub links: &'a [crate::links::Link],
     /// Uso de Claude (sesión y semana) y la cuenta, para el bloque de la barra lateral.
     pub claude_usage: &'a crate::claude_usage::Usage,
     pub claude_account: Option<&'a crate::claude_usage::Account>,
@@ -541,7 +553,7 @@ pub fn search(ws: &Workspace, terms: &HashMap<u64, Terminal>, query: &str) -> Ve
 
 /// Prioridad y color del indicador de un tab (None = sin indicador).
 /// Color del punto de «trabajando»: el acento, latiendo.
-fn status_pulse(time: f32) -> Rgba {
+pub fn status_pulse(time: f32) -> Rgba {
     let pulse = 0.5 + 0.5 * (time * std::f32::consts::TAU * 0.9).sin();
     let mut c = theme::t().accent;
     c[3] = 0.3 + 0.7 * pulse;
@@ -724,6 +736,20 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
     k.text_in(g, 18.0 * s, "GRUPOS", Text::caption());
     k.icon_button(g, icons::SETTINGS, 15.0, v.hover == Hit::Settings);
     k.icon_button(l.new_group_button(), icons::PLUS, 15.0, v.hover == Hit::NewGroup);
+    let ab = l.agents_button();
+    k.icon_button(ab, icons::INBOX, 15.0, v.hover == Hit::Agents);
+    // Un punto si algún Claude te necesita (o, si no, si alguno terminó y no lo viste).
+    let states = || v.terms.values().map(|t| t.agent.state);
+    let badge = if states().any(|s| s == AgentState::NeedsYou) {
+        Some(th.attention)
+    } else if states().any(|s| s == AgentState::Done) {
+        Some(th.done)
+    } else {
+        None
+    };
+    if let Some(c) = badge {
+        k.dot(ab.x + ab.w - 6.0 * s, ab.y + 5.0 * s, 6.0, c);
+    }
 
     // Buscador: con la búsqueda cerrada muestra el atajo.
     let sr = l.search_rect();
@@ -1196,8 +1222,19 @@ fn draw_terminal(
     out.push(Quad::rect(x0, l.titlebar_h(), l.w - x0, l.h - l.titlebar_h(), default_bg));
 
     // Enlaces: subrayados y en azul (el del tema); el que está bajo el puntero, con el acento.
-    let links = crate::links::scan(term);
-    let link_at = |col: usize, row: usize| links.iter().position(|k| k.contains(col, row));
+    // Por fila, para no recorrer todos los enlaces en cada celda.
+    let links = v.links;
+    let mut by_row: Vec<Vec<(usize, usize, usize)>> = vec![Vec::new(); if links.is_empty() { 0 } else { l.rows }];
+    for (i, k) in links.iter().enumerate() {
+        for &(r, c0, c1) in &k.spans {
+            if let Some(row) = by_row.get_mut(r) {
+                row.push((c0, c1, i));
+            }
+        }
+    }
+    let link_at = |col: usize, row: usize| {
+        by_row.get(row).and_then(|spans| spans.iter().find(|(c0, c1, _)| (*c0..=*c1).contains(&col)).map(|s| s.2))
+    };
     let hovered_link = v.link_cell.and_then(|(c, r)| link_at(c, r));
 
     // El ⏺ que Claude Code pone delante de cada paso: mientras trabaja, el último de la

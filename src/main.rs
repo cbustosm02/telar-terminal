@@ -1,5 +1,6 @@
 //! Telar: terminal personal con grupos de tabs en una barra lateral.
 
+mod app;
 mod appicon;
 mod awake;
 mod cli;
@@ -11,10 +12,12 @@ mod font;
 mod fontlist;
 mod hooks;
 mod idle;
+mod inbox;
 mod input;
 mod kit;
 mod limits;
 mod links;
+mod notify;
 mod logo;
 mod ipc;
 mod proc;
@@ -62,11 +65,18 @@ use crate::workspace::{Group, Workspace};
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
+/// Ritmo del indicador de «trabajando»: ~12 fps con la ventana al frente y ~2 fps sin foco
+/// (se ve igual de vivo de reojo y cuesta seis veces menos). Tapada, no se anima.
 const SPINNER_TICK: Duration = Duration::from_millis(80);
-/// Cada cuánto se refrescan procesos/carpetas y se guarda la sesión (si cambió).
+const SPINNER_TICK_UNFOCUSED: Duration = Duration::from_millis(500);
 /// Cada cuánto se busca en segundo plano una versión nueva.
 const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+/// Cada cuánto se refrescan procesos/carpetas y se guarda la sesión (si cambió).
 const SAVE_TICK: Duration = Duration::from_secs(5);
+/// Sin cambios de tamaño durante este tiempo, el arrastre del borde terminó.
+const RESIZE_SETTLE: Duration = Duration::from_millis(250);
+/// Silencio tras el cual un Claude «trabajando» se da por detenido (ver `unstick_working`).
+const STUCK_AFTER: Duration = Duration::from_secs(10);
 
 pub enum UserEvent {
     /// Evento de la terminal `id`, de la generación indicada (ver `terminal::Listener`).
@@ -82,11 +92,12 @@ pub enum UserEvent {
     ClaudeAccount(Option<claude_usage::Account>),
     /// Cuentas guardadas y la clave de la activa.
     Accounts(Vec<cuentas::Saved>, Option<String>),
+    /// Clic en una notificación (con el tab que avisó, si era de uno).
+    NotificationClicked(Option<u64>),
     /// Uso consultado de cada cuenta (clave), o el error.
     UsageAll(Vec<(String, Result<claude_usage::Usage, String>)>),
-    /// Terminó una operación de cuentas: mensaje para avisar, o el error; y si fue un
-    /// cambio de cuenta (hay que reiniciar las sesiones de Claude en reposo).
-    AccountDone(Result<String, String>, bool),
+    /// Terminó una operación de cuentas: mensaje para avisar, o el error.
+    AccountDone(Result<String, String>),
 }
 
 /// Para qué se abrió un panel de macOS.
@@ -155,6 +166,8 @@ struct State {
     menu: Option<Menu>,
     preedit: String,
     focused: bool,
+    /// La ventana está tapada por completo (otra app encima, minimizada, otro escritorio).
+    occluded: bool,
     clipboard: Option<arboard::Clipboard>,
     quads: Vec<Quad>,
     fg_quads: Vec<Quad>,
@@ -176,6 +189,8 @@ struct State {
     /// El hilo de muestreo mide solo si hace falta (ver `update_stats_needed`).
     stats_on: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stats_detail: Option<statsview::Detail>,
+    /// Bandeja de agentes abierta (⌘⇧J).
+    inbox: Option<inbox::Inbox>,
     /// Diálogo de confirmación abierto (eliminar un grupo).
     confirm: Option<confirm::Confirm>,
     /// Enlace bajo el puntero que se abriría con un clic (su celda, para resaltarlo) y el
@@ -202,8 +217,7 @@ struct State {
     update_quiet: bool,
     /// Próxima búsqueda de versión nueva en segundo plano.
     next_update_check: Instant,
-    /// Uso de Claude (lo envía el mod prompt-info con `telar usage`) y la cuenta.
-    /// Uso de cada cuenta (clave de `cuentas`) y el último error de su consulta.
+    /// Uso de Claude de cada cuenta (clave de `cuentas`) y el último error de su consulta.
     claude_use: HashMap<String, claude_usage::Usage>,
     usage_errors: HashMap<String, String>,
     /// Hay una consulta en curso, y cuándo empezó la última (solo la activa, y todas).
@@ -218,7 +232,14 @@ struct State {
     claude_minute: u64,
     /// Pedido de salir desde fuera del teclado (p. ej. «Reiniciar» tras actualizar).
     quit: bool,
+    /// Cuándo redimensionar los tabs ocultos (al terminar de arrastrar el borde).
+    resize_pending: Option<Instant>,
+    /// Enlaces de la pantalla del tab visible, con la versión de pantalla en que se buscaron.
+    links_cache: std::cell::RefCell<Option<(LinksKey, std::rc::Rc<Vec<links::Link>>)>>,
 }
+
+/// De qué pantalla son los enlaces guardados: tab, proceso, contenido, desplazamiento y tamaño.
+type LinksKey = (u64, u64, u64, usize, usize, usize);
 
 /// Arrastre para reordenar: empieza al apretar sobre un grupo o un tab y cuenta como
 /// arrastre recién al moverse unos píxeles (antes es un clic normal).
@@ -276,6 +297,7 @@ impl ApplicationHandler<UserEvent> for App {
             stats: None,
             stats_on: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             stats_detail: None,
+            inbox: None,
             confirm: None,
             link_cell: None,
             link_press: None,
@@ -306,6 +328,7 @@ impl ApplicationHandler<UserEvent> for App {
             menu: None,
             preedit: String::new(),
             focused: true,
+            occluded: false,
             clipboard: arboard::Clipboard::new().ok(),
             quads: Vec::new(),
             fg_quads: Vec::new(),
@@ -343,6 +366,8 @@ impl ApplicationHandler<UserEvent> for App {
             account_key: None,
             claude_minute: 0,
             quit: false,
+            resize_pending: None,
+            links_cache: Default::default(),
         };
         if let Some(server) = &state.server {
             // Para que el modo snapshot (y quien depure) sepa dónde está el socket.
@@ -371,12 +396,24 @@ impl ApplicationHandler<UserEvent> for App {
         state.update_stats_needed();
         stats::spawn(state.proxy.clone(), state.stats_on.clone());
         if state.snapshot.is_none() {
+            notify::init(state.proxy.clone());
+            if let Some(secs) = std::env::var("TELAR_NOTIFY_TEST").ok().and_then(|s| s.parse().ok()) {
+                notify::self_test(Duration::from_secs(secs), state.ws.active_term());
+            }
+        }
+        if state.snapshot.is_none() {
             // Ícono del paquete (si la app se actualizó desde una versión sin él) y el elegido.
             update::ensure_bundle();
             let _ = appicon::apply(&state.config.app_icon, false);
         }
         if state.snapshot.is_none() {
             update::cleanup_leftovers();
+            // Una versión nueva puede escuchar eventos de Claude Code que la anterior no registraba.
+            match hooks::upgrade_hooks() {
+                Ok(added) if !added.is_empty() => log::info!("hooks de Claude agregados: {}", added.join(", ")),
+                Ok(_) => {}
+                Err(e) => log::warn!("no se pudieron poner al día los hooks: {e}"),
+            }
             update::check(state.proxy.clone());
             state.refresh_claude_account();
         }
@@ -410,6 +447,14 @@ impl ApplicationHandler<UserEvent> for App {
                 st.window.request_redraw();
                 return;
             }
+            UserEvent::NotificationClicked(tab) => {
+                st.window.focus_window();
+                if let Some(id) = tab.filter(|id| st.terms.contains_key(id)) {
+                    st.show_tab(id);
+                }
+                st.window.request_redraw();
+                return;
+            }
             UserEvent::Picked(picked) => {
                 st.on_picked(picked);
                 return;
@@ -426,8 +471,8 @@ impl ApplicationHandler<UserEvent> for App {
                 st.account_key = current;
                 return;
             }
-            UserEvent::AccountDone(result, switched) => {
-                st.account_done(result, switched);
+            UserEvent::AccountDone(result) => {
+                st.account_done(result);
                 return;
             }
             UserEvent::UsageAll(results) => {
@@ -469,6 +514,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Lo que muestra Claude no: su interfaz puede redibujarse sola estando quieta. Con
         // Claude cuenta que trabaje (ver `enforce_idle`), que lo veas o que escribas.
         if let (TermEvent::Wakeup, Some(t)) = (&event, st.terms.get(&id)) {
+            t.changed();
             if t.agent.state == AgentState::None {
                 t.touch();
             }
@@ -538,6 +584,10 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         }
+        // Un tab que esperaba a mostrarse (reanudación perezosa) arranca en cuanto se ve.
+        if st.snapshot.is_none() {
+            st.wake_lazy_active();
+        }
         // Mientras algún agente trabaja, el indicador pulsa: se redibuja a ~12 fps.
         // Si nadie trabaja, la app vuelve a dormir hasta el próximo evento.
         if now >= st.next_save {
@@ -545,12 +595,20 @@ impl ApplicationHandler<UserEvent> for App {
             st.next_save = now + SAVE_TICK;
         }
         let mut wake = Some(st.snapshot.as_ref().map_or(st.next_save, |s| s.at.min(st.next_save)));
-        if st.terms.values().any(|t| t.agent.state == AgentState::Working) {
+        if !st.occluded && st.terms.values().any(|t| t.agent.state == AgentState::Working) {
             if now >= st.next_tick {
                 st.window.request_redraw();
-                st.next_tick = now + SPINNER_TICK;
+                st.next_tick = now + if st.focused { SPINNER_TICK } else { SPINNER_TICK_UNFOCUSED };
             }
             wake = wake.map(|w| w.min(st.next_tick));
+        }
+        if let Some(at) = st.resize_pending {
+            if now >= at {
+                st.resize_pending = None;
+                st.resize_terms();
+            } else {
+                wake = wake.map(|w| w.min(at));
+            }
         }
         event_loop.set_control_flow(match wake {
             Some(at) => ControlFlow::WaitUntil(at),
@@ -562,7 +620,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Se guarda antes de cerrar las terminales: así las sesiones de Claude
         // quedan registradas como abiertas y se retoman al volver a abrir.
         if let Some(st) = self.state.as_mut() {
-            st.save_session();
+            st.save_session_final();
         }
     }
 
@@ -572,8 +630,18 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 st.renderer.resize(size.width, size.height);
-                st.resize_terms();
+                // Mientras se arrastra el borde, solo el tab visible: redimensionar todos
+                // recalcula su historial y le manda SIGWINCH a cada programa. Los demás, al
+                // soltar (cuando dejan de llegar cambios de tamaño).
+                st.resize_visible();
+                st.resize_pending = Some(Instant::now() + RESIZE_SETTLE);
                 st.window.request_redraw();
+            }
+            WindowEvent::Occluded(occluded) => {
+                st.occluded = occluded;
+                if !occluded {
+                    st.window.request_redraw();
+                }
             }
             WindowEvent::ScaleFactorChanged { .. } => st.apply_font_size(),
             WindowEvent::Focused(focused) => {
@@ -627,1653 +695,6 @@ impl State {
         l
     }
 
-    /// Lee en un hilo el correo y el plan de la cuenta de Claude Code.
-    fn refresh_claude_account(&mut self) {
-        if !self.config.show_claude {
-            return;
-        }
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            // La primera vez se traen las cuentas que ya tenía cswap.
-            if cuentas::list().is_empty() {
-                let _ = cuentas::import_cswap();
-            }
-            // La copia de la cuenta activa se mantiene al día (Claude Code rota el token).
-            cuentas::sync_current();
-            let _ = proxy.send_event(UserEvent::Accounts(cuentas::list(), cuentas::current().map(|c| c.key)));
-            let _ = proxy.send_event(UserEvent::ClaudeAccount(claude_usage::account()));
-        });
-        self.fetch_usage(false);
-    }
-
-    /// Consulta en un hilo el uso de todas las cuentas (la API, con el token de cada una).
-    fn refresh_usage(&mut self) {
-        self.fetch_usage(true);
-    }
-
-    /// Consulta el uso de la cuenta activa y, con `others`, el de las demás guardadas.
-    fn fetch_usage(&mut self, others: bool) {
-        if !self.config.show_claude || self.usage_fetching || self.snapshot.is_some() {
-            return;
-        }
-        self.usage_fetching = true;
-        self.usage_fetched = Some(Instant::now());
-        if others {
-            self.usage_fetched_all = Some(Instant::now());
-        }
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            let _ = proxy.send_event(UserEvent::UsageAll(cuentas::usage_all(others)));
-        });
-    }
-
-    /// Texto corto del uso de una cuenta para el menú: «42 % · 18 %» (sesión · semana).
-    fn usage_detail(&self, key: &str) -> Option<String> {
-        if let Some(u) = self.claude_use.get(key) {
-            let now = std::time::SystemTime::now();
-            let pct = |l: Option<claude_usage::Limit>| l.map_or("—".to_string(), |l| format!("{:.0} %", l.now(now).0));
-            return Some(format!("{} · {}", pct(u.session), pct(u.week)));
-        }
-        self.usage_errors.get(key).map(|e| if e == claude_usage::DEAD_LOGIN { "inicia sesión".into() } else { "sin datos".into() })
-    }
-
-    /// Menú de cuentas (clic en el correo del bloque de Claude).
-    fn open_account_menu(&mut self) {
-        let mut items = Vec::new();
-        for (i, a) in self.accounts.iter().enumerate() {
-            let current = self.account_key.as_deref() == Some(a.key.as_str());
-            let mut label = a.email.clone();
-            if let Some(plan) = &a.plan {
-                label.push_str(&format!(" · {plan}"));
-            }
-            let mut item = MenuItem::owned(if current { icons::CHECK } else { icons::USER }, label, Action::SwitchAccount(i));
-            if let Some(d) = self.usage_detail(&a.key) {
-                item = item.with_detail(d);
-            }
-            // ✕ para quitarla (no la activa: está en uso).
-            if !current {
-                item = item.with_remove(Action::RemoveAccount(i));
-            }
-            items.push(item);
-        }
-        if !items.is_empty() {
-            items.push(MenuItem::separator());
-        }
-        let saved = self.account_key.as_ref().is_some_and(|k| self.accounts.iter().any(|a| &a.key == k));
-        let save_label = if saved { "Actualizar la cuenta actual" } else { "Agregar la cuenta actual" };
-        items.push(MenuItem::new(icons::USER_PLUS, save_label, &[], Action::SaveAccount));
-        items.push(MenuItem::new(icons::LOG_IN, "Iniciar sesión con otra cuenta", &[], Action::LoginAccount));
-        let l = self.layout();
-        self.menu = Some(Menu::with_width(self.cursor.0, self.cursor.1, None, self.ws.active, items, &l, 380.0));
-        self.editing = None;
-        self.window.set_cursor(CursorIcon::Default);
-        self.window.request_redraw();
-        // Al abrir el menú se consulta el uso de todas las cuentas (si la última consulta de
-        // todas fue hace más de 1 min); llega con el menú abierto y se actualiza ahí.
-        if self.usage_fetched_all.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
-            self.usage_fetching = false;
-            self.refresh_usage();
-        }
-    }
-
-    /// Corre una operación de cuentas en un hilo (el Llavero y los bloqueos pueden tardar).
-    fn account_task(&self, switched: bool, f: impl FnOnce() -> Result<String, String> + Send + 'static) {
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            let _ = proxy.send_event(UserEvent::AccountDone(f(), switched));
-        });
-    }
-
-    /// Terminó una operación de cuentas: avisa y vuelve a leer la cuenta y su uso. Un cambio
-    /// es en caliente: las sesiones de Claude abiertas siguen (también las que trabajan) y
-    /// toman la credencial nueva del Llavero, sin reiniciar nada.
-    fn account_done(&mut self, result: Result<String, String>, _switched: bool) {
-        match result {
-            Ok(msg) => notify_macos("Cuentas de Claude", &msg),
-            Err(e) => notify_macos("No se pudo", &e),
-        }
-        self.claude_account = None;
-        self.refresh_claude_account();
-        self.window.request_redraw();
-    }
-
-    /// Abre una terminal nueva en la carpeta del tab activo.
-    /// Carpeta de inicio de la configuración, si sigue existiendo.
-    fn start_dir(&self) -> Option<PathBuf> {
-        self.config.start_dir.clone().filter(|d| d.is_dir())
-    }
-
-    /// Tab para un grupo nuevo: en la carpeta de inicio o, sin ella, en la del tab activo.
-    fn spawn_term(&mut self) -> Option<u64> {
-        let cwd = self.start_dir().or_else(|| self.active().and_then(|t| t.cwd()));
-        self.spawn_term_in(cwd.as_deref())
-    }
-
-    fn spawn_term_in(&mut self, cwd: Option<&Path>) -> Option<u64> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let t = self.spawn_with_id(id, cwd)?;
-        self.terms.insert(id, t);
-        Some(id)
-    }
-
-    fn spawn_with_id(&self, id: u64, cwd: Option<&Path>) -> Option<Terminal> {
-        let socket = self.server.as_ref().map(|s| s.path.as_path());
-        Terminal::spawn(id, self.layout().grid_size(), self.proxy.clone(), socket, cwd)
-            .map_err(|e| log::error!("no se pudo abrir la shell: {e}"))
-            .ok()
-    }
-
-    /// Suspende un tab: guarda su pantalla y cierra su shell (y Claude, si corre ahí).
-    /// Queda la vista previa; al reanudarlo, Claude retoma la misma sesión.
-    fn suspend(&mut self, id: u64) -> bool {
-        let Some(old) = self.terms.get_mut(&id) else { return false };
-        if old.is_suspended() {
-            return false;
-        }
-        let claude = old.agent.state != AgentState::None && old.agent.session_id.is_some();
-        // Con Claude, su carpeta es donde se inició la sesión (la necesita --resume).
-        let cwd = if claude { old.agent.cwd.as_ref().map(PathBuf::from).or_else(|| old.cwd()) } else { old.cwd() };
-        let screen = screen::to_ansi(&old.term.lock());
-        // Otra cosa que la shell o Claude en primer plano (una TUI, un servidor): se
-        // vuelve a ejecutar al reanudar, como Claude con --resume.
-        let command = if claude { None } else { old.foreground_command() };
-        let title = old.title.take();
-        let name = old.name.take();
-        let mut agent = std::mem::take(&mut old.agent);
-        let size = old.size();
-        let last_used = old.last_used.get();
-        let mut t = Terminal::frozen(id, size, self.proxy.clone(), Frozen { cwd, screen, command });
-        t.last_used.set(last_used);
-        t.title = title;
-        t.name = name;
-        if claude {
-            agent.set_state(AgentState::Idle);
-            agent.message = None;
-            t.agent = agent;
-        }
-        // Al reemplazarla se suelta la terminal vieja: su shell recibe SIGHUP.
-        self.terms.insert(id, t);
-        self.window.request_redraw();
-        true
-    }
-
-    /// Vuelve a abrir un tab suspendido en su carpeta; si tenía Claude, retoma la sesión.
-    fn resume(&mut self, id: u64) -> bool {
-        let Some(old) = self.terms.get(&id) else { return false };
-        let Some(frozen) = &old.frozen else { return false };
-        let cwd = frozen.cwd.clone();
-        let command = frozen.command.clone();
-        let session = old.agent.session_id.clone().filter(|_| old.agent.state != AgentState::None);
-        let (title, name) = (old.title.clone(), old.name.clone());
-        let Some(mut t) = self.spawn_with_id(id, cwd.as_deref()) else { return false };
-        t.title = title;
-        t.name = name;
-        let claude = session.is_some_and(|s| resume_claude(&mut t, &s, cwd.as_deref()));
-        if let Some(command) = command.filter(|_| !claude) {
-            t.write(format!("{command}\r").into_bytes());
-        }
-        self.terms.insert(id, t);
-        self.window.request_redraw();
-        true
-    }
-
-    /// Tabs del grupo que se pueden suspender sin cortar trabajo: no están trabajando
-    /// ni esperando un permiso.
-    fn suspendable(&self, gi: usize) -> Vec<u64> {
-        let Some(g) = self.ws.groups.get(gi) else { return Vec::new() };
-        g.tabs
-            .iter()
-            .copied()
-            .filter(|id| {
-                self.terms.get(id).is_some_and(|t| {
-                    !t.is_suspended() && !matches!(t.agent.state, AgentState::Working | AgentState::NeedsYou)
-                })
-            })
-            .collect()
-    }
-
-    /// ⌘S: suspende o reanuda el tab activo.
-    fn toggle_suspend_tab(&mut self) {
-        let Some(id) = self.ws.active_term() else { return };
-        if self.terms.get(&id).is_some_and(Terminal::is_suspended) {
-            self.resume(id);
-        } else {
-            self.suspend(id);
-        }
-    }
-
-    /// ⌘⇧S: suspende el grupo activo (salvo los tabs que trabajan); si ya está todo
-    /// suspendido, lo reanuda entero.
-    fn toggle_suspend_group(&mut self, gi: usize) {
-        let awake = self.suspendable(gi);
-        if awake.is_empty() {
-            let tabs = self.ws.groups.get(gi).map(|g| g.tabs.clone()).unwrap_or_default();
-            for id in tabs {
-                self.resume(id);
-            }
-        } else {
-            for id in awake {
-                self.suspend(id);
-            }
-        }
-    }
-
-    fn new_group(&mut self) -> Option<u64> {
-        let id = self.spawn_term()?;
-        self.ws.add_group(id);
-        self.reveal_active_group();
-        self.window.request_redraw();
-        Some(id)
-    }
-
-    /// Hay texto en el buscador: la lista muestra resultados.
-    fn searching(&self) -> bool {
-        self.search.as_ref().is_some_and(|(q, _)| !q.trim().is_empty())
-    }
-
-    fn search_results(&self) -> Vec<ui::Found> {
-        self.search.as_ref().map(|(q, _)| ui::search(&self.ws, &self.terms, q)).unwrap_or_default()
-    }
-
-    /// Filas de la lista: grupos + «Nuevo grupo», o los resultados de la búsqueda.
-    fn list_len(&self) -> usize {
-        if self.searching() { self.search_results().len() } else { self.ws.groups.len() + 1 }
-    }
-
-    /// Desplaza la lista para que se vea la fila `i`.
-    fn reveal_row(&mut self, i: usize) {
-        let rows = self.layout().list_rows();
-        if i < self.list_scroll {
-            self.list_scroll = i;
-        } else if i >= self.list_scroll + rows {
-            self.list_scroll = i + 1 - rows;
-        }
-    }
-
-    fn reveal_active_group(&mut self) {
-        if !self.searching() {
-            self.reveal_row(self.ws.active);
-        }
-    }
-
-    /// ⌘P o clic en el buscador.
-    fn open_search(&mut self) {
-        if self.search.is_none() {
-            self.search = Some((String::new(), 0));
-        }
-        self.editing = None;
-        self.menu = None;
-        self.window.request_redraw();
-    }
-
-    fn close_search(&mut self) {
-        self.search = None;
-        self.list_scroll = 0;
-        self.reveal_active_group();
-        self.window.request_redraw();
-    }
-
-    /// Va al resultado `i` de la búsqueda (grupo, y tab si lo hay) y cierra el buscador.
-    fn go_to_result(&mut self, i: usize) {
-        let Some(f) = self.search_results().get(i).copied() else { return };
-        self.ws.select_group(f.group);
-        if let Some(ti) = f.tab {
-            self.ws.select_tab(ti);
-        }
-        self.close_search();
-        self.after_switch();
-    }
-
-    /// Teclado con el buscador abierto.
-    fn search_key(&mut self, event: &KeyEvent) {
-        let n = self.search_results().len();
-        let cmd = self.mods.super_key();
-        let Some((query, selected)) = self.search.as_mut() else { return };
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => return self.close_search(),
-            Key::Named(NamedKey::Enter) => {
-                let i = *selected;
-                return self.go_to_result(i);
-            }
-            Key::Named(NamedKey::ArrowDown) if n > 0 => *selected = (*selected + 1).min(n - 1),
-            Key::Named(NamedKey::ArrowUp) => *selected = selected.saturating_sub(1),
-            Key::Named(NamedKey::Backspace) => {
-                query.pop();
-                *selected = 0;
-            }
-            _ if cmd => match event.key_without_modifiers() {
-                Key::Character(c) if c.as_str() == "p" => return self.close_search(),
-                Key::Character(c) if c.as_str() == "v" => {
-                    if let Some(text) = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) {
-                        if let Some((query, selected)) = self.search.as_mut() {
-                            query.extend(text.chars().filter(|c| !c.is_control()));
-                            *selected = 0;
-                        }
-                    }
-                }
-                _ => {}
-            },
-            _ => {
-                if let Some(t) = &event.text {
-                    query.extend(t.chars().filter(|c| !c.is_control()));
-                    *selected = 0;
-                }
-            }
-        }
-        // La lista muestra los resultados desde arriba y sigue al elegido.
-        let sel = self.search.as_ref().map_or(0, |(_, s)| *s);
-        if sel == 0 {
-            self.list_scroll = 0;
-        }
-        self.reveal_row(sel);
-        self.window.request_redraw();
-    }
-
-    /// Carpeta de un tab nuevo en el grupo activo: la del grupo; si no tiene, la de inicio
-    /// de la configuración; y si tampoco hay, la del tab activo.
-    fn new_tab_cwd(&self) -> Option<PathBuf> {
-        let dir = self.ws.group().and_then(|g| g.dir.clone()).filter(|d| d.is_dir());
-        dir.or_else(|| self.start_dir()).or_else(|| self.active().and_then(|t| t.cwd()))
-    }
-
-    fn new_tab(&mut self) -> Option<u64> {
-        if self.ws.groups.is_empty() {
-            return self.new_group();
-        }
-        let cwd = self.new_tab_cwd();
-        let id = self.spawn_term_in(cwd.as_deref())?;
-        self.ws.add_tab(id);
-        self.window.request_redraw();
-        Some(id)
-    }
-
-    /// ⌘⇧T: tab nuevo que arranca Claude Code (en la carpeta del grupo).
-    fn new_agent(&mut self) {
-        if let Some(id) = self.new_tab() {
-            // La shell todavía arranca: lo escrito queda en el buffer del PTY y se ejecuta al estar lista.
-            self.write(id, b"claude\r".to_vec());
-        }
-    }
-
-    /// La primera sesión de Claude de un grupo sin carpeta le da la suya; si el grupo aún
-    /// se llama «Grupo N», también su nombre. Así sus tabs y agentes nuevos abren en ese proyecto.
-    fn adopt_group_dir(&mut self, tab: u64, dir: &Path) {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        if home.as_deref() == Some(dir) || !dir.is_dir() {
-            return;
-        }
-        let Some(gi) = self.ws.group_of(tab) else { return };
-        let g = &mut self.ws.groups[gi];
-        if g.dir.is_some() {
-            return;
-        }
-        g.dir = Some(dir.to_path_buf());
-        if workspace::is_default_name(&g.name) {
-            if let Some(base) = dir.file_name() {
-                g.name = base.to_string_lossy().into_owned();
-            }
-        }
-        self.window.request_redraw();
-    }
-
-    /// Cierra una terminal. Devuelve `true` si ya no queda ninguna (hay que salir).
-    /// Pide confirmación para eliminar el grupo `gi` con todos sus tabs.
-    fn ask_delete_group(&mut self, gi: usize) {
-        let Some(g) = self.ws.groups.get(gi) else { return };
-        let Some(&anchor) = g.tabs.first() else { return };
-        let terms: Vec<&Terminal> = g.tabs.iter().filter_map(|id| self.terms.get(id)).collect();
-        let claude = terms.iter().filter(|t| t.agent.session_id.is_some()).count();
-        let working = terms.iter().filter(|t| t.agent.state == AgentState::Working).count();
-        self.confirm = Some(confirm::delete_group(&g.name, g.tabs.len(), claude, working, anchor));
-        self.menu = None;
-        self.editing = None;
-        self.drag = None;
-        self.hover = Hit::None;
-        self.window.set_cursor(CursorIcon::Default);
-        self.window.request_redraw();
-    }
-
-    /// Hace lo que se confirmó en el diálogo y lo cierra.
-    fn run_confirm(&mut self) {
-        let Some(c) = self.confirm.take() else { return };
-        match c.pending {
-            confirm::Pending::DeleteGroup { anchor } => {
-                if let Some(gi) = self.ws.group_of(anchor) {
-                    self.delete_group(gi);
-                }
-            }
-            confirm::Pending::RemoveAccount { key } => {
-                self.account_task(false, move || cuentas::remove(&key).map(|()| "Cuenta quitada".to_string()));
-            }
-        }
-    }
-
-    /// Elimina el grupo `gi` y cierra sus tabs (con lo que corre en ellos).
-    fn delete_group(&mut self, gi: usize) {
-        for id in self.ws.remove_group(gi) {
-            self.terms.remove(&id);
-        }
-        if self.ws.groups.is_empty() {
-            // Era el único: Telar sigue con un grupo nuevo en lugar de cerrarse.
-            self.new_group();
-        }
-        // Los grupos pasados de su límite se indican por índice: se recalculan.
-        self.enforce_limits();
-        self.after_switch();
-        self.save_session();
-    }
-
-    fn close_term(&mut self, id: u64) -> bool {
-        self.terms.remove(&id);
-        self.editing = None;
-        let empty = self.ws.remove_term(id);
-        self.window.request_redraw();
-        empty
-    }
-
-    fn write(&self, id: u64, bytes: Vec<u8>) {
-        if let Some(t) = self.terms.get(&id) {
-            t.write(bytes);
-        }
-    }
-
-    fn active(&self) -> Option<&Terminal> {
-        self.ws.active_term().and_then(|id| self.terms.get(&id))
-    }
-
-    fn active_mode(&self) -> TermMode {
-        self.active().map_or(TermMode::empty(), |t| *t.term.lock().mode())
-    }
-
-    /// Envía bytes al tab activo y baja al final del scrollback.
-    fn send_input(&self, bytes: Vec<u8>) {
-        if let Some(t) = self.active() {
-            {
-                let mut term = t.term.lock();
-                if term.grid().display_offset() != 0 {
-                    term.scroll_display(Scroll::Bottom);
-                    self.window.request_redraw();
-                }
-            }
-            t.touch();
-            t.write(bytes);
-        }
-    }
-
-    fn resize_terms(&mut self) {
-        let size = self.layout().grid_size();
-        for t in self.terms.values_mut() {
-            t.resize(size);
-        }
-    }
-
-    fn apply_font_size(&mut self) {
-        self.fonts.set_size(self.font_pt * self.window.scale_factor() as f32);
-        self.resize_terms();
-        self.window.request_redraw();
-    }
-
-    fn copy_selection(&mut self) {
-        let text = self.active().and_then(|t| t.term.lock().selection_to_string());
-        if let (Some(text), Some(cb)) = (text, self.clipboard.as_mut()) {
-            let _ = cb.set_text(text);
-        }
-    }
-
-    fn paste(&mut self) {
-        let Some(text) = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) else { return };
-        if let Some((_, buf)) = self.editing.as_mut() {
-            buf.extend(text.chars().filter(|c| !c.is_control()));
-            self.window.request_redraw();
-            return;
-        }
-        let bytes = input::paste_bytes(&text, self.active_mode());
-        self.send_input(bytes);
-    }
-
-    fn start_rename(&mut self, group: usize) {
-        if let Some(g) = self.ws.groups.get(group) {
-            self.editing = Some((Edit::Group(group), g.name.clone()));
-            self.window.request_redraw();
-        }
-    }
-
-    /// Renombrar un tab: se edita en la barra de tabs (el tab pasa a estar visible).
-    fn start_rename_tab(&mut self, id: u64) {
-        self.show_tab(id);
-        if let Some(t) = self.terms.get(&id) {
-            self.editing = Some((Edit::Tab(id), t.label().unwrap_or_default().to_string()));
-            self.window.request_redraw();
-        }
-    }
-
-    /// Lleva a la vista el tab `id` (su grupo y su posición).
-    fn show_tab(&mut self, id: u64) {
-        let Some(gi) = self.ws.group_of(id) else { return };
-        let ti = self.ws.groups[gi].tabs.iter().position(|t| *t == id).unwrap_or(0);
-        self.ws.select_group(gi);
-        self.ws.select_tab(ti);
-        self.after_switch();
-    }
-
-    /// ⌘K: borra la pantalla y el scrollback. Si en primer plano hay una shell o Claude,
-    /// se le manda Ctrl-L para que vuelva a dibujar su prompt arriba.
-    fn clear_terminal(&mut self, id: u64) {
-        let Some(t) = self.terms.get(&id).filter(|t| !t.is_suspended()) else { return };
-        {
-            let mut term = t.term.lock();
-            term.scroll_display(Scroll::Bottom);
-            // All lleva la pantalla al scrollback; Saved vacía el scrollback.
-            term.clear_screen(ClearMode::All);
-            term.clear_screen(ClearMode::Saved);
-            term.selection = None;
-        }
-        let redraw = t.process.as_deref().is_none_or(|p| proc::is_shell(p) || p == "claude");
-        if redraw {
-            t.write(b"\x0c".to_vec());
-        }
-        self.window.request_redraw();
-    }
-
-    /// Abre el menú contextual de un tab (`tab`) o de un grupo, en la posición del puntero.
-    fn open_menu(&mut self, tab: Option<u64>, group: usize) {
-        let suspended = |id: &u64| self.terms.get(id).is_some_and(Terminal::is_suspended);
-        let group_asleep = self.suspendable(group).is_empty();
-        let mut items = Vec::new();
-        if let Some(id) = tab {
-            if self.ws.active_term() != Some(id) {
-                items.push(MenuItem::new(icons::EYE, "Mostrar", &[], Action::Show));
-            }
-            if suspended(&id) {
-                items.push(MenuItem::new(icons::PLAY, "Reanudar", &["↩"], Action::Resume));
-            } else {
-                items.push(MenuItem::new(icons::MOON, "Suspender", &["⌘", "S"], Action::Suspend));
-                items.push(MenuItem::new(icons::ERASER, "Limpiar", &["⌘", "K"], Action::Clear));
-            }
-            items.push(MenuItem::new(icons::PENCIL, "Renombrar tab", &[], Action::RenameTab));
-            items.push(MenuItem::new(icons::X, "Cerrar tab", &["⌘", "W"], Action::CloseTab));
-            items.push(MenuItem::separator());
-        } else {
-            items.push(MenuItem::new(icons::TERMINAL, "Nuevo tab", &["⌘", "T"], Action::NewTab));
-            items.push(MenuItem::new(icons::SPARKLES, "Nuevo agente", &["⌘", "⇧", "T"], Action::NewAgent));
-            items.push(MenuItem::separator());
-        }
-        items.push(MenuItem::new(icons::SQUARE_PEN, "Renombrar grupo", &["⌘", "⇧", "R"], Action::RenameGroup));
-        if group_asleep {
-            items.push(MenuItem::new(icons::PLAY, "Reanudar grupo", &["⌘", "⇧", "S"], Action::ResumeGroup));
-        } else {
-            items.push(MenuItem::new(icons::MOON, "Suspender grupo", &["⌘", "⇧", "S"], Action::SuspendGroup));
-        }
-        if self.config.idle.enabled() {
-            let exempt = self.ws.groups.get(group).is_some_and(|g| g.idle_exempt);
-            let (icon, label) = if exempt { (icons::TIMER, "Permitir suspender solo") } else { (icons::PIN, "Nunca suspender solo") };
-            items.push(MenuItem::new(icon, label, &[], Action::ToggleIdleExempt));
-        }
-        items.push(MenuItem::separator());
-        items.push(MenuItem::new(icons::TRASH, "Eliminar grupo", &[], Action::DeleteGroup));
-        let l = self.layout();
-        self.menu = Some(Menu::new(self.cursor.0, self.cursor.1, tab, group, items, &l));
-        self.editing = None;
-        self.window.set_cursor(CursorIcon::Default);
-        self.window.request_redraw();
-    }
-
-    fn run_menu(&mut self, action: Action) {
-        let Some(menu) = self.menu.take() else { return };
-        let (tab, gi) = (menu.tab, menu.group);
-        match (action, tab) {
-            (Action::Show, Some(id)) => self.show_tab(id),
-            (Action::Suspend, Some(id)) => {
-                self.suspend(id);
-            }
-            (Action::Resume, Some(id)) => {
-                self.resume(id);
-            }
-            (Action::Clear, Some(id)) => self.clear_terminal(id),
-            (Action::RenameTab, Some(id)) => self.start_rename_tab(id),
-            (Action::CloseTab, Some(id)) => {
-                if self.close_term(id) {
-                    // Era el último tab: Telar empieza de nuevo con un grupo vacío en lugar de cerrarse.
-                    self.new_group();
-                }
-                self.resize_terms();
-            }
-            (Action::NewTab | Action::NewAgent, _) => {
-                self.ws.select_group(gi);
-                if action == Action::NewAgent {
-                    self.new_agent();
-                } else {
-                    self.new_tab();
-                }
-                self.after_switch();
-            }
-            (Action::RenameGroup, _) => self.start_rename(gi),
-            (Action::SuspendGroup | Action::ResumeGroup, _) => self.toggle_suspend_group(gi),
-            (Action::DeleteGroup, _) => self.ask_delete_group(gi),
-            (Action::SwitchAccount(i), _) => {
-                if let Some(a) = self.accounts.get(i).cloned() {
-                    if self.account_key.as_deref() != Some(a.key.as_str()) {
-                        let key = a.key;
-                        self.account_task(true, move || cuentas::switch(&key).map(|a| format!("Claude Code ahora usa {}", a.email)));
-                    }
-                }
-            }
-            (Action::RemoveAccount(i), _) => {
-                if let Some(a) = self.accounts.get(i).cloned() {
-                    self.confirm = Some(confirm::remove_account(&a.email, a.plan.as_deref(), a.key));
-                }
-            }
-            (Action::SaveAccount, _) => self.account_task(false, || cuentas::save_current().map(|a| format!("Cuenta guardada: {}", a.email))),
-            (Action::LoginAccount, _) => {
-                // Antes de iniciar sesión con otra, se guarda la actual (si no, se perdería).
-                if self.account_key.is_some() {
-                    self.account_task(false, || cuentas::save_current().map(|a| format!("Se guardó {} antes de iniciar sesión con otra cuenta", a.email)));
-                }
-                if let Some(id) = self.new_tab() {
-                    self.write(id, b"claude auth login\r".to_vec());
-                    self.after_switch();
-                }
-                notify_macos("Cuentas de Claude", "Al terminar de iniciar sesión, elige «Agregar la cuenta actual» en el menú del correo");
-            }
-            (Action::ToggleIdleExempt, _) => {
-                if let Some(g) = self.ws.groups.get_mut(gi) {
-                    g.idle_exempt = !g.idle_exempt;
-                    self.save_session();
-                }
-            }
-            _ => {}
-        }
-        self.window.request_redraw();
-    }
-
-    /// Teclas con el menú abierto: flechas, Enter y Esc. Cualquier otra lo cierra.
-    fn menu_key(&mut self, event: &KeyEvent) {
-        let Some(menu) = self.menu.as_mut() else { return };
-        match &event.logical_key {
-            Key::Named(NamedKey::ArrowDown) => menu.step(1),
-            Key::Named(NamedKey::ArrowUp) => menu.step(-1),
-            Key::Named(NamedKey::Enter) => {
-                if let Some(action) = menu.hover.and_then(|i| menu.items[i].action) {
-                    self.run_menu(action);
-                }
-            }
-            _ => self.menu = None,
-        }
-        self.window.request_redraw();
-    }
-
-    /// Devuelve `true` si hay que cerrar la app.
-    fn on_key(&mut self, event: &KeyEvent) -> bool {
-        let m = self.mods;
-
-        if self.confirm.is_some() {
-            match event.logical_key {
-                Key::Named(NamedKey::Enter) => self.run_confirm(),
-                Key::Named(NamedKey::Escape) => self.confirm = None,
-                _ => {}
-            }
-            self.window.request_redraw();
-            return false;
-        }
-        if self.menu.is_some() {
-            self.menu_key(event);
-            return false;
-        }
-        if self.settings.is_some() {
-            self.settings_key(event);
-            return false;
-        }
-        if self.search.is_some() {
-            self.search_key(event);
-            return false;
-        }
-        if self.stats_detail.is_some() {
-            let close = event.logical_key == Key::Named(NamedKey::Escape)
-                || (self.mods.super_key() && matches!(event.key_without_modifiers(), Key::Character(ref c) if c.as_str() == "w"));
-            if close {
-                self.toggle_stats();
-            }
-            return false;
-        }
-
-        // Renombrando un grupo o un tab: el teclado edita el nombre.
-        if let Some((target, buf)) = self.editing.as_mut() {
-            match &event.logical_key {
-                Key::Named(NamedKey::Enter) => {
-                    let name = buf.trim().to_string();
-                    match *target {
-                        Edit::Group(gi) => {
-                            if let Some(g) = self.ws.groups.get_mut(gi).filter(|_| !name.is_empty()) {
-                                g.name = name;
-                            }
-                        }
-                        // Vacío: vuelve el título automático.
-                        Edit::Tab(id) => {
-                            if let Some(t) = self.terms.get_mut(&id) {
-                                t.name = (!name.is_empty()).then_some(name);
-                            }
-                        }
-                    }
-                    self.editing = None;
-                }
-                Key::Named(NamedKey::Escape) => self.editing = None,
-                Key::Named(NamedKey::Backspace) => {
-                    buf.pop();
-                }
-                _ if m.super_key() => {
-                    if matches!(event.key_without_modifiers(), Key::Character(ref s) if s.as_str() == "v") {
-                        self.paste();
-                    }
-                }
-                _ => {
-                    if let Some(t) = &event.text {
-                        buf.extend(t.chars().filter(|c| !c.is_control()));
-                    }
-                }
-            }
-            self.window.request_redraw();
-            return false;
-        }
-
-        if m.super_key() {
-            return self.shortcut(event);
-        }
-        if m.control_key() && event.logical_key == Key::Named(NamedKey::Tab) {
-            self.ws.cycle_tab(if m.shift_key() { -1 } else { 1 });
-            self.after_switch();
-            return false;
-        }
-
-        if let Some(id) = self.ws.active_term().filter(|id| self.terms.get(id).is_some_and(Terminal::is_suspended)) {
-            if event.logical_key == Key::Named(NamedKey::Enter) {
-                self.resume(id);
-            }
-            return false;
-        }
-        if let Some(bytes) = input::key_to_bytes(event, m, self.active_mode()) {
-            self.send_input(bytes);
-        }
-        false
-    }
-
-    /// Atajos con ⌘. Devuelve `true` si hay que cerrar la app.
-    fn shortcut(&mut self, event: &KeyEvent) -> bool {
-        let m = self.mods;
-        if let Key::Named(named) = &event.logical_key {
-            // ⌘⌫ borra la línea hasta el cursor (Ctrl+U); ⌘← y ⌘→ van al inicio y al final
-            // de la línea (Ctrl+A y Ctrl+E), como en Terminal.app e iTerm. Funcionan en zsh,
-            // bash y en el prompt de Claude Code.
-            let line_key = match named {
-                NamedKey::Backspace => Some(0x15),
-                NamedKey::ArrowLeft => Some(0x01),
-                NamedKey::ArrowRight => Some(0x05),
-                _ => None,
-            };
-            if let Some(byte) = line_key.filter(|_| !m.shift_key()) {
-                if self.active().is_some_and(|t| !t.is_suspended()) {
-                    self.send_input(vec![byte]);
-                }
-                return false;
-            }
-            match (named, m.shift_key()) {
-                (NamedKey::ArrowRight, true) => self.ws.cycle_tab(1),
-                (NamedKey::ArrowLeft, true) => self.ws.cycle_tab(-1),
-                (NamedKey::ArrowDown, true) => self.ws.cycle_group(1),
-                (NamedKey::ArrowUp, true) => self.ws.cycle_group(-1),
-                _ => return false,
-            }
-            self.after_switch();
-            return false;
-        }
-        let Key::Character(key) = event.key_without_modifiers() else { return false };
-        match key.to_lowercase().as_str() {
-            "t" if m.shift_key() => self.new_agent(),
-            "t" => {
-                self.new_tab();
-            }
-            "n" => {
-                self.new_group();
-            }
-            "w" => {
-                if let Some(id) = self.ws.active_term() {
-                    return self.close_term(id);
-                }
-            }
-            "q" => return true,
-            "j" => self.jump_to_attention(),
-            "c" if m.shift_key() => self.cycle_awake(),
-            "c" => self.copy_selection(),
-            "v" => self.paste(),
-            "r" if m.shift_key() => self.start_rename(self.ws.active),
-            "s" if m.shift_key() => self.toggle_suspend_group(self.ws.active),
-            "k" => {
-                if let Some(id) = self.ws.active_term() {
-                    self.clear_terminal(id);
-                }
-            }
-            "s" => self.toggle_suspend_tab(),
-            "=" | "+" => {
-                self.font_pt = (self.font_pt + 1.0).min(36.0);
-                self.apply_font_size();
-            }
-            "-" => {
-                self.font_pt = (self.font_pt - 1.0).max(8.0);
-                self.apply_font_size();
-            }
-            "0" => {
-                self.font_pt = self.config.font_size;
-                self.apply_font_size();
-            }
-            "," => self.toggle_settings(),
-            "p" => self.open_search(),
-            d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
-                let n = (d.as_bytes()[0] - b'0') as usize;
-                if n > 0 {
-                    self.ws.select_tab(n - 1);
-                    self.after_switch();
-                }
-            }
-            _ => {}
-        }
-        false
-    }
-
-    /// Al cambiar de tab o grupo: el tamaño puede haber cambiado (nº de tabs) y hay que repintar.
-    fn after_switch(&mut self) {
-        self.editing = None;
-        self.reveal_active_group();
-        self.mark_seen();
-        self.resize_terms();
-        self.window.request_redraw();
-    }
-
-    fn on_ime(&mut self, ime: Ime) {
-        match ime {
-            Ime::Preedit(text, _) => {
-                self.preedit = text;
-                self.window.request_redraw();
-            }
-            Ime::Commit(text) => {
-                self.preedit.clear();
-                if self.confirm.is_some() {
-                    // Con la confirmación abierta, nada llega a la terminal.
-                } else if let Some((_, buf)) = self.editing.as_mut() {
-                    buf.push_str(&text);
-                    self.window.request_redraw();
-                } else {
-                    self.send_input(text.into_bytes());
-                }
-            }
-            Ime::Enabled | Ime::Disabled => {}
-        }
-    }
-
-    fn on_cursor_moved(&mut self, pos: PhysicalPosition<f64>) {
-        self.cursor = (pos.x as f32, pos.y as f32);
-        if self.drag.is_some() {
-            self.drag_move();
-            return;
-        }
-        let l = self.layout();
-        if let Some(c) = self.confirm.as_mut() {
-            let hover = Some(c.hit(self.cursor.0, self.cursor.1, &l, &mut self.fonts));
-            if hover != c.hover {
-                c.hover = hover;
-                let pointer = matches!(hover, Some(confirm::Hit::Cancel | confirm::Hit::Confirm));
-                self.window.set_cursor(if pointer { CursorIcon::Pointer } else { CursorIcon::Default });
-                self.window.request_redraw();
-            }
-            return;
-        }
-        if let Some(d) = self.stats_detail.as_mut() {
-            let hover = Some(d.hit(self.cursor.0, self.cursor.1, &l));
-            if hover != d.hover {
-                d.hover = hover;
-                self.window.set_cursor(if hover == Some(statsview::Hit::Close) { CursorIcon::Pointer } else { CursorIcon::Default });
-                self.window.request_redraw();
-            }
-            return;
-        }
-        if let Some(st) = self.settings.as_mut() {
-            let hit = st.hit(self.cursor.0, self.cursor.1, &l, &self.fonts, self.ws.groups.len());
-            let hover = Some(hit);
-            if hover != st.hover {
-                st.hover = hover;
-                let pointer = matches!(
-                    hit,
-                    settings::Hit::Close
-                        | settings::Hit::Section(_)
-                        | settings::Hit::Font(_)
-                        | settings::Hit::SizeDown
-                        | settings::Hit::SizeUp
-                        | settings::Hit::PickStartDir
-                        | settings::Hit::ShowClaude
-                        | settings::Hit::ShowMeters
-                ) || (hit == settings::Hit::ClearStartDir && self.config.start_dir.is_some());
-                self.window.set_cursor(if pointer { CursorIcon::Pointer } else { CursorIcon::Default });
-                self.window.request_redraw();
-            }
-            return;
-        }
-        if let Some(menu) = self.menu.as_mut() {
-            let s = self.window.scale_factor() as f32;
-            let hover = menu.item_at(self.cursor.0, self.cursor.1, s);
-            let on_x = menu.remove_at(self.cursor.0, self.cursor.1, s).is_some();
-            if hover != menu.hover || on_x != menu.hover_remove {
-                menu.hover = hover;
-                menu.hover_remove = on_x;
-                self.window.set_cursor(if hover.is_some() { CursorIcon::Pointer } else { CursorIcon::Default });
-                self.window.request_redraw();
-            }
-            return;
-        }
-        let n_tabs = self.ws.group().map_or(0, |g| g.tabs.len());
-        let hit = l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs);
-        // Sobre un enlace que se abriría con un clic: mano y resaltado.
-        let link_cell = if hit == Hit::Terminal && !self.selecting && self.mouse_button.is_none() {
-            let (col, row, _) = l.cell_at(self.cursor.0, self.cursor.1);
-            self.clickable_link(col, row).map(|_| (col, row))
-        } else {
-            None
-        };
-        if link_cell.is_some() != self.link_cell.is_some() {
-            self.window.set_cursor(if link_cell.is_some() { CursorIcon::Pointer } else { CursorIcon::Text });
-        }
-        if link_cell != self.link_cell {
-            self.link_cell = link_cell;
-            self.window.request_redraw();
-        }
-        if hit != self.hover {
-            self.hover = hit;
-            let icon = match hit {
-                Hit::Terminal if self.link_cell.is_some() => CursorIcon::Pointer,
-                Hit::Terminal => CursorIcon::Text,
-                Hit::Group(_)
-                | Hit::CloseGroup(_)
-                | Hit::ClaudeAccount
-                | Hit::NewGroup
-                | Hit::Tab(_)
-                | Hit::CloseTab(_)
-                | Hit::NewTab
-                | Hit::Awake
-                | Hit::Update
-                | Hit::Settings
-                | Hit::Stats => {
-                    CursorIcon::Pointer
-                }
-                _ => CursorIcon::Default,
-            };
-            self.window.set_cursor(icon);
-            self.window.request_redraw();
-        }
-
-        if self.selecting || self.mouse_button.is_some() {
-            let (col, row, side) = l.cell_at(self.cursor.0, self.cursor.1);
-            let mode = self.active_mode();
-            if let Some(button) = self.mouse_button {
-                if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
-                    self.mouse_report(button + 32, true, col, row, mode);
-                }
-                return;
-            }
-            if let Some(t) = self.active() {
-                let mut term = t.term.lock();
-                let point = ui::grid_point(&term, col, row);
-                if let Some(sel) = term.selection.as_mut() {
-                    sel.update(point, side);
-                }
-                drop(term);
-                self.window.request_redraw();
-            }
-        }
-    }
-
-    fn on_mouse(&mut self, state: ElementState, button: MouseButton) {
-        let l = self.layout();
-        let n_tabs = self.ws.group().map_or(0, |g| g.tabs.len());
-        let hit = l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs);
-        let pressed = state == ElementState::Pressed;
-
-        // Confirmación abierta: solo sus botones; un clic fuera la cancela.
-        if let Some(c) = &self.confirm {
-            if pressed && button == MouseButton::Left {
-                match c.hit(self.cursor.0, self.cursor.1, &l, &mut self.fonts) {
-                    confirm::Hit::Confirm => self.run_confirm(),
-                    confirm::Hit::Cancel | confirm::Hit::Outside => self.confirm = None,
-                    confirm::Hit::Inside => {}
-                }
-                self.on_cursor_moved(PhysicalPosition::new(self.cursor.0 as f64, self.cursor.1 as f64));
-                self.window.request_redraw();
-            }
-            return;
-        }
-
-        // Detalle de uso abierto: un clic fuera o en la ✕ lo cierra.
-        if let Some(d) = &self.stats_detail {
-            if pressed && button == MouseButton::Left && d.hit(self.cursor.0, self.cursor.1, &l) != statsview::Hit::Inside {
-                self.toggle_stats();
-            }
-            return;
-        }
-
-        // Configuración abierta: los clics son del modal.
-        if self.settings.is_some() {
-            if pressed && button == MouseButton::Left {
-                self.settings_click();
-            }
-            return;
-        }
-
-        // Menú abierto: un clic elige una opción o lo cierra; no llega a lo de abajo.
-        if let Some(menu) = &self.menu {
-            if pressed {
-                // La ✕ de un ítem tiene su propia acción.
-                let item = menu.item_at(self.cursor.0, self.cursor.1, l.s());
-                let action = menu.remove_at(self.cursor.0, self.cursor.1, l.s()).or_else(|| item.and_then(|i| menu.items[i].action));
-                match action {
-                    Some(action) if button == MouseButton::Left => self.run_menu(action),
-                    _ => self.menu = None,
-                }
-                self.on_cursor_moved(PhysicalPosition::new(self.cursor.0 as f64, self.cursor.1 as f64));
-                self.window.request_redraw();
-            }
-            return;
-        }
-
-        if !pressed {
-            if button == MouseButton::Left {
-                self.drag_end();
-            }
-            if let Some(b) = self.mouse_button.take() {
-                let (col, row, _) = l.cell_at(self.cursor.0, self.cursor.1);
-                self.mouse_report(b, false, col, row, self.active_mode());
-            }
-            self.selecting = false;
-            if let Some((link, from)) = self.link_press.take().filter(|_| button == MouseButton::Left) {
-                self.release_on_link(&l, link, from);
-            }
-            return;
-        }
-
-        // macOS mueve la ventana al arrastrar en la barra de título, donde están los tabs:
-        // solo se permite desde sus zonas vacías, así arrastrar un tab lo reordena.
-        if button == MouseButton::Left {
-            appicon::set_window_movable(&self.window, hit == Hit::Drag);
-        }
-
-        // Conteo de clics para doble/triple clic.
-        let now = Instant::now();
-        let count = if self.clicks.1 == hit && now - self.clicks.0 < DOUBLE_CLICK { self.clicks.2 % 3 + 1 } else { 1 };
-        self.clicks = (now, hit, count);
-
-        // Buscador: un clic fuera de él y de sus resultados lo cierra.
-        if self.search.is_some() && !matches!(hit, Hit::Search | Hit::Group(_)) {
-            self.close_search();
-        }
-        // Con resultados a la vista, las filas de la lista son resultados.
-        if self.searching() {
-            if let Hit::Group(i) = hit {
-                match button {
-                    MouseButton::Left => self.go_to_result(i),
-                    MouseButton::Right => {
-                        if let Some(f) = self.search_results().get(i).copied() {
-                            let id = f.tab.and_then(|ti| self.ws.groups[f.group].tabs.get(ti).copied());
-                            self.open_menu(id, f.group);
-                        }
-                    }
-                    _ => {}
-                }
-                self.window.request_redraw();
-                return;
-            }
-        }
-
-        if hit != Hit::Terminal && button == MouseButton::Left {
-            let edited = match (hit, self.editing.as_ref().map(|(e, _)| *e)) {
-                (Hit::Group(i), Some(Edit::Group(g))) => i == g,
-                (Hit::Tab(i), Some(Edit::Tab(id))) => self.ws.group().and_then(|g| g.tabs.get(i)) == Some(&id),
-                _ => false,
-            };
-            if !edited {
-                self.editing = None;
-            }
-        }
-
-        match (hit, button) {
-            (Hit::Group(i), MouseButton::Left) => {
-                if count >= 2 {
-                    self.start_rename(i);
-                } else {
-                    if self.ws.active != i {
-                        self.ws.select_group(i);
-                        self.after_switch();
-                    }
-                    self.drag = Some(Dragging { item: Dragged::Group(i), from: self.cursor, moved: false, drop_group: None });
-                }
-            }
-            (Hit::NewGroup, MouseButton::Left) => {
-                self.new_group();
-            }
-            (Hit::Tab(i), MouseButton::Left) => {
-                let id = self.ws.group().and_then(|g| g.tabs.get(i).copied());
-                if count >= 2 {
-                    if let Some(id) = id {
-                        self.start_rename_tab(id);
-                    }
-                } else {
-                    self.ws.select_tab(i);
-                    self.after_switch();
-                    if let Some(id) = id {
-                        self.drag = Some(Dragging { item: Dragged::Tab(id), from: self.cursor, moved: false, drop_group: None });
-                    }
-                }
-            }
-            (Hit::Tab(i) | Hit::CloseTab(i), MouseButton::Right) => {
-                if let Some(id) = self.ws.group().and_then(|g| g.tabs.get(i).copied()) {
-                    self.open_menu(Some(id), self.ws.active);
-                }
-            }
-            (Hit::Group(i) | Hit::CloseGroup(i), MouseButton::Right) => self.open_menu(None, i),
-            (Hit::CloseGroup(i), MouseButton::Left) => self.ask_delete_group(i),
-            (Hit::ClaudeAccount, MouseButton::Left) => self.open_account_menu(),
-            (Hit::Search, MouseButton::Left) => self.open_search(),
-            (Hit::Tab(i), MouseButton::Middle) | (Hit::CloseTab(i), MouseButton::Left) => {
-                if let Some(id) = self.ws.group().and_then(|g| g.tabs.get(i).copied()) {
-                    self.close_term(id);
-                    self.resize_terms();
-                }
-            }
-            (Hit::NewTab, MouseButton::Left) => {
-                self.new_tab();
-            }
-            (Hit::Awake, MouseButton::Left) => self.cycle_awake(),
-            (Hit::Update, MouseButton::Left) => self.update_action(),
-            (Hit::Settings, MouseButton::Left) => self.toggle_settings(),
-            (Hit::Stats, MouseButton::Left) => self.toggle_stats(),
-            (Hit::Drag, MouseButton::Left) => {
-                if count == 2 {
-                    let max = self.window.is_maximized();
-                    self.window.set_maximized(!max);
-                } else {
-                    let _ = self.window.drag_window();
-                }
-            }
-            (Hit::Terminal, _) => self.on_terminal_press(button, count),
-            _ => {}
-        }
-        self.window.request_redraw();
-    }
-
-    /// Arrastrando: el grupo o tab se mueve en vivo al lugar bajo el puntero. Un tab
-    /// llevado a la barra lateral marca el grupo donde va a quedar.
-    fn drag_move(&mut self) {
-        let Some(mut d) = self.drag.take() else { return };
-        let l = self.layout();
-        let (x, y) = self.cursor;
-        if !d.moved {
-            let (dx, dy) = (x - d.from.0, y - d.from.1);
-            let min = 5.0 * l.s();
-            if dx * dx + dy * dy < min * min {
-                self.drag = Some(d);
-                return;
-            }
-            d.moved = true;
-            self.editing = None;
-            self.window.set_cursor(CursorIcon::Grabbing);
-        }
-        match d.item {
-            Dragged::Group(from) => {
-                let n = self.ws.groups.len();
-                let to = l.row_at(y).clamp(0, n as isize - 1) as usize;
-                if self.ws.move_group(from, to) {
-                    d.item = Dragged::Group(to);
-                    self.reveal_row(to);
-                }
-            }
-            Dragged::Tab(id) => {
-                let src = self.ws.group_of(id);
-                if x < l.sidebar_w() {
-                    let row = l.row_at(y);
-                    let row_ok = row >= 0 && l.row_visible(row as usize) && (row as usize) < self.ws.groups.len();
-                    d.drop_group = (row_ok && Some(row as usize) != src).then_some(row as usize);
-                } else {
-                    d.drop_group = None;
-                    if let Some(g) = src.filter(|g| *g == self.ws.active) {
-                        let tabs = &self.ws.groups[g].tabs;
-                        if let Some(from) = tabs.iter().position(|t| *t == id) {
-                            let to = l.tab_at(x, tabs.len());
-                            self.ws.move_tab(g, from, to);
-                        }
-                    }
-                }
-            }
-        }
-        self.drag = Some(d);
-        self.window.request_redraw();
-    }
-
-    /// Al soltar: un tab sobre otro grupo pasa a ese grupo; lo demás ya quedó en su lugar.
-    fn drag_end(&mut self) {
-        let Some(d) = self.drag.take() else { return };
-        if !d.moved {
-            return;
-        }
-        if let (Dragged::Tab(id), Some(gi)) = (d.item, d.drop_group) {
-            if self.ws.move_tab_to_group(id, gi) {
-                self.after_switch();
-            }
-        }
-        // Los grupos pasados de su límite se indican por índice: se recalculan.
-        self.enforce_limits();
-        self.save_session();
-        self.hover = Hit::None;
-        self.on_cursor_moved(PhysicalPosition::new(self.cursor.0 as f64, self.cursor.1 as f64));
-        self.window.request_redraw();
-    }
-
-    fn on_terminal_press(&mut self, button: MouseButton, count: u8) {
-        let l = self.layout();
-        let (col, row, side) = l.cell_at(self.cursor.0, self.cursor.1);
-        let mode = self.active_mode();
-        let code = match button {
-            MouseButton::Left => 0,
-            MouseButton::Middle => 1,
-            MouseButton::Right => 2,
-            _ => return,
-        };
-        // Clic en un enlace: con ⌘ se abre ya; sin ⌘, al soltar, si el puntero casi no se
-        // movió (no se arrastró para seleccionar). Vale también si la app pidió el mouse
-        // (Claude Code lo hace): el clic le llega igual y además se abre el enlace.
-        self.link_press = None;
-        if button == MouseButton::Left && count == 1 {
-            if let Some(link) = self.clickable_link(col, row) {
-                if self.mods.super_key() {
-                    links::open(&link.url);
-                    return;
-                }
-                self.link_press = Some((link, self.cursor));
-            }
-        }
-        // La app pidió el mouse (vim, htop…): se le reporta. Shift fuerza selección local.
-        if mode.intersects(TermMode::MOUSE_MODE) && !self.mods.shift_key() {
-            self.mouse_button = Some(code);
-            self.mouse_report(code, true, col, row, mode);
-            return;
-        }
-        if button != MouseButton::Left {
-            return;
-        }
-        let Some(t) = self.active() else { return };
-        let mut term = t.term.lock();
-        let point = ui::grid_point(&term, col, row);
-        let ty = match count {
-            2 => SelectionType::Semantic,
-            3 => SelectionType::Lines,
-            _ => SelectionType::Simple,
-        };
-        term.selection = Some(Selection::new(ty, point, side));
-        drop(term);
-        self.selecting = true;
-    }
-
-    /// Reporte de mouse al estilo xterm (SGR si está activo, si no X10).
-    fn mouse_report(&self, button: u8, pressed: bool, col: usize, row: usize, mode: TermMode) {
-        let m = self.mods;
-        let b = button + 4 * m.shift_key() as u8 + 8 * m.alt_key() as u8 + 16 * m.control_key() as u8;
-        let bytes = if mode.contains(TermMode::SGR_MOUSE) {
-            format!("\x1b[<{};{};{}{}", b, col + 1, row + 1, if pressed { 'M' } else { 'm' }).into_bytes()
-        } else {
-            let b = if pressed { b } else { 3 + (b & !3) };
-            let clamp = |v: usize| (32 + 1 + v).min(255) as u8;
-            vec![0x1b, b'[', b'M', 32 + b, clamp(col), clamp(row)]
-        };
-        if let Some(id) = self.ws.active_term() {
-            self.write(id, bytes);
-        }
-    }
-
-    /// Enlace en la celda (columna, fila) del tab visible que se abre con un clic.
-    fn clickable_link(&self, col: usize, row: usize) -> Option<links::Link> {
-        let t = self.active().filter(|t| !t.is_suspended())?;
-        let term = t.term.lock();
-        links::scan(&*term).into_iter().find(|k| k.contains(col, row) && links::openable(&k.url))
-    }
-
-    /// Se soltó el clic que empezó en `link` (con el puntero en `from`): si el puntero casi
-    /// no se movió y sigue sobre el enlace, se abre. Un temblor dentro de la misma letra
-    /// no cuenta como selección.
-    fn release_on_link(&mut self, l: &Layout, link: links::Link, from: (f32, f32)) {
-        let (col, row, _) = l.cell_at(self.cursor.0, self.cursor.1);
-        let moved = (self.cursor.0 - from.0).hypot(self.cursor.1 - from.1);
-        if moved > 4.0 * l.s() || !link.contains(col, row) {
-            return;
-        }
-        if let Some(t) = self.active() {
-            t.term.lock().selection = None;
-        }
-        links::open(&link.url);
-        self.window.request_redraw();
-    }
-
-    fn on_scroll(&mut self, delta: MouseScrollDelta) {
-        if self.confirm.is_some() {
-            return;
-        }
-        let l = self.layout();
-        // Sobre la barra lateral: desplaza la lista de grupos (o de resultados).
-        if self.cursor.0 < l.sidebar_w() && self.settings.is_none() && self.stats_detail.is_none() {
-            let row = 32.0 * l.s();
-            let px = match delta {
-                MouseScrollDelta::LineDelta(_, y) => -y * row,
-                MouseScrollDelta::PixelDelta(p) => -p.y as f32,
-            };
-            self.list_scroll_px += px;
-            let rows = (self.list_scroll_px / row).trunc();
-            if rows != 0.0 {
-                self.list_scroll_px -= rows * row;
-                let max = self.list_len().saturating_sub(l.list_rows());
-                self.list_scroll = (self.list_scroll as isize + rows as isize).clamp(0, max as isize) as usize;
-                self.window.request_redraw();
-            }
-            return;
-        }
-        if self.stats_detail.is_some() {
-            let rows = match delta {
-                MouseScrollDelta::LineDelta(_, y) => -y.round() as isize,
-                MouseScrollDelta::PixelDelta(p) => (-p.y as f32 / (28.0 * l.s())).round() as isize,
-            };
-            let total = self.stats.as_ref().map_or(0, |sm| statsview::rows(sm, &self.ws, &self.terms).len());
-            if let Some(d) = self.stats_detail.as_mut() {
-                d.scroll_by(rows, total, &l);
-            }
-            self.window.request_redraw();
-            return;
-        }
-        if let Some(st) = self.settings.as_mut() {
-            let rows = match delta {
-                MouseScrollDelta::LineDelta(_, y) => -y.round() as isize,
-                MouseScrollDelta::PixelDelta(p) => (-p.y as f32 / (26.0 * l.s())).round() as isize,
-            };
-            if st.section == settings::IDLE_SECTION {
-                let n = self.ws.groups.len();
-                let max = n.saturating_sub(st.idle_capacity(&l, n));
-                st.idle_scroll = (st.idle_scroll as isize + rows).clamp(0, max as isize) as usize;
-                self.window.request_redraw();
-                return;
-            }
-            if st.section == settings::PERF_SECTION {
-                let n = self.ws.groups.len();
-                let max = n.saturating_sub(st.perf_capacity(&l, n));
-                st.perf_scroll = (st.perf_scroll as isize + rows).clamp(0, max as isize) as usize;
-                self.window.request_redraw();
-                return;
-            }
-            let page = st.page(&l, &self.fonts);
-            st.scroll_by(rows, page);
-            self.window.request_redraw();
-            return;
-        }
-        if l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), 0) != Hit::Terminal {
-            return;
-        }
-        let px = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y * l.cell_h,
-            MouseScrollDelta::PixelDelta(p) => p.y as f32,
-        };
-        self.scroll_px += px;
-        let lines = (self.scroll_px / l.cell_h).trunc() as i32;
-        if lines == 0 {
-            return;
-        }
-        self.scroll_px -= lines as f32 * l.cell_h;
-
-        let mode = self.active_mode();
-        let (col, row, _) = l.cell_at(self.cursor.0, self.cursor.1);
-        if mode.intersects(TermMode::MOUSE_MODE) {
-            let button = if lines > 0 { 64 } else { 65 };
-            for _ in 0..lines.unsigned_abs() {
-                self.mouse_report(button, true, col, row, mode);
-            }
-        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
-            let seq: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
-                (true, true) => b"\x1bOA",
-                (true, false) => b"\x1b[A",
-                (false, true) => b"\x1bOB",
-                (false, false) => b"\x1b[B",
-            };
-            let bytes = seq.repeat(lines.unsigned_abs() as usize);
-            if let Some(id) = self.ws.active_term() {
-                self.write(id, bytes);
-            }
-        } else if let Some(t) = self.active() {
-            t.term.lock().scroll_display(Scroll::Delta(lines));
-            self.window.request_redraw();
-        }
-    }
-
-    /// El tab activo ya se vio: se limpia la campana y «terminó» pasa a «en espera».
-    fn mark_seen(&mut self) {
-        if let Some(t) = self.ws.active_term().and_then(|id| self.terms.get_mut(&id)) {
-            t.attention = false;
-            if t.agent.state == AgentState::Done {
-                t.agent.set_state(AgentState::Idle);
-            }
-        }
-    }
-
-    /// Qué tan urgente es un tab: 2 = te necesita, 1 = terminó o sonó la campana.
-    fn urgency(&self, id: u64) -> u8 {
-        match self.terms.get(&id) {
-            Some(t) if t.agent.state == AgentState::NeedsYou => 2,
-            Some(t) if t.agent.state == AgentState::Done || t.attention => 1,
-            _ => 0,
-        }
-    }
-
-    /// ⌘J: salta al siguiente tab que te necesita; si no hay, al siguiente que terminó.
-    fn jump_to_attention(&mut self) {
-        let all: Vec<(usize, usize, u64)> = self
-            .ws
-            .groups
-            .iter()
-            .enumerate()
-            .flat_map(|(gi, g)| g.tabs.iter().enumerate().map(move |(ti, id)| (gi, ti, *id)))
-            .collect();
-        let current = self.ws.active_term();
-        let start = all.iter().position(|(_, _, id)| Some(*id) == current).map_or(0, |p| p + 1);
-        let ordered = all.iter().cycle().skip(start).take(all.len());
-        let target = ordered
-            .clone()
-            .find(|(_, _, id)| self.urgency(*id) == 2)
-            .or_else(|| ordered.clone().find(|(_, _, id)| self.urgency(*id) == 1));
-        if let Some(&(gi, ti, _)) = target {
-            self.ws.select_group(gi);
-            self.ws.select_tab(ti);
-            self.after_switch();
-        }
-    }
-
-    fn on_ipc(&mut self, body: &Value) -> Value {
-        match body["cmd"].as_str() {
-            Some("hook") => {
-                if let Some(tab) = body["tab"].as_u64() {
-                    self.on_hook(tab, &body["payload"]);
-                }
-                json!({ "ok": true })
-            }
-            Some("tabs") => self.tabs_json(),
-            Some("status") => match self.resolve_tab(&body["tab"]) {
-                Ok(id) => json!({ "ok": true, "tab": self.tab_json(id) }),
-                Err(e) => json!({ "ok": false, "error": e }),
-            },
-            Some("read") => match self.resolve_tab(&body["tab"]) {
-                Ok(id) => {
-                    let lines = body["lines"].as_u64().unwrap_or(50).clamp(1, 100_000) as usize;
-                    json!({ "ok": true, "id": id, "text": self.terms[&id].text(lines) })
-                }
-                Err(e) => json!({ "ok": false, "error": e }),
-            },
-            Some("send") => match self.resolve_tab(&body["tab"]) {
-                Ok(id) if self.terms[&id].is_suspended() => {
-                    json!({ "ok": false, "error": format!("el tab {id} está suspendido; reanúdalo con `telar resume {id}`") })
-                }
-                Ok(id) => {
-                    let text = body["text"].as_str().unwrap_or_default();
-                    let t = &self.terms[&id];
-                    // Texto de varias líneas: como pegado, para que los saltos no se tomen como Enter.
-                    let bytes = if text.contains('\n') && body["raw"] != json!(true) {
-                        input::paste_bytes(text, *t.term.lock().mode())
-                    } else {
-                        text.as_bytes().to_vec()
-                    };
-                    t.touch();
-                    t.write(bytes);
-                    json!({ "ok": true, "id": id })
-                }
-                Err(e) => json!({ "ok": false, "error": e }),
-            },
-            Some("new") => self.ipc_new(body),
-            Some("group") => self.ipc_group(body),
-            Some("clear") => match self.resolve_tab(&body["tab"]) {
-                Ok(id) => {
-                    self.clear_terminal(id);
-                    json!({ "ok": true, "id": id })
-                }
-                Err(e) => json!({ "ok": false, "error": e }),
-            },
-            Some("awake") => {
-                if let Some(s) = body["mode"].as_str() {
-                    let Some(mode) = awake::Mode::parse(s) else {
-                        return json!({ "ok": false, "error": format!("modo desconocido «{s}»: usa on, off o auto") });
-                    };
-                    self.awake.mode = mode;
-                    self.update_awake();
-                    self.window.request_redraw();
-                }
-                json!({ "ok": true, "mode": self.awake.mode.name(), "active": self.awake.active() })
-            }
-            Some(cmd @ ("suspend" | "resume")) => self.ipc_suspend(cmd == "suspend", body),
-            other => json!({ "ok": false, "error": format!("comando desconocido: {other:?}") }),
-        }
-    }
-
-    /// `<tab>`: id, `grupo/n` (n desde 1) o parte del título (sin distinguir mayúsculas).
-    fn resolve_tab(&self, spec: &Value) -> Result<u64, String> {
-        let exists = |id: u64| self.terms.contains_key(&id).then_some(id).ok_or(format!("no existe el tab {id}"));
-        if let Some(id) = spec.as_u64() {
-            return exists(id);
-        }
-        let s = spec.as_str().ok_or("falta <tab>")?.trim();
-        if let Ok(id) = s.parse::<u64>() {
-            return exists(id);
-        }
-        let lower = s.to_lowercase();
-        if let Some((group, n)) = lower.rsplit_once('/') {
-            if let Ok(n) = n.parse::<usize>() {
-                let g = self.ws.groups.iter().find(|g| g.name.to_lowercase() == group).ok_or(format!("no existe el grupo «{group}»"))?;
-                return g.tabs.get(n.wrapping_sub(1)).copied().ok_or(format!("el grupo «{}» no tiene tab {n}", g.name));
-            }
-        }
-        let matches: Vec<u64> = self
-            .terms
-            .iter()
-            .filter(|(_, t)| [&t.name, &t.title].iter().any(|v| v.as_deref().is_some_and(|v| v.to_lowercase().contains(&lower))))
-            .map(|(id, _)| *id)
-            .collect();
-        match matches.as_slice() {
-            [id] => Ok(*id),
-            [] => Err(format!("ningún tab coincide con «{s}»")),
-            many => Err(format!("«{s}» coincide con varios tabs: {many:?}; usa el id")),
-        }
-    }
-
-    /// `telar new`: tab nuevo en el grupo indicado (se crea si no existe), en el
-    /// grupo del tab que lo pidió, o en el activo. No roba el foco salvo `focus`.
-    fn ipc_new(&mut self, body: &Value) -> Value {
-        let cwd = body["cwd"].as_str().map(PathBuf::from).filter(|d| d.is_absolute()).or_else(|| self.start_dir());
-        let focus = body["focus"].as_bool().unwrap_or(false);
-        let Some(id) = self.spawn_term_in(cwd.as_deref()) else {
-            return json!({ "ok": false, "error": "no se pudo abrir la shell" });
-        };
-        let gi = match body["group"].as_str() {
-            Some(name) => match self.ws.groups.iter().position(|g| g.name.eq_ignore_ascii_case(name)) {
-                Some(gi) => {
-                    self.ws.insert_tab(gi, id, focus);
-                    gi
-                }
-                // Grupo nuevo: su carpeta es la del tab con que se crea.
-                None => self.ws.push_group(name.to_string(), id, focus, cwd.clone()),
-            },
-            None => {
-                let gi = body["near"].as_u64().and_then(|near| self.ws.group_of(near)).unwrap_or(self.ws.active);
-                self.ws.insert_tab(gi, id, focus);
-                gi
-            }
-        };
-        if let Some(command) = body["command"].as_str().filter(|c| !c.trim().is_empty()) {
-            // La shell todavía arranca: lo escrito queda en el buffer del PTY y se ejecuta al estar lista.
-            self.write(id, format!("{command}\r").into_bytes());
-        }
-        if focus {
-            self.after_switch();
-        }
-        self.window.request_redraw();
-        json!({ "ok": true, "id": id, "group": self.ws.groups[gi].name })
-    }
-
-    /// `telar group`: muestra o cambia el nombre y la carpeta de un grupo
-    /// (el indicado, el del tab que lo pidió o el activo).
-    fn ipc_group(&mut self, body: &Value) -> Value {
-        let gi = match body["group"].as_str() {
-            Some(name) => self.ws.groups.iter().position(|g| g.name.eq_ignore_ascii_case(name)),
-            None => body["near"].as_u64().and_then(|near| self.ws.group_of(near)).or(Some(self.ws.active)),
-        };
-        let Some(g) = gi.and_then(|gi| self.ws.groups.get_mut(gi)) else {
-            return json!({ "ok": false, "error": "no existe ese grupo" });
-        };
-        if let Some(dir) = body["dir"].as_str() {
-            if dir.is_empty() {
-                g.dir = None;
-            } else if Path::new(dir).is_absolute() && Path::new(dir).is_dir() {
-                g.dir = Some(PathBuf::from(dir));
-            } else {
-                return json!({ "ok": false, "error": format!("no es una carpeta: {dir}") });
-            }
-        }
-        if let Some(name) = body["name"].as_str().map(str::trim).filter(|n| !n.is_empty()) {
-            g.name = name.to_string();
-        }
-        let v = json!({ "ok": true, "name": g.name, "dir": g.dir, "tabs": g.tabs.len() });
-        self.window.request_redraw();
-        v
-    }
-
-    /// `telar suspend` / `telar resume`: un tab o un grupo entero.
-    fn ipc_suspend(&mut self, suspend: bool, body: &Value) -> Value {
-        let force = body["force"].as_bool().unwrap_or(false);
-        let ids: Vec<u64> = match body["group"].as_str() {
-            Some(name) => {
-                let Some(gi) = self.ws.groups.iter().position(|g| g.name.eq_ignore_ascii_case(name)) else {
-                    return json!({ "ok": false, "error": format!("no existe el grupo «{name}»") });
-                };
-                if suspend && !force { self.suspendable(gi) } else { self.ws.groups[gi].tabs.clone() }
-            }
-            None => match self.resolve_tab(&body["tab"]) {
-                Ok(id) => {
-                    let busy = self.terms[&id].agent.state;
-                    if suspend && !force && matches!(busy, AgentState::Working | AgentState::NeedsYou) {
-                        return json!({ "ok": false, "error": format!("Claude está {} en el tab {id}; usa --force para suspenderlo igual", if busy == AgentState::Working { "trabajando" } else { "esperando tu respuesta" }) });
-                    }
-                    vec![id]
-                }
-                Err(e) => return json!({ "ok": false, "error": e }),
-            },
-        };
-        let changed: Vec<u64> = ids.into_iter().filter(|id| if suspend { self.suspend(*id) } else { self.resume(*id) }).collect();
-        json!({ "ok": true, "changed": changed })
-    }
-
     /// Clic en el pie de versión: buscar, instalar o reiniciar, según el estado.
     fn update_action(&mut self) {
         use update::Status;
@@ -2297,503 +718,8 @@ impl State {
         self.window.request_redraw();
     }
 
-    /// Nueva muestra de uso. Solo se repinta si cambia lo que se ve.
-    fn on_stats(&mut self, sample: stats::Sample) {
-        let shown = format!("{:.0}|{}|{:.0}", sample.cpu, stats::human_bytes(sample.mem), sample.gpu);
-        let changed = shown != self.meters_shown;
-        self.meters_shown = shown;
-        self.stats = Some(sample);
-        let over_changed = self.enforce_limits();
-        if changed || over_changed || self.stats_detail.is_some() || self.settings.is_some() {
-            self.window.request_redraw();
-        }
-    }
-
-    /// Revisa los límites de memoria con la última muestra. Con suspensión automática,
-    /// suspende un tab (el inactivo que más usa) si algo está pasado; uno cada 4 s, para
-    /// darle tiempo a la memoria a liberarse antes de decidir otro. Devuelve si cambió
-    /// qué está pasado.
-    fn enforce_limits(&mut self) -> bool {
-        let Some(sample) = &self.stats else { return false };
-        let u = limits::usage(sample, &self.ws, &self.terms, self.ws.active_term());
-        let group_limits: Vec<u64> = self.ws.groups.iter().map(|g| g.ram_limit_mb).collect();
-        let (over_total, over_groups) = limits::over(&u, &group_limits, self.config.ram_limit_mb);
-        let changed = over_total != self.over_total || over_groups != self.over_groups;
-        let pick = limits::pick(&u, over_total, &over_groups);
-        self.over_total = over_total;
-        self.over_groups = over_groups;
-        self.usage = Some(u);
-        let due = self.last_auto_suspend.elapsed() > Duration::from_secs(4);
-        if let Some(id) = pick.filter(|_| self.config.auto_suspend && due) {
-            let name = self.terms.get(&id).and_then(|t| t.label().map(String::from)).unwrap_or_else(|| "un tab".into());
-            let place = self.place_of(id);
-            if self.suspend(id) {
-                self.last_auto_suspend = Instant::now();
-                notify_macos(&place, &format!("Se suspendió «{name}» para respetar el límite de memoria"));
-            }
-        }
-        changed
-    }
-
-    /// Estado de inactividad de cada tab y grupo. Antes, marca como usados el tab visible
-    /// y los tabs donde Claude trabaja: un agente trabajando mucho rato no es inactividad,
-    /// aunque no toques nada.
-    fn idle_state(&self) -> (Vec<idle::Tab>, Vec<idle::Group>) {
-        let visible = self.ws.active_term();
-        let mut tabs = Vec::new();
-        for (gi, g) in self.ws.groups.iter().enumerate() {
-            for id in &g.tabs {
-                let Some(t) = self.terms.get(id) else { continue };
-                let state = t.agent.state;
-                if Some(*id) == visible || state == AgentState::Working {
-                    t.touch();
-                }
-                tabs.push(idle::Tab {
-                    id: *id,
-                    group: gi,
-                    idle: t.last_used.get().elapsed(),
-                    visible: Some(*id) == visible,
-                    suspended: t.is_suspended(),
-                    working: state == AgentState::Working,
-                    waiting: state == AgentState::NeedsYou,
-                    running: !t.is_suspended()
-                        && state == AgentState::None
-                        && !t.process.as_deref().is_some_and(proc::is_shell),
-                });
-            }
-        }
-        let group_idle = idle::group_idle(&tabs, self.ws.groups.len(), self.ws.active);
-        let groups = self
-            .ws
-            .groups
-            .iter()
-            .zip(group_idle)
-            .enumerate()
-            .map(|(gi, (g, idle))| idle::Group { idle, open: gi == self.ws.active, exempt: g.idle_exempt })
-            .collect();
-        (tabs, groups)
-    }
-
-    /// Suspende lo que lleva sin usarse más de lo configurado (Configuración › Inactividad).
-    fn enforce_idle(&mut self) {
-        let (tabs, groups) = self.idle_state();
-        let ids = idle::pick(&self.config.idle, &tabs, &groups);
-        let mut any = false;
-        for id in ids {
-            any |= self.suspend(id);
-        }
-        if any {
-            log::info!("suspensión por inactividad");
-            self.save_session();
-        }
-    }
-
-    /// Datos de la sección Inactividad del modal.
-    fn idle_view(&self) -> settings::IdleView {
-        let (tabs, groups) = self.idle_state();
-        settings::IdleView {
-            rules: self.config.idle,
-            groups: self
-                .ws
-                .groups
-                .iter()
-                .zip(groups)
-                .enumerate()
-                .map(|(gi, (g, ig))| settings::IdleGroup {
-                    name: g.name.clone(),
-                    exempt: g.idle_exempt,
-                    open: ig.open,
-                    idle: ig.idle,
-                    suspended: tabs.iter().filter(|t| t.group == gi && t.suspended).count(),
-                    tabs: g.tabs.len(),
-                })
-                .collect(),
-        }
-    }
-
-    /// Cambia algo de Inactividad, lo guarda y aplica.
-    fn set_idle(&mut self, f: impl FnOnce(&mut idle::Rules)) {
-        f(&mut self.config.idle);
-        self.config.save();
-        self.enforce_idle();
-    }
-
-    /// − / + de un límite: 0 es Telar completo (configuración); 1.. el grupo i-1 (sesión).
-    fn step_limit(&mut self, i: usize, delta: i32) {
-        if i == 0 {
-            self.config.ram_limit_mb = limits::step(self.config.ram_limit_mb, delta);
-            self.config.save();
-        } else if let Some(g) = self.ws.groups.get_mut(i - 1) {
-            g.ram_limit_mb = limits::step(g.ram_limit_mb, delta);
-            self.save_session();
-        }
-        self.update_stats_needed();
-        self.enforce_limits();
-        self.window.request_redraw();
-    }
-
-    /// Datos de la sección Rendimiento del modal.
-    fn perf_view(&self) -> settings::Perf {
-        let used = |gi: usize| self.usage.as_ref().and_then(|u| u.groups.get(gi).copied()).unwrap_or(0);
-        settings::Perf {
-            total_limit_mb: self.config.ram_limit_mb,
-            total_used: self.stats.as_ref().map_or(0, |s| s.mem),
-            over_total: self.over_total,
-            auto_suspend: self.config.auto_suspend,
-            groups: self
-                .ws
-                .groups
-                .iter()
-                .enumerate()
-                .map(|(gi, g)| (g.name.clone(), g.ram_limit_mb, used(gi), self.over_groups.get(gi).copied().unwrap_or(false)))
-                .collect(),
-        }
-    }
-
-    /// Clic en los medidores: abre o cierra el detalle de uso.
-    fn toggle_stats(&mut self) {
-        self.menu = None;
-        self.settings = None;
-        self.stats_detail = match self.stats_detail {
-            Some(_) => None,
-            None => Some(statsview::Detail::default()),
-        };
-        self.window.set_cursor(CursorIcon::Default);
-        self.window.request_redraw();
-    }
-
-    /// ⌘, o el engranaje: abre o cierra la configuración.
-    fn toggle_settings(&mut self) {
-        self.menu = None;
-        self.editing = None;
-        self.settings = match self.settings {
-            Some(_) => None,
-            None => Some(settings::Settings::open(&self.config.font_family)),
-        };
-        self.window.set_cursor(CursorIcon::Default);
-        self.window.request_redraw();
-    }
-
-    /// Cambia la familia de la terminal y la interfaz, y la guarda.
-    fn set_font_family(&mut self, family: &str) {
-        if family.eq_ignore_ascii_case(&self.fonts.family) {
-            return;
-        }
-        self.fonts = Fonts::new(family, self.font_pt * self.window.scale_factor() as f32);
-        self.config.font_family = self.fonts.family.clone();
-        self.config.save();
-        self.resize_terms();
-        self.window.request_redraw();
-    }
-
-    /// Cambia el ícono de la app (Dock y Telar.app) y lo guarda.
-    fn set_app_icon(&mut self, id: &str) {
-        let result = appicon::apply(id, true);
-        if let Some(st) = self.settings.as_mut() {
-            st.icon_error = result.as_ref().err().cloned();
-        }
-        if result.is_ok() {
-            self.config.app_icon = id.to_string();
-            self.config.save();
-        }
-        self.window.request_redraw();
-    }
-
-    /// «Elegir archivo…»: selector de macOS; la imagen elegida pasa a ser el ícono propio.
-    /// Abre el panel para elegir la imagen del ícono propio (fuera del manejador del clic).
-    fn pick_app_icon(&mut self) {
-        let proxy = self.proxy.clone();
-        appicon::later_on_main(move || {
-            let _ = proxy.send_event(UserEvent::Picked(Picked::Icon(appicon::pick_file())));
-        });
-    }
-
-    /// Abre el panel para elegir la carpeta de inicio (fuera del manejador del clic).
-    fn pick_start_dir(&mut self) {
-        let proxy = self.proxy.clone();
-        let current = self.start_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from));
-        appicon::later_on_main(move || {
-            let dir = appicon::pick_folder("Elige la carpeta donde abren los tabs nuevos", current.as_deref());
-            let _ = proxy.send_event(UserEvent::Picked(Picked::StartDir(dir)));
-        });
-    }
-
-    /// Resultado de un panel de macOS.
-    fn on_picked(&mut self, picked: Picked) {
-        match picked {
-            Picked::StartDir(Some(dir)) if dir.is_absolute() => {
-                self.config.start_dir = Some(dir);
-                self.config.save();
-            }
-            Picked::Icon(Some(path)) => match appicon::import(&path) {
-                Ok(()) => self.set_app_icon(appicon::CUSTOM),
-                Err(e) => {
-                    if let Some(st) = self.settings.as_mut() {
-                        st.icon_error = Some(e);
-                    }
-                }
-            },
-            Picked::StartDir(_) | Picked::Icon(None) => {}
-        }
-        self.window.request_redraw();
-    }
-
-    /// Cambia el tema (interfaz y colores de la terminal) y lo guarda.
-    fn set_theme(&mut self, name: &str) {
-        if !theme::set(name) {
-            return;
-        }
-        self.palette = theme::t().palette();
-        self.config.theme = theme::t().name.to_string();
-        self.config.save();
-        self.window.request_redraw();
-    }
-
-    /// Tema anterior o siguiente de la lista (← → en la configuración).
-    fn cycle_theme(&mut self, delta: isize) {
-        let list = theme::themes();
-        let i = list.iter().position(|t| t.name == theme::t().name).unwrap_or(0) as isize;
-        let next = &list[(i + delta).rem_euclid(list.len() as isize) as usize];
-        self.set_theme(next.name);
-    }
-
-    /// Tamaño desde la configuración: se aplica y queda como el de ⌘0.
-    fn set_font_size(&mut self, pt: f32) {
-        self.font_pt = pt.clamp(config::FONT_SIZE_MIN, config::FONT_SIZE_MAX);
-        self.config.font_size = self.font_pt;
-        self.config.save();
-        self.apply_font_size();
-    }
-
-    fn settings_click(&mut self) {
-        let l = self.layout();
-        let Some(st) = self.settings.as_mut() else { return };
-        match st.hit(self.cursor.0, self.cursor.1, &l, &self.fonts, self.ws.groups.len()) {
-            settings::Hit::Outside | settings::Hit::Close => self.settings = None,
-            settings::Hit::Section(i) => st.section = i,
-            settings::Hit::Font(i) => {
-                let page = st.page(&l, &self.fonts);
-                st.select(i, page);
-                let name = st.visible()[i].name.clone();
-                self.set_font_family(&name);
-            }
-            settings::Hit::Theme(i) => {
-                if let Some(t) = theme::themes().get(i) {
-                    self.set_theme(t.name);
-                }
-            }
-            settings::Hit::Icon(i) => {
-                let id = appicon::CHOICES.get(i).map_or(appicon::CUSTOM, |c| c.id);
-                if id == appicon::CUSTOM && !appicon::has_custom() {
-                    self.pick_app_icon();
-                } else {
-                    self.set_app_icon(id);
-                }
-            }
-            settings::Hit::PickIcon => self.pick_app_icon(),
-            settings::Hit::PickStartDir => self.pick_start_dir(),
-            settings::Hit::ShowClaude => {
-                // Oculto, no se consulta nada (ni el uso ni la cuenta); al volver, se consulta ya.
-                self.config.show_claude = !self.config.show_claude;
-                self.config.save();
-                if self.config.show_claude {
-                    self.refresh_claude_account();
-                }
-            }
-            settings::Hit::ShowMeters => {
-                // Oculto, el muestreo se detiene (salvo que haya límites de memoria).
-                self.config.show_meters = !self.config.show_meters;
-                self.config.save();
-                self.update_stats_needed();
-            }
-            settings::Hit::ClearStartDir => {
-                self.config.start_dir = None;
-                self.config.save();
-            }
-            settings::Hit::LimitDown(i) => self.step_limit(i, -1),
-            settings::Hit::LimitUp(i) => self.step_limit(i, 1),
-            settings::Hit::AutoSuspend => {
-                self.config.auto_suspend = !self.config.auto_suspend;
-                self.config.save();
-                self.enforce_limits();
-            }
-            settings::Hit::IdleTabDown => self.set_idle(|r| r.tab_min = idle::step(r.tab_min, -1)),
-            settings::Hit::IdleTabUp => self.set_idle(|r| r.tab_min = idle::step(r.tab_min, 1)),
-            settings::Hit::IdleGroupDown => self.set_idle(|r| r.group_min = idle::step(r.group_min, -1)),
-            settings::Hit::IdleGroupUp => self.set_idle(|r| r.group_min = idle::step(r.group_min, 1)),
-            settings::Hit::IdleWaiting => self.set_idle(|r| r.include_waiting = !r.include_waiting),
-            settings::Hit::IdleRunning => self.set_idle(|r| r.include_running = !r.include_running),
-            settings::Hit::IdleExempt(gi) => {
-                if let Some(g) = self.ws.groups.get_mut(gi) {
-                    g.idle_exempt = !g.idle_exempt;
-                    self.save_session();
-                }
-            }
-            settings::Hit::SizeDown => self.set_font_size(self.font_pt - 1.0),
-            settings::Hit::SizeUp => self.set_font_size(self.font_pt + 1.0),
-            settings::Hit::Inside => {}
-        }
-        // Cambiar de sección (p. ej. a Rendimiento) puede necesitar el muestreo.
-        self.update_stats_needed();
-        self.window.request_redraw();
-    }
-
-    /// Teclado con la configuración abierta: escribir filtra, flechas eligen (y aplican),
-    /// ⌘+/⌘- cambian el tamaño, Esc o ⌘, cierran.
-    fn settings_key(&mut self, event: &KeyEvent) {
-        let l = self.layout();
-        let cmd = self.mods.super_key();
-        let Some(st) = self.settings.as_mut() else { return };
-        let page = st.page(&l, &self.fonts);
-        let mut apply = false;
-        // Las flechas y el filtro son de la sección Apariencia.
-        if st.section != settings::APPEARANCE_SECTION {
-            let close = event.logical_key == Key::Named(NamedKey::Escape)
-                || (cmd && matches!(event.key_without_modifiers(), Key::Character(ref c) if c.as_str() == "," || c.as_str() == "w"));
-            if close {
-                self.settings = None;
-            }
-            self.window.request_redraw();
-            return;
-        }
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => self.settings = None,
-            Key::Named(NamedKey::ArrowDown) => {
-                st.select(st.selected + 1, page);
-                apply = true;
-            }
-            Key::Named(NamedKey::ArrowUp) => {
-                st.select(st.selected.saturating_sub(1), page);
-                apply = true;
-            }
-            Key::Named(NamedKey::PageDown) => {
-                st.select(st.selected + page, page);
-                apply = true;
-            }
-            Key::Named(NamedKey::PageUp) => {
-                st.select(st.selected.saturating_sub(page), page);
-                apply = true;
-            }
-            Key::Named(NamedKey::Enter) => apply = true,
-            Key::Named(NamedKey::ArrowLeft) => {
-                self.cycle_theme(-1);
-                return;
-            }
-            Key::Named(NamedKey::ArrowRight) => {
-                self.cycle_theme(1);
-                return;
-            }
-            Key::Named(NamedKey::Backspace) => {
-                st.filter.pop();
-                st.select(0, page);
-                st.scroll = 0;
-            }
-            _ if cmd => match event.key_without_modifiers() {
-                Key::Character(c) if c.as_str() == "," || c.as_str() == "w" => self.settings = None,
-                Key::Character(c) if c.as_str() == "=" || c.as_str() == "+" => self.set_font_size(self.font_pt + 1.0),
-                Key::Character(c) if c.as_str() == "-" => self.set_font_size(self.font_pt - 1.0),
-                Key::Character(c) if c.as_str() == "v" => {
-                    if let Some(text) = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) {
-                        if let Some(st) = self.settings.as_mut() {
-                            st.filter.extend(text.chars().filter(|c| !c.is_control()));
-                            st.select(0, page);
-                            st.scroll = 0;
-                        }
-                    }
-                }
-                _ => {}
-            },
-            _ => {
-                if let Some(t) = &event.text {
-                    st.filter.extend(t.chars().filter(|c| !c.is_control()));
-                    st.select(0, page);
-                    st.scroll = 0;
-                }
-            }
-        }
-        if apply {
-            if let Some(name) = self.settings.as_ref().and_then(|st| st.visible().get(st.selected).map(|f| f.name.clone())) {
-                self.set_font_family(&name);
-            }
-        }
-        self.window.request_redraw();
-    }
-
-    /// ⌘⇧C o clic abajo en la barra lateral: apagado → siempre → con Claude.
-    fn cycle_awake(&mut self) {
-        self.awake.mode = self.awake.mode.next();
-        self.update_awake();
-        self.window.request_redraw();
-    }
-
-    fn update_awake(&mut self) {
-        let working = self.terms.values().any(|t| t.agent.state == AgentState::Working);
-        let before = self.awake.active();
-        self.awake.update(working);
-        if before != self.awake.active() {
-            self.window.request_redraw();
-        }
-    }
-
-    fn tabs_json(&self) -> Value {
-        let active = self.ws.active_term();
-        let groups: Vec<Value> = self
-            .ws
-            .groups
-            .iter()
-            .map(|g| {
-                let tabs: Vec<Value> = g
-                    .tabs
-                    .iter()
-                    .map(|id| {
-                        let mut v = self.tab_json(*id);
-                        v["active"] = json!(Some(*id) == active);
-                        v
-                    })
-                    .collect();
-                json!({ "name": g.name, "dir": g.dir, "tabs": tabs })
-            })
-            .collect();
-        json!({ "ok": true, "groups": groups })
-    }
-
-    fn tab_json(&self, id: u64) -> Value {
-        let Some(t) = self.terms.get(&id) else { return Value::Null };
-        let group = self.ws.group_of(id).map(|gi| self.ws.groups[gi].name.clone());
-        json!({
-            "id": id,
-            "group": group,
-            "title": t.title,
-            "name": t.name,
-            "process": t.process,
-            "state": t.agent.state.name(),
-            "suspended": t.is_suspended(),
-            "state_secs": t.agent.since.elapsed().as_secs(),
-            "idle_secs": t.last_used.get().elapsed().as_secs(),
-            "changes": t.agent.changes,
-            "session_id": t.agent.session_id,
-            "cwd": t.cwd().or_else(|| t.agent.cwd.as_ref().map(PathBuf::from)),
-            "message": t.agent.message,
-        })
-    }
-
-    /// Cada pocos segundos: nombre del proceso de cada tab y guardado de la sesión.
-    /// El muestreo de CPU, RAM y GPU hace falta si se ven los medidores (o su detalle, o la
-    /// sección Rendimiento con el uso por grupo) o hay un límite de memoria que vigilar; si
-    /// no, se detiene.
-    fn update_stats_needed(&mut self) {
-        let limits = self.config.ram_limit_mb > 0 || self.ws.groups.iter().any(|g| g.ram_limit_mb > 0);
-        let perf_open = self.settings.as_ref().is_some_and(|st| st.section == settings::PERF_SECTION);
-        let needed = self.config.show_meters || limits || self.stats_detail.is_some() || perf_open;
-        let was = self.stats_on.swap(needed, std::sync::atomic::Ordering::Relaxed);
-        if was && !needed {
-            // Sin medición, nada queda marcado como pasado de su límite.
-            self.stats = None;
-            self.over_total = false;
-            self.over_groups.clear();
-        }
-    }
-
+    /// Cada pocos segundos: nombre del proceso de cada tab, vigilancia de los agentes,
+    /// inactividad, uso de Claude, versiones nuevas y guardado de la sesión.
     fn periodic(&mut self) {
         self.update_stats_needed();
         // La suspensión por inactividad se revisa con este reloj (no depende del muestreo).
@@ -2836,308 +762,12 @@ impl State {
                 changed = true;
             }
         }
+        changed |= self.unstick_working();
         if changed {
             self.window.request_redraw();
         }
         self.update_awake();
         self.save_session();
-    }
-
-    fn saved_state(&self) -> Saved {
-        let groups = self
-            .ws
-            .groups
-            .iter()
-            .map(|g| SavedGroup {
-                name: g.name.clone(),
-                dir: g.dir.clone(),
-                ram_limit_mb: g.ram_limit_mb,
-                idle_exempt: g.idle_exempt,
-                active: g.active,
-                tabs: g
-                    .tabs
-                    .iter()
-                    .filter_map(|id| self.terms.get(id))
-                    .map(|t| {
-                        let claude = (t.agent.state != AgentState::None).then(|| t.agent.session_id.clone()).flatten();
-                        let screen = t.frozen.as_ref().map(|f| f.screen.clone());
-                        // Con Claude abierto, su carpeta es donde se inició la sesión (la necesita --resume).
-                        let cwd = if t.is_suspended() {
-                            t.cwd()
-                        } else if claude.is_some() {
-                            t.agent.cwd.as_ref().map(PathBuf::from).or_else(|| t.cwd())
-                        } else {
-                            t.cwd()
-                        };
-                        let command = t.frozen.as_ref().and_then(|f| f.command.clone());
-                        SavedTab { title: t.title.clone(), name: t.name.clone(), cwd, claude, screen, command }
-                    })
-                    .collect(),
-            })
-            .collect();
-        Saved { active: self.ws.active, groups, awake: self.awake.mode.name().to_string() }
-    }
-
-    fn save_session(&mut self) {
-        if !self.persist {
-            return;
-        }
-        let saved = self.saved_state();
-        if self.last_saved.as_ref() != Some(&saved) {
-            session::save(&saved);
-            self.last_saved = Some(saved);
-        }
-    }
-
-    /// Vuelve a abrir los grupos y tabs guardados; los que tenían Claude retoman su sesión.
-    fn restore(&mut self, saved: Saved) {
-        self.awake.mode = awake::Mode::parse(&saved.awake).unwrap_or_default();
-        let mut groups = Vec::new();
-        for g in saved.groups {
-            let mut tabs = Vec::new();
-            for mut tab in g.tabs {
-                let id = self.next_id;
-                // Suspendido: no arranca nada, solo vuelve su vista previa.
-                let mut t = match tab.screen {
-                    Some(screen) => {
-                        self.next_id += 1;
-                        let mut t = Terminal::frozen(id, self.layout().grid_size(), self.proxy.clone(), Frozen { cwd: tab.cwd.clone(), screen, command: tab.command.clone() });
-                        if let Some(session) = tab.claude.as_ref().filter(|s| claude_session_exists(s)) {
-                            t.agent.session_id = Some(session.clone());
-                            t.agent.cwd = tab.cwd.as_ref().map(|c| c.display().to_string());
-                            t.agent.set_state(AgentState::Idle);
-                        }
-                        t
-                    }
-                    None => {
-                        let Some(id) = self.spawn_term_in(tab.cwd.as_deref()) else { continue };
-                        let mut t = self.terms.remove(&id).unwrap();
-                        let claude = tab.claude.as_ref().is_some_and(|s| resume_claude(&mut t, s, tab.cwd.as_deref()));
-                        // Era un Claude sin conversación: el título que puso Claude ya no corresponde.
-                        if tab.claude.is_some() && !claude {
-                            tab.title = None;
-                        }
-                        t
-                    }
-                };
-                t.title = tab.title;
-                t.name = tab.name;
-                self.terms.insert(id, t);
-                tabs.push(id);
-            }
-            if !tabs.is_empty() {
-                let active = g.active.min(tabs.len() - 1);
-                groups.push(Group { name: g.name, tabs, active, dir: g.dir, ram_limit_mb: g.ram_limit_mb, idle_exempt: g.idle_exempt });
-            }
-        }
-        self.ws.restore(groups, saved.active);
-    }
-
-    /// Evento de un hook de Claude Code en el tab `tab`.
-    fn on_hook(&mut self, tab: u64, p: &Value) {
-        // Un tab suspendido no tiene Claude: lo que llegue es del proceso que se cerró (SessionEnd).
-        if self.terms.get(&tab).is_none_or(Terminal::is_suspended) {
-            return;
-        }
-        if p["hook_event_name"] == "SessionStart" {
-            if let Some(cwd) = p["cwd"].as_str() {
-                self.adopt_group_dir(tab, Path::new(cwd));
-            }
-        }
-        let visible = self.ws.active_term() == Some(tab) && self.focused;
-        let Some(t) = self.terms.get_mut(&tab) else { return };
-        let agent = &mut t.agent;
-        if let Some(sid) = p["session_id"].as_str() {
-            agent.session_id = Some(sid.to_string());
-        }
-        if let Some(cwd) = p["cwd"].as_str() {
-            agent.cwd = Some(cwd.to_string());
-        }
-        let message = p["message"].as_str().unwrap_or_default();
-        let new = match p["hook_event_name"].as_str().unwrap_or_default() {
-            "SessionStart" => Some(AgentState::Idle),
-            "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(AgentState::Working),
-            "Notification" => {
-                // El aviso de «sigo esperando tu input» (a los 60 s) no cambia nada:
-                // la sesión ya está en «terminó» o «en espera».
-                let idle = p["notification_type"].as_str() == Some("idle_prompt")
-                    || message.contains("waiting for your input");
-                if idle { None } else { Some(AgentState::NeedsYou) }
-            }
-            "Stop" => Some(if visible { AgentState::Idle } else { AgentState::Done }),
-            "SessionEnd" => Some(AgentState::None),
-            _ => None,
-        };
-        let Some(new) = new else { return };
-        // Al terminar una respuesta cambió el consumo: se consulta el uso de la cuenta activa
-        // (con al menos 20 s entre consultas).
-        if new == AgentState::Idle || new == AgentState::Done {
-            if self.usage_fetched.is_none_or(|t| t.elapsed() > Duration::from_secs(20)) {
-                self.fetch_usage(false);
-            }
-        }
-        let Some(t) = self.terms.get_mut(&tab) else { return };
-        let agent = &mut t.agent;
-        if new == AgentState::NeedsYou {
-            agent.message = Some(message.to_string());
-        } else if new != AgentState::Working {
-            agent.message = None;
-        }
-        if !agent.set_state(new) {
-            return;
-        }
-        if matches!(new, AgentState::NeedsYou | AgentState::Done) && !self.focused && self.snapshot.is_none() {
-            let what = if new == AgentState::NeedsYou {
-                if message.is_empty() { "Claude te necesita".to_string() } else { message.to_string() }
-            } else {
-                "Claude terminó".to_string()
-            };
-            let place = self.place_of(tab);
-            notify_macos(&place, &what);
-            self.window.request_user_attention(Some(UserAttentionType::Informational));
-        }
-        self.window.request_redraw();
-    }
-
-    /// «Grupo › título del tab», para las notificaciones.
-    fn place_of(&self, tab: u64) -> String {
-        let group = self.ws.groups.iter().find(|g| g.tabs.contains(&tab)).map_or("", |g| g.name.as_str());
-        let title = self.terms.get(&tab).and_then(|t| t.title.clone()).unwrap_or_default();
-        if title.is_empty() { group.to_string() } else { format!("{group} › {title}") }
-    }
-
-    /// Escenario del modo snapshot: varios grupos y tabs, y el texto de prueba.
-    fn snapshot_setup(&mut self) {
-        self.ws.groups[0].name = "telar".into();
-        self.new_tab();
-        self.new_group();
-        self.ws.groups[1].name = "pirani-portal".into();
-        self.new_group();
-        self.ws.select_group(0);
-        self.ws.select_tab(1);
-        if let Ok(text) = std::env::var("TELAR_SNAPSHOT_INPUT") {
-            let text = text.replace("\\n", "\r");
-            self.send_input(text.into_bytes());
-        }
-    }
-
-    /// Modo snapshot: lo que se abre encima para la captura (también con una sesión cargada).
-    /// TELAR_SNAPSHOT_HOVER=x,y: el puntero en ese punto (en puntos).
-    fn snapshot_hover(&mut self) {
-        if let Some((x, y)) = std::env::var("TELAR_SNAPSHOT_HOVER").ok().and_then(|v| {
-            let (x, y) = v.split_once(',')?;
-            Some((x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?))
-        }) {
-            let s = self.window.scale_factor();
-            self.on_cursor_moved(PhysicalPosition::new(x * s, y * s));
-        }
-    }
-
-    fn snapshot_overlays(&mut self) {
-        // TELAR_SNAPSHOT_SEARCH=texto: captura con el buscador abierto.
-        if let Some(q) = std::env::var("TELAR_SNAPSHOT_SEARCH").ok().filter(|q| !q.is_empty()) {
-            self.search = Some((q, 0));
-        }
-        // TELAR_SNAPSHOT_STATS=1: captura con el detalle de uso abierto.
-        if std::env::var_os("TELAR_SNAPSHOT_STATS").is_some() {
-            self.toggle_stats();
-        }
-        // TELAR_SNAPSHOT_USAGE='<json>': uso de Claude de prueba (como `telar usage`), con
-        // una cuenta ficticia.
-        if let Some(v) = std::env::var("TELAR_SNAPSHOT_USAGE").ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
-            self.account_key = Some("persona@ejemplo.com|".into());
-            self.claude_use.insert("persona@ejemplo.com|".into(), claude_usage::parse(&v));
-            self.claude_account = Some(claude_usage::Account { email: Some("persona@ejemplo.com".into()), plan: Some("Max".into()) });
-        }
-        // TELAR_SNAPSHOT_UPDATE=X.Y.Z: captura con esa versión disponible.
-        if let Ok(version) = std::env::var("TELAR_SNAPSHOT_UPDATE") {
-            self.update = update::Status::Available(update::Release { version, url: String::new(), sha_url: String::new(), size: 0 });
-        }
-        // TELAR_SNAPSHOT_DELETE=n: captura con la confirmación de eliminar el grupo n.
-        if let Some(gi) = std::env::var("TELAR_SNAPSHOT_DELETE").ok().and_then(|v| v.parse().ok()) {
-            self.ask_delete_group(gi);
-        }
-        self.snapshot_hover();
-        // TELAR_SNAPSHOT_SETTINGS=1: captura con la configuración abierta.
-        if let Ok(section) = std::env::var("TELAR_SNAPSHOT_SETTINGS") {
-            self.toggle_settings();
-            if let Some(st) = self.settings.as_mut() {
-                match section.as_str() {
-                    "apariencia" => st.section = settings::APPEARANCE_SECTION,
-                    "icono" => st.section = settings::ICON_SECTION,
-                    "rendimiento" => st.section = settings::PERF_SECTION,
-                    "inactividad" => st.section = settings::IDLE_SECTION,
-                    _ => {}
-                }
-            }
-        }
-        // TELAR_SNAPSHOT_DRAG=group|tab|tab-to-group: arrastre simulado. «group» lleva el
-        // primer grupo a la cuarta fila; «tab», el primer tab al final; «tab-to-group»
-        // deja el tab visible sobre la tercera fila de la barra lateral, sin soltarlo.
-        if let Ok(kind) = std::env::var("TELAR_SNAPSHOT_DRAG") {
-            let l = self.layout();
-            let s = l.s();
-            let row_y = |i: f32| (112.0 + 32.0 * i + 15.0) * s;
-            let (item, start, end) = match kind.as_str() {
-                "group" => (Some(Dragged::Group(0)), (60.0 * s, row_y(0.0)), (60.0 * s, row_y(3.0))),
-                "tab" => {
-                    let r = l.tab_rect(0);
-                    let n = self.ws.group().map_or(1, |g| g.tabs.len());
-                    let last = l.tab_rect(n - 1);
-                    let first = self.ws.group().and_then(|g| g.tabs.first().copied());
-                    (first.map(Dragged::Tab), (r.x + 10.0, r.y + 10.0), (last.x + last.w - 10.0, last.y + 10.0))
-                }
-                _ => {
-                    let r = l.tab_rect(0);
-                    (self.ws.active_term().map(Dragged::Tab), (r.x + 10.0, r.y + 10.0), (60.0 * s, row_y(2.0)))
-                }
-            };
-            if let Some(item) = item {
-                if let Dragged::Group(i) = item {
-                    self.ws.select_group(i);
-                }
-                self.cursor = start;
-                self.drag = Some(Dragging { item, from: start, moved: false, drop_group: None });
-                self.cursor = end;
-                self.drag_move();
-                if kind != "tab-to-group" {
-                    self.drag_end();
-                }
-            }
-        }
-        // TELAR_SNAPSHOT_MENU=tab|group: captura con el menú contextual abierto.
-        match std::env::var("TELAR_SNAPSHOT_MENU").as_deref() {
-            Ok("tab") => {
-                let s = self.window.scale_factor() as f32;
-                self.cursor = (500.0 * s, 24.0 * s);
-                let id = self.ws.active_term();
-                self.open_menu(id, self.ws.active);
-                if let Some(m) = self.menu.as_mut() {
-                    m.hover = Some(1);
-                }
-            }
-            Ok("group") => {
-                let s = self.window.scale_factor() as f32;
-                self.cursor = (60.0 * s, 125.0 * s);
-                self.open_menu(None, 1);
-            }
-            // Menú de cuentas de Claude, con cuentas ficticias.
-            Ok("cuentas") => {
-                let fake = |email: &str, org: &str, plan: &str| cuentas::Saved {
-                    key: cuentas::key_of(email, Some(org)),
-                    email: email.into(),
-                    org: None,
-                    plan: Some(plan.into()),
-                };
-                self.accounts = vec![fake("persona@ejemplo.com", "a", "Max"), fake("trabajo@empresa.co", "b", "Team")];
-                self.account_key = Some(self.accounts[0].key.clone());
-                let s = self.window.scale_factor() as f32;
-                let r = self.layout().claude_account_rect();
-                self.cursor = (r.x + 40.0 * s, r.y + r.h / 2.0);
-                self.open_account_menu();
-            }
-            _ => {}
-        }
     }
 
     fn draw(&mut self) {
@@ -3147,7 +777,9 @@ impl State {
         self.list_scroll = self.list_scroll.min(max);
         let l = self.layout();
         let results = self.search_results();
+        let links = self.visible_links();
         let view = View {
+            links: &links,
             ws: &self.ws,
             terms: &self.terms,
             hover: self.hover,
@@ -3179,6 +811,8 @@ impl State {
                 start_dir: self.config.start_dir.as_deref(),
                 show_claude: self.config.show_claude,
                 show_meters: self.config.show_meters,
+                lazy_restore: self.config.lazy_restore,
+                scrollback: self.config.scrollback,
             };
             st.draw(&mut self.quads, &mut self.fonts, &l, &ctx);
             ime_cell = None;
@@ -3186,6 +820,11 @@ impl State {
         if let (Some(d), Some(sample)) = (&self.stats_detail, &self.stats) {
             let rows = statsview::rows(sample, &self.ws, &self.terms);
             d.draw(&mut self.quads, &mut self.fonts, &l, sample, &rows, self.config.ram_limit_mb);
+            ime_cell = None;
+        }
+        if let Some(b) = &self.inbox {
+            let entries = inbox::entries(&self.ws, &self.terms);
+            b.draw(&mut self.quads, &mut self.fonts, &l, &entries, self.started.elapsed().as_secs_f32());
             ime_cell = None;
         }
         if let Some(c) = &self.confirm {
@@ -3245,16 +884,7 @@ fn resume_claude(t: &mut Terminal, session: &str, cwd: Option<&Path>) -> bool {
     true
 }
 
-/// Notificación de macOS (sin bundle de app todavía, vía osascript).
+/// Notificación de macOS que no lleva a ningún tab (ver `notify`).
 fn notify_macos(title: &str, body: &str) {
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("display notification \"{}\" with title \"Telar\" subtitle \"{}\"", esc(body), esc(title));
-    // En un hilo que espera al proceso, para no dejar zombis.
-    std::thread::spawn(move || {
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    });
+    notify::send(title, body, None);
 }

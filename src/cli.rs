@@ -35,6 +35,10 @@ Sin comando abre la terminal. Comandos (dentro de Telar):
   wait <tab> [--state S] [--timeout SEG]
                                      espera a que Claude en ese tab deje de trabajar
                                      (o a que llegue al estado S: idle, done, needs-you, shell)
+  wait <tab> --match 'TEXTO|OTRO' [--timeout SEG]
+                                     espera a que el tab muestre una línea nueva con alguno de
+                                     esos textos (p. ej. lo que imprime un servidor al compilar)
+                                     e imprime esa línea
 
 Instalación:
   install      hooks de Claude Code, enlace ~/.local/bin/telar y regla para Claude
@@ -220,10 +224,17 @@ pub fn run(cmd: &str, raw: &[String]) -> Result<String, String> {
             Ok(format!("Despierto: {what} ({mode}); caffeinate {now}"))
         }
         "wait" => {
-            let a = Args::parse(raw, &["--state", "--timeout"]);
+            let a = Args::parse(raw, &["--state", "--timeout", "--match"]);
             let tab = tab_spec(a.positional.first().ok_or("falta <tab>")?);
             let target = a.value(&["--state"]).map(String::from);
             let timeout = a.value(&["--timeout"]).map_or(Ok(1800), |t| t.parse::<u64>().map_err(|_| "--timeout debe ser un número"))?;
+            if let Some(pattern) = a.value(&["--match"]) {
+                let options: Vec<&str> = pattern.split('|').map(str::trim).filter(|p| !p.is_empty()).collect();
+                if options.is_empty() {
+                    return Err("--match necesita un texto".into());
+                }
+                return wait_match(tab, &options, Duration::from_secs(timeout));
+            }
             wait(tab, target, Duration::from_secs(timeout))
         }
         _ => Err(format!("Comando desconocido: {cmd}\n\n{USAGE}")),
@@ -254,9 +265,78 @@ fn wait(tab: Value, target: Option<String>, timeout: Duration) -> Result<String,
     }
 }
 
+/// Líneas que se leen de cada vez para ver qué apareció.
+const MATCH_WINDOW: u64 = 400;
+
+/// Espera a que el tab muestre una línea nueva que contenga alguno de `options` y la
+/// devuelve. Lo que ya estaba en pantalla al empezar no cuenta.
+fn wait_match(tab: Value, options: &[&str], timeout: Duration) -> Result<String, String> {
+    let start = Instant::now();
+    let read = || -> Result<Vec<String>, String> {
+        let v = call(json!({ "cmd": "read", "tab": tab, "lines": MATCH_WINDOW }))?;
+        Ok(v["text"].as_str().unwrap_or_default().lines().map(String::from).collect())
+    };
+    let mut seen = read()?;
+    loop {
+        std::thread::sleep(Duration::from_millis(400));
+        let now = read()?;
+        if let Some(line) = new_lines(&seen, &now).iter().find(|l| options.iter().any(|o| l.contains(o))) {
+            return Ok(line.trim().to_string());
+        }
+        seen = now;
+        if start.elapsed() >= timeout {
+            return Err(format!("tiempo agotado sin ver «{}»", options.join("» ni «")));
+        }
+    }
+}
+
+/// Lo que apareció en `now` respecto de `before` (las dos, las últimas líneas del tab). Lo
+/// nuevo se agrega al final y lo viejo sale por arriba: se busca el desplazamiento con que
+/// `before` sigue estando al comienzo de `now`. La última línea de `before` puede haber
+/// crecido (se seguía escribiendo), así que se compara sin ella y se cuenta como nueva. Si
+/// no hay coincidencia (se borró la pantalla), todo `now` es nuevo.
+fn new_lines<'a>(before: &[String], now: &'a [String]) -> &'a [String] {
+    let old = &before[..before.len().saturating_sub(1)];
+    for drop in 0..=old.len() {
+        let kept = &old[drop..];
+        if now.len() >= kept.len() && now[..kept.len()] == *kept {
+            let added = &now[kept.len()..];
+            // La última línea solo es nueva si cambió.
+            return match (added.first(), before.last()) {
+                (Some(first), Some(last)) if first == last => &added[1..],
+                _ => added,
+            };
+        }
+    }
+    now
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn lineas_nuevas() {
+        let antes = lines(&["a", "b", "Compiled successfully", "> "]);
+        // Lo viejo no cuenta: la línea que ya decía «Compiled successfully» queda fuera.
+        let ahora = lines(&["a", "b", "Compiled successfully", "> cambio", "Compiled successfully"]);
+        // La última línea creció («> » pasó a «> cambio»): cuenta como nueva.
+        assert_eq!(new_lines(&antes, &ahora), lines(&["> cambio", "Compiled successfully"]));
+        // Salieron líneas por arriba (la ventana de lectura es fija).
+        let ahora = lines(&["Compiled successfully", "> ", "Failed to compile"]);
+        assert_eq!(new_lines(&antes, &ahora), lines(&["Failed to compile"]));
+        // Sin cambios: nada nuevo (tampoco la última línea, aunque diga lo que se espera).
+        assert!(new_lines(&antes, &antes).is_empty());
+        let fin = lines(&["a", "Compiled successfully"]);
+        assert!(new_lines(&fin, &fin).is_empty());
+        // Pantalla borrada: todo es nuevo.
+        let ahora = lines(&["otra cosa"]);
+        assert_eq!(new_lines(&antes, &ahora), lines(&["otra cosa"]));
+    }
 
     fn args(v: &[&str], with_value: &[&str]) -> Args {
         Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>(), with_value)

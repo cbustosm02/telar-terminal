@@ -59,6 +59,9 @@ pub struct Frozen {
     /// Lo que corría en primer plano (que no era la shell ni Claude): se vuelve a
     /// ejecutar al reanudar. Ver `proc::foreground_command`.
     pub command: Option<String>,
+    /// No lo suspendiste tú: quedó así al abrir Telar (ver `Config::lazy_restore`) y
+    /// arranca solo en cuanto se muestra.
+    pub lazy: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -170,6 +173,10 @@ pub struct Terminal {
     size: GridSize,
     /// Último uso: lo viste, escribiste en él o su programa mostró algo (ver `idle`).
     pub last_used: Cell<Instant>,
+    /// Cuándo mostró algo por última vez su programa, y cuántas veces cambió lo que muestra
+    /// (para no volver a buscar enlaces en una pantalla que no cambió).
+    pub output_at: Cell<Instant>,
+    pub version: Cell<u64>,
 }
 
 impl Terminal {
@@ -179,6 +186,7 @@ impl Terminal {
         proxy: EventLoopProxy<UserEvent>,
         socket: Option<&Path>,
         cwd: Option<&Path>,
+        scrollback: usize,
     ) -> std::io::Result<Self> {
         let listener = Listener::new(id, proxy);
         let mut env = HashMap::from([
@@ -203,7 +211,7 @@ impl Terminal {
             drain_on_exit: false,
             env,
         };
-        let config = Config { scrolling_history: 10_000, ..Default::default() };
+        let config = Config { scrolling_history: scrollback, ..Default::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
         let pty = tty::new(&options, size.window_size(), id)?;
         let pty_fd = pty.file().try_clone().ok().map(OwnedFd::from);
@@ -225,6 +233,8 @@ impl Terminal {
             pty: pty_fd,
             size,
             last_used: Cell::new(Instant::now()),
+            output_at: Cell::new(Instant::now()),
+            version: Cell::new(0),
         })
     }
 
@@ -249,6 +259,8 @@ impl Terminal {
             pty: None,
             size,
             last_used: Cell::new(Instant::now()),
+            output_at: Cell::new(Instant::now()),
+            version: Cell::new(0),
         }
     }
 
@@ -266,6 +278,12 @@ impl Terminal {
     /// Marca el tab como usado ahora.
     pub fn touch(&self) {
         self.last_used.set(Instant::now());
+    }
+
+    /// Su programa mostró algo (o cambió la pantalla de otra forma, p. ej. ⌘K).
+    pub fn changed(&self) {
+        self.output_at.set(Instant::now());
+        self.version.set(self.version.get() + 1);
     }
 
     pub fn is_suspended(&self) -> bool {
@@ -287,6 +305,11 @@ impl Terminal {
             let _ = n.0.send(Msg::Resize(size.window_size()));
         }
         self.term.lock().resize(size);
+    }
+
+    /// Cambia cuántas líneas de historial guarda.
+    pub fn set_scrollback(&self, lines: usize) {
+        self.term.lock().set_options(Config { scrolling_history: lines, ..Default::default() });
     }
 
     pub fn size(&self) -> GridSize {
