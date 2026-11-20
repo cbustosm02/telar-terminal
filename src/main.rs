@@ -117,6 +117,13 @@ fn main() {
         Some("uninstall" | "uninstall-hooks") => return finish(hooks::uninstall()),
         Some("-h" | "--help" | "help") => return println!("{}", cli::USAGE),
         Some("-V" | "--version" | "version") => return println!("telar {}", update::VERSION),
+        // Interno (actualizador): el binario nuevo arma y firma su paquete.
+        Some("__preparar-paquete") => {
+            if let Some(app) = args.get(1) {
+                update::prepare_bundle(Path::new(app), true);
+            }
+            return;
+        }
         // Interno (scripts/vista-previa.sh): firma un paquete con la firma local estable.
         Some("__firmar") => {
             return finish(match args.get(1) {
@@ -129,6 +136,12 @@ fn main() {
     }
 
     env_logger::init();
+    // El paquete se pone al día antes de abrir: si cambió, se reinicia para que macOS vea
+    // la misma firma en el proceso y en el disco (y respete los permisos concedidos).
+    if std::env::var_os("TELAR_SNAPSHOT").is_none() && update::ensure_bundle() {
+        update::relaunch();
+        return;
+    }
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App { proxy: event_loop.create_proxy(), state: None };
@@ -411,9 +424,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         if state.snapshot.is_none() {
-            // Ícono del paquete (si la app se actualizó desde una versión sin él) y el elegido.
-            update::ensure_bundle();
-            let _ = appicon::apply(&state.config.app_icon, false);
+            // Ícono elegido en el Dock (el del paquete se puso al día antes de abrir).
+            let _ = appicon::apply(&state.config.app_icon);
         }
         if state.snapshot.is_none() {
             update::cleanup_leftovers();
@@ -631,6 +643,8 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(st) = self.state.as_mut() {
             st.save_session_final();
         }
+        // Lo que cambió con la app abierta (el ícono elegido) se aplica al paquete al salir.
+        update::ensure_bundle_on_exit();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

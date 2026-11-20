@@ -887,7 +887,7 @@ impl Settings {
         let th = theme::t();
         let cx = g.content_x;
         k.text(cx, g.title_y, "Ícono de la app", Text::title(), g.content_w - 40.0 * s);
-        k.text(cx, g.title_y + 22.0 * s, "Cambia en el Dock al instante y queda guardado en Telar.app", Text::small(), g.content_w);
+        k.text(cx, g.title_y + 22.0 * s, "Cambia en el Dock al instante; en Telar.app, al cerrar Telar", Text::small(), g.content_w);
         let custom_key = std::fs::metadata(appicon::custom_path())
             .and_then(|m| m.modified())
             .ok()

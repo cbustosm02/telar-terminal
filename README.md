@@ -44,6 +44,7 @@ macOS guarda los permisos de privacidad atados a la firma de la app. Con una fir
 - Se crea en este Mac la primera vez, en un llavero propio (`~/.config/telar/firma/`) que no se suma a tus llaveros.
 - Con cada actualización se vuelve a firmar con el mismo certificado, así que los permisos que concedas se conservan. Si algo falla, se firma ad hoc como antes.
 - Una versión anterior firmada ad hoc pasa a la firma estable al abrirse. Después de eso, macOS pregunta una última vez.
+- El paquete nunca se modifica con Telar abierta desde él: macOS dejaría de reconocer los permisos de ese proceso. Si al abrir hay algo que poner al día (por ejemplo, tras actualizar desde una versión vieja), Telar lo hace y se reinicia sola una vez. El ícono elegido se graba en el paquete al salir.
 - En **Configuración › General › Permisos de macOS**, «Abrir Ajustes» lleva a «Acceso total al disco». Si lo concedes una vez, ni Telar ni lo que corre en sus tabs vuelven a pedir permiso por carpeta. La tarjeta indica si ya está concedido.
 
 ## Sesiones que sobreviven
@@ -67,6 +68,7 @@ Cada tab sabe en qué está su sesión de Claude Code y lo muestra con un punto 
 | verde | terminó y no lo has visto |
 | sin punto | shell normal, o sesión esperando tu prompt |
 
+- **Tus mensajes** en la conversación se distinguen de las respuestas. Claude Code los pinta con un gris fijo que casi no se ve en muchos temas, así que en los tabs con Claude Telar lo cambia por un tono del acento del tema y les pone una barrita a la izquierda.
 - **⌘J** salta al siguiente tab que te necesita (o, si no hay, al siguiente que terminó).
 - **Bandeja de agentes** (⌘⇧J, o el ícono de bandeja junto a «GRUPOS», que lleva un punto si alguien te necesita): todas las sesiones de Claude de todos los grupos, de la más urgente a la menos, con su estado, desde hace cuánto, y la pregunta pendiente o el último paso (la última línea con ⏺). Un permiso se responde desde ahí con los botones de las opciones que muestra Claude (o con las teclas 1–9), sin cambiar de tab; «Ir al tab» lo abre.
 - Si interrumpes a Claude con Esc o el turno se corta por un error de la API o por el límite de uso, el tab deja de figurar como trabajando: Telar escucha `StopFailure` y, además, si un Claude «trabajando» pasa 10 s sin mostrar nada (mientras trabaja, su indicador se redibuja varias veces por segundo), lo da por detenido.

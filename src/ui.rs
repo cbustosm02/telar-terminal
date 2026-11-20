@@ -640,7 +640,8 @@ pub fn draw(out: &mut Vec<Quad>, fg: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layo
     if let Some(t) = active {
         let term = t.term.lock();
         let working = t.agent.state == AgentState::Working;
-        ime_cell = draw_terminal(out, fg, fonts, l, &term, v, working);
+        let claude = t.agent.state != AgentState::None;
+        ime_cell = draw_terminal(out, fg, fonts, l, &term, v, working, claude);
     }
     out.append(fg);
     let mut k = Kit::new(out, fonts, l.s);
@@ -1209,6 +1210,17 @@ fn resolve(color: Color, colors: &Colors, palette: &[Rgba; COUNT], flags: Flags)
     }
 }
 
+/// Fondo con el que Claude Code pinta tus mensajes (`userMessageBackground` de sus temas
+/// oscuros y claros). Devuelve si es el de «bajo el puntero».
+fn claude_user_bg(c: Color) -> Option<bool> {
+    let Color::Spec(rgb) = c else { return None };
+    match (rgb.r, rgb.g, rgb.b) {
+        (55, 55, 55) | (240, 240, 240) | (220, 220, 220) => Some(false),
+        (70, 70, 70) | (252, 252, 252) | (232, 232, 232) => Some(true),
+        _ => None,
+    }
+}
+
 /// Dibuja la terminal. Devuelve la celda del cursor (para posicionar el IME).
 fn draw_terminal(
     out: &mut Vec<Quad>,
@@ -1218,6 +1230,7 @@ fn draw_terminal(
     term: &Term<Listener>,
     v: &View,
     working: bool,
+    claude: bool,
 ) -> Option<(usize, usize)> {
     let content = term.renderable_content();
     let colors = content.colors;
@@ -1253,6 +1266,13 @@ fn draw_terminal(
     let show_cursor = cursor.shape != CursorShape::Hidden && content.mode.contains(TermMode::SHOW_CURSOR);
     let block_cursor = show_cursor && v.focused && cursor.shape == CursorShape::Block && v.preedit.is_empty();
 
+    // Tus mensajes en Claude Code: su gris fijo casi no se ve sobre muchos temas; se
+    // cambia por un tono del acento y la fila lleva una barrita a la izquierda.
+    let accent = theme::t().accent;
+    let user_bg = theme::mix(default_bg, accent, 0.16);
+    let user_bg_hover = theme::mix(default_bg, accent, 0.24);
+    let mut user_rows = vec![false; if claude { l.rows } else { 0 }];
+
     // Fondos: celdas contiguas del mismo color se fusionan en un solo rectángulo.
     let mut run: Option<(i32, f32, f32, Rgba)> = None;
     let flush = |out: &mut Vec<Quad>, run: &mut Option<(i32, f32, f32, Rgba)>, y: f32| {
@@ -1273,6 +1293,10 @@ fn draw_terminal(
 
         let mut cfg = resolve(cell.fg, colors, v.palette, flags);
         let mut cbg = resolve(cell.bg, colors, v.palette, Flags::empty());
+        if claude && let Some(hover) = claude_user_bg(cell.bg) {
+            cbg = if hover { user_bg_hover } else { user_bg };
+            user_rows[row as usize] = true;
+        }
         if flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut cfg, &mut cbg);
         }
@@ -1338,6 +1362,10 @@ fn draw_terminal(
     }
     if let Some((rrow, ..)) = run {
         flush(out, &mut run, l.grid_y + rrow as f32 * ch);
+    }
+    let bar = (fonts.stroke * 2.0).max(2.0).round();
+    for (row, _) in user_rows.iter().enumerate().filter(|(_, u)| **u) {
+        out.push(Quad::rect(x0, l.grid_y + row as f32 * ch, bar, ch, accent));
     }
 
     let crow = cursor.point.line.0 + offset;

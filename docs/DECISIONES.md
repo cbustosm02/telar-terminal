@@ -288,3 +288,21 @@ El usuario pidió una revisión de optimizaciones e integraciones (la hizo Fable
 
 - Claude Code no recibe la imagen por la terminal. Cuando le llega un **pegado vacío** (`ESC[200~ESC[201~`), en macOS lee él mismo el portapapeles con `osascript` y adjunta la imagen. Así funciona ⌘V en iTerm2 o Ghostty. Telar no enviaba nada si el portapapeles no tenía texto. Ahora, con bracketed paste activo, envía el pegado vacío. ⌃V también funciona: es el atajo `chat:imagePaste` de Claude Code, y Telar ya lo enviaba como 0x16.
 - `WindowEvent::DroppedFile` pega la ruta escapada con barras invertidas (como Terminal o iTerm2), seguida de un espacio. Claude Code reconoce las rutas de imágenes pegadas y las adjunta.
+
+## El paquete no se toca con la app abierta (2026-11-20)
+
+- Con la firma estable, macOS seguía pidiendo el Escritorio aunque el permiso estuviera concedido. `codesign -v <pid>` respondía «the code on disk does not match what is running». La causa: al abrir tras una actualización, `ensure_bundle` reescribía el Info.plist (cambia la versión) y volvía a firmar el paquete con el proceso ya en marcha. El Info.plist forma parte del CodeDirectory, así que el proceso quedaba con un código distinto del que hay en disco, y TCC no lo reconoce como la app que tiene el permiso.
+- El ícono propio también rompía la firma: `NSWorkspace setIcon:` deja un `Icon\r` en la raíz del paquete.
+- Ahora (`update::prepare_bundle`) el paquete se pone al día solo cuando la app no está corriendo desde él:
+  - **Antes de crear la ventana.** Si algo cambia, Telar se reinicia solo una vez (`relaunch`). Si la firma quedó ad hoc, no se reinicia, para no entrar en un ciclo.
+  - **Al instalar una actualización.** El binario nuevo arma su propio paquete (`telar __preparar-paquete <app>`), así que al reiniciar no hay nada que cambiar.
+  - **Al salir.** Ahí se aplica, por ejemplo, el ícono elegido con la app abierta. Se escribe como `Telar.icns`, con una entrada `ic10` que contiene el PNG de 1024 px. Antes se pegaba con el Finder.
+  - **Sin cambios no se vuelve a firmar.** `telar install` con Telar abierto ya no rompe la firma del proceso.
+- Los restos del método anterior (`Icon\r` y `com.apple.FinderInfo` en la raíz) se borran.
+
+## Tus mensajes resaltados en Claude Code (2026-11-20)
+
+- Claude Code pinta tus mensajes con `userMessageBackground`, un RGB fijo de su tema. Es `rgb(55,55,55)` en los temas oscuros (`rgb(70,70,70)` bajo el puntero) y `rgb(240,240,240)` o `rgb(220,220,220)` en los claros. Sobre Dracula (`#282a36`) casi no se distingue.
+- En los tabs con sesión de Claude (estado distinto de «shell»), `ui::draw_terminal` cambia exactamente esos colores por `mix(fondo, acento, 0.16)` (0.24 bajo el puntero) y dibuja una barrita del acento a la izquierda de esas filas.
+- Se compara el RGB exacto, solo en tabs con Claude, para no teñir otros programas.
+- Si Claude Code cambia esos colores, hay que actualizar `claude_user_bg`. Los temas ANSI de Claude usan colores de la paleta y no se tocan.

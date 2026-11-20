@@ -29,7 +29,7 @@ impl State {
 
     /// Cambia el ícono de la app (Dock y Telar.app) y lo guarda.
     pub(crate) fn set_app_icon(&mut self, id: &str) {
-        let result = appicon::apply(id, true);
+        let result = appicon::apply(id);
         if let Some(st) = self.settings.as_mut() {
             st.icon_error = result.as_ref().err().cloned();
         }

@@ -244,7 +244,18 @@ fn apply(progress: &dyn Fn(Status), r: &Release, exe: &Path, tmp: &Path) -> Resu
     // Reemplazo atómico: el proceso actual sigue usando el binario viejo hasta reiniciar.
     std::fs::rename(&new, exe).map_err(|e| format!("no se pudo reemplazar {}: {e}", exe.display()))?;
     if let Some(app) = app_bundle(exe) {
-        sign(app);
+        // El binario nuevo arma el paquete (su Info.plist, su ícono) y lo firma: así, al
+        // reiniciar, no tiene que volver a firmarlo ya abierto.
+        let prepared = Command::new(exe)
+            .arg("__preparar-paquete")
+            .arg(app)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !prepared {
+            sign(app);
+        }
     }
     Ok(())
 }
@@ -298,14 +309,16 @@ pub fn install_app() -> Result<PathBuf, String> {
     let macos = app.join("Contents").join("MacOS");
     let dest = macos.join("telar");
     std::fs::create_dir_all(&macos).map_err(|e| e.to_string())?;
-    write_bundle_files(&app)?;
-    if exe != dest {
+    let copied = exe != dest;
+    if copied {
         // Copia a un temporal y rename: si Telar.app está abierta, sigue funcionando.
         let tmp = macos.join(".telar-new");
         std::fs::copy(&exe, &tmp).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
     }
-    sign(&app);
+    // Sin cambios no se vuelve a firmar: firmar el paquete con Telar abierto desde él
+    // dejaría al proceso con un código distinto del que está en disco.
+    prepare_bundle(&app, copied);
     // Una copia de antes en ~/Applications ya no hace falta.
     let old = user_app_path();
     if old != app && old.exists() {
@@ -314,38 +327,77 @@ pub fn install_app() -> Result<PathBuf, String> {
     Ok(dest)
 }
 
-/// Info.plist y el `.icns` del paquete.
-fn write_bundle_files(app: &Path) -> Result<(), String> {
-    let resources = app.join("Contents").join("Resources");
-    std::fs::create_dir_all(&resources).map_err(|e| e.to_string())?;
-    std::fs::write(resources.join("Telar.icns"), crate::appicon::ICNS).map_err(|e| e.to_string())?;
-    std::fs::write(app.join("Contents").join("Info.plist"), info_plist()).map_err(|e| e.to_string())
+/// `.icns` que debe tener el paquete: el incluido o, con otro ícono elegido, ese PNG.
+fn desired_icns() -> Vec<u8> {
+    let id = crate::config::Config::load().app_icon;
+    if id == crate::appicon::DEFAULT {
+        return crate::appicon::ICNS.to_vec();
+    }
+    crate::appicon::icns_from_png(&id).unwrap_or_else(|| crate::appicon::ICNS.to_vec())
 }
 
-/// Si Telar corre desde su `.app` y al paquete le falta el ícono o el Info.plist está
-/// desactualizado (p. ej. tras actualizarse desde una versión sin ícono), los reescribe.
-/// El actualizador solo reemplaza el binario.
-pub fn ensure_bundle() {
-    let Ok(exe) = current_exe() else { return };
-    let Some(app) = app_bundle(&exe) else { return };
-    // Solo el paquete de Telar: otro (p. ej. una vista previa con su propio identificador)
-    // se deja como está.
-    if app.file_name().is_none_or(|n| n != "Telar.app") {
-        return;
+/// Deja el paquete como debe estar (Info.plist de esta versión, ícono elegido, sin restos
+/// del ícono que antes se pegaba con el Finder, firma estable) y lo vuelve a firmar si
+/// algo cambió o si `force`. Devuelve si lo firmó.
+///
+/// macOS ata los permisos (Documentos, Escritorio, Acceso total al disco) a la firma del
+/// proceso, y un proceso cuyo paquete se volvió a firmar después de abrirse ya no coincide
+/// con el disco: macOS vuelve a preguntar. Por eso esto corre antes de abrir la ventana
+/// (y se reinicia si cambió algo), al instalar una actualización (con el binario nuevo) y
+/// al salir; nunca con la app ya en marcha.
+pub fn prepare_bundle(app: &Path, force: bool) -> bool {
+    let contents = app.join("Contents");
+    let resources = contents.join("Resources");
+    let _ = std::fs::create_dir_all(&resources);
+    let mut changed = force;
+    let plist = contents.join("Info.plist");
+    if std::fs::read_to_string(&plist).ok().as_deref() != Some(info_plist().as_str()) {
+        changed |= std::fs::write(&plist, info_plist()).is_ok();
     }
-    let plist = app.join("Contents").join("Info.plist");
-    let current = std::fs::read_to_string(&plist).unwrap_or_default();
-    if current == info_plist() && app.join("Contents/Resources/Telar.icns").is_file() {
-        // Firmado ad hoc (una versión anterior se actualizó a esta): pasa a la firma estable.
-        if !crate::signing::is_stable(app) {
-            sign(app);
-        }
-        return;
+    let icns_path = resources.join("Telar.icns");
+    let icns = desired_icns();
+    let icon_changed = std::fs::read(&icns_path).ok().as_deref() != Some(icns.as_slice());
+    if icon_changed {
+        changed |= std::fs::write(&icns_path, &icns).is_ok();
     }
-    if write_bundle_files(app).is_ok() {
-        sign(app);
+    // Versiones anteriores ponían el ícono propio con `NSWorkspace setIcon:`, que deja un
+    // archivo `Icon\r` en la raíz del paquete y rompe la firma.
+    let legacy = app.join("Icon\r");
+    if legacy.exists() {
+        let _ = std::fs::remove_file(&legacy);
+        let _ = Command::new("/usr/bin/xattr").args(["-d", "com.apple.FinderInfo"]).arg(app).stderr(Stdio::null()).status();
+        changed = true;
+    }
+    if !changed && crate::signing::is_stable(app) {
+        return false;
+    }
+    sign(app);
+    if icon_changed {
         // Que el Finder y el Dock vuelvan a leer el ícono.
         let _ = Command::new("/usr/bin/touch").arg(app).status();
+    }
+    true
+}
+
+/// La `Telar.app` desde la que corre este proceso (no una vista previa con otro nombre).
+fn own_bundle() -> Option<PathBuf> {
+    let exe = current_exe().ok()?;
+    let app = app_bundle(&exe)?;
+    app.file_name().is_some_and(|n| n == "Telar.app").then(|| app.to_path_buf())
+}
+
+/// Al abrir, antes de crear la ventana: pone al día el paquete. Devuelve true si lo cambió
+/// y quedó con la firma estable; entonces hay que reiniciar para que el proceso coincida
+/// con el disco (si quedó ad hoc no se reinicia, para no entrar en un ciclo).
+pub fn ensure_bundle() -> bool {
+    let Some(app) = own_bundle() else { return false };
+    prepare_bundle(&app, false) && crate::signing::is_stable(&app)
+}
+
+/// Al salir: aplica al paquete, por ejemplo, el ícono elegido mientras estaba abierta.
+pub fn ensure_bundle_on_exit() {
+    if let Some(app) = own_bundle() {
+        prepare_bundle(&app, false);
     }
 }
 
@@ -509,5 +561,31 @@ mod tests {
     #[test]
     fn plist_con_version() {
         assert!(info_plist().contains(&format!("<string>{VERSION}</string>")));
+    }
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+
+    /// Un paquete desactualizado se arregla y firma una vez; la segunda pasada no lo toca
+    /// (si lo tocara, Telar se reiniciaría en cada apertura).
+    #[test]
+    #[ignore = "firma con la identidad local; correr a mano en macOS"]
+    fn paquete_idempotente() {
+        let tmp = std::env::temp_dir().join(format!("telar-paquete-{}", std::process::id()));
+        let app = tmp.join("Telar.app");
+        let macos = app.join("Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::copy("/bin/echo", macos.join("telar")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), "viejo").unwrap();
+        std::fs::write(app.join("Icon\r"), "").unwrap();
+        assert!(prepare_bundle(&app, false));
+        assert!(!app.join("Icon\r").exists());
+        assert!(crate::signing::is_stable(&app));
+        let ok = Command::new("/usr/bin/codesign").arg("-v").arg(&app).status().unwrap().success();
+        assert!(ok, "la firma debe ser válida");
+        assert!(!prepare_bundle(&app, false));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

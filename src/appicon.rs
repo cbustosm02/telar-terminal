@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::{AnyObject, Bool};
+use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
 
 pub struct Choice {
@@ -153,34 +153,33 @@ fn nsimage(png: &[u8]) -> Option<Retained<AnyObject>> {
     }
 }
 
-/// La `.app` desde la que corre Telar, si corre desde una.
-fn bundle_path() -> Option<PathBuf> {
-    let exe = std::fs::canonicalize(std::env::current_exe().ok()?).ok()?;
-    exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf)
-}
-
-/// Aplica el ícono `id` en el Dock ya mismo y, con `persist` y si corre desde la `.app`,
-/// también en ella (Finder y Dock con Telar cerrado). Debe llamarse desde el hilo principal.
-pub fn apply(id: &str, persist: bool) -> Result<(), String> {
+/// Aplica el ícono `id` en el Dock ya mismo (el de Telar.app se escribe al salir).
+/// Debe llamarse desde el hilo principal.
+pub fn apply(id: &str) -> Result<(), String> {
     let png = png_bytes(id).ok_or_else(|| format!("no existe el ícono «{id}»"))?;
     let img = nsimage(&png).ok_or("no se pudo leer la imagen")?;
     unsafe {
         let app: Retained<AnyObject> = msg_send![class!(NSApplication), sharedApplication];
         let _: () = msg_send![&*app, setApplicationIconImage: &*img];
     }
-    if let Some(bundle) = bundle_path().filter(|_| persist) {
-        let path = nsstring(&bundle.display().to_string());
-        unsafe {
-            let ws: Retained<AnyObject> = msg_send![class!(NSWorkspace), sharedWorkspace];
-            // Con el de por defecto se quita el ícono propio: vuelve el .icns del paquete.
-            let image: Option<&AnyObject> = if id == DEFAULT { None } else { Some(&*img) };
-            let ok: Bool = msg_send![&*ws, setIcon: image, forFile: &*path, options: 0usize];
-            if !ok.as_bool() {
-                return Err("macOS no dejó cambiar el ícono de la app".into());
-            }
-        }
-    }
+    // El de Telar.app (Finder, y Dock con Telar cerrado) se escribe al salir, en su
+    // `Telar.icns`: tocar el paquete con la app abierta rompería su firma y macOS volvería a
+    // pedir permisos. Ver `update::prepare_bundle`.
     Ok(())
+}
+
+/// `.icns` con el PNG del ícono `id` (entrada `ic10`, 1024 px; macOS reduce el resto).
+pub fn icns_from_png(id: &str) -> Option<Vec<u8>> {
+    let png = png_bytes(id)?;
+    let entry = 8 + png.len() as u32;
+    let total = 8 + entry;
+    let mut out = Vec::with_capacity(total as usize);
+    out.extend_from_slice(b"icns");
+    out.extend_from_slice(&total.to_be_bytes());
+    out.extend_from_slice(b"ic10");
+    out.extend_from_slice(&entry.to_be_bytes());
+    out.extend_from_slice(&png);
+    Some(out)
 }
 
 /// Hace que macOS no mueva la ventana al arrastrar en la barra de título. Los tabs viven
