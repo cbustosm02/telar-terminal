@@ -298,3 +298,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Trae al frente la app del proceso `pid` con todas sus ventanas (p. ej. un Chrome que
+/// abrió un agente). Devuelve false si no es una app con ventanas (o ya no existe).
+pub fn activate_pid(pid: i32) -> bool {
+    unsafe {
+        let app: Option<Retained<AnyObject>> = msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid];
+        let Some(app) = app else { return false };
+        // NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps.
+        let ok: objc2::runtime::Bool = msg_send![&*app, activateWithOptions: 3usize];
+        ok.as_bool()
+    }
+}

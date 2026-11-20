@@ -30,6 +30,10 @@ Sin comando abre la terminal. Comandos (dentro de Telar):
   clear <tab>                        borra la pantalla y el scrollback del tab (como ⌘K)
   awake [on|off|auto]                mantener el Mac despierto (caffeinate -dims): siempre,
                                      nunca, o solo mientras algún Claude trabaja
+  browser open|activity|close --name N [--pid P] [--headless] [--app A] [--label L] [-- comando…]
+                                     avisa que el agente de este tab abrió, usó o cerró un
+                                     navegador; el tab muestra un ícono que lo trae al frente
+                                     (corre el comando, si lo hay, y activa la app del pid)
   update [--check]                   busca la última versión y la instala (--check: solo busca)
   version                            versión instalada
   wait <tab> [--state S] [--timeout SEG]
@@ -222,6 +226,25 @@ pub fn run(cmd: &str, raw: &[String]) -> Result<String, String> {
             };
             let now = if v["active"] == json!(true) { "activo ahora" } else { "inactivo ahora" };
             Ok(format!("Despierto: {what} ({mode}); caffeinate {now}"))
+        }
+        "browser" => {
+            // Lo usan las herramientas que abren un navegador para el agente (ver `browsers`).
+            let a = Args::parse(raw, &["--name", "--pid", "--tab", "--app", "--label"]);
+            let event = a.positional.first().ok_or("falta el evento: open, activity o close")?;
+            let tab = tab_spec(a.value(&["--tab"]).unwrap_or("self"));
+            let mut body = json!({ "cmd": "browser", "event": event, "tab": tab, "name": a.value(&["--name"]) });
+            if let Some(pid) = a.value(&["--pid"]) {
+                body["pid"] = json!(pid.parse::<i64>().map_err(|_| "--pid debe ser un número")?);
+            }
+            body["headless"] = json!(a.has(&["--headless"]));
+            body["app"] = json!(a.value(&["--app"]));
+            body["label"] = json!(a.value(&["--label"]));
+            // Después de `--`: el comando para mostrarlo.
+            if a.positional.len() > 1 {
+                body["show"] = json!(a.positional[1..]);
+            }
+            call(body)?;
+            Ok(String::new())
         }
         "wait" => {
             let a = Args::parse(raw, &["--state", "--timeout", "--match"]);

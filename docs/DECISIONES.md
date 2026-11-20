@@ -321,3 +321,20 @@ El usuario pidió una revisión de optimizaciones e integraciones (la hizo Fable
 - Se calcula en el reloj periódico (cada 5 s), en `refresh_process`. Con Claude en primer plano, el grupo de procesos lo encabeza `claude`.
 - Es el indicador de menor prioridad: si Claude trabaja, te necesita o terminó, se muestra ese estado. Es el ícono `square-terminal` en el color de acento, distinto de los puntos. En el grupo aparece junto a los demás estados.
 - `telar tabs` lo expone como `claude_shells`.
+
+## Navegador del agente en el tab (2026-11-20)
+
+- Pedido: con varios agentes que abren el Chrome de pruebas de pirani-cli, no se sabía de quién era cada ventana.
+- Se evaluó mostrar la página dentro del tab, en un panel a la derecha (screencast de Chrome DevTools con reenvío de mouse y teclado). Era viable y sin costo con el panel oculto, pero implicaba cerca de mil líneas: textura dinámica, cliente CDP y panel. El usuario eligió la opción mínima: que Telar sepa del navegador y lo traiga al frente.
+- Contrato genérico, no atado a pirani-cli: el pedido `browser` por el socket del tab, con los eventos `open`, `activity` y `close` (ver el README).
+  - El daemon de pirani-cli guarda la actividad en disco como mucho una vez por minuto, así que no sirve para el parpadeo: el aviso de actividad lo manda la propia CLI en cada acción del agente.
+  - El tab sale de `TELAR_TAB_ID`, que la CLI hereda de la shell del agente.
+- Vida: si no llega `close`, `periodic` (cada 5 s) quita los navegadores cuyo pid ya no existe (`kill(pid, 0)`).
+- Al hacer clic se corre `show`, si viene, en un hilo; para un Chrome que corría sin ventana, reabrirlo tarda unos segundos. Después se activa la app del pid actual con `NSRunningApplication activateWithOptions:` (todas sus ventanas). Si se reabrió, llega un `open` nuevo con otro pid antes de que termine `show`.
+- Rendimiento:
+  - No hay muestreo nuevo: solo el `kill(pid, 0)` en el reloj de 5 s.
+  - Se redibuja solo mientras algún navegador del grupo a la vista late (3 s después de cada acción), con el mismo reloj del indicador de trabajo.
+- Ícono: globo de Lucide a la izquierda de la ✕.
+  - Late entre el gris y el acento mientras el agente lo usa.
+  - Queda en el color de acento si lo usó hace poco y en gris translúcido tras 2 min sin uso.
+  - El tooltip se dibuja después de la terminal, para quedar encima.

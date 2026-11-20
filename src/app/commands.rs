@@ -12,6 +12,7 @@ impl State {
                 json!({ "ok": true })
             }
             Some("tabs") => self.tabs_json(),
+            Some("browser") => self.ipc_browser(body),
             Some("status") => match self.resolve_tab(&body["tab"]) {
                 Ok(id) => json!({ "ok": true, "tab": self.tab_json(id) }),
                 Err(e) => json!({ "ok": false, "error": e }),

@@ -57,6 +57,7 @@ pub mod icons {
     pub const SQUARE_PEN: char = '\u{e172}';
     pub const TERMINAL: char = '\u{e181}';
     pub const SQUARE_TERMINAL: char = '\u{e20a}';
+    pub const GLOBE: char = '\u{e0e8}';
     pub const TRASH: char = '\u{e18e}';
     pub const TYPE: char = '\u{e198}';
     pub const X: char = '\u{e1b2}';

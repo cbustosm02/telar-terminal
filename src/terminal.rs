@@ -167,6 +167,8 @@ pub struct Terminal {
     pub process: Option<String>,
     /// Comandos de shell que lanzó Claude y siguen corriendo (ver `proc::claude_shells`).
     pub claude_shells: usize,
+    /// Navegadores que abrió el agente de este tab (ver `browsers`).
+    pub browsers: Vec<crate::browsers::Browser>,
     /// Pid de la shell del tab (se anota cuando está en primer plano). Sirve para saber
     /// la carpeta cuando lo que corre no se deja leer (p. ej. `top`, que es de root).
     shell_pid: Option<i32>,
@@ -232,6 +234,7 @@ impl Terminal {
             agent: Agent::default(),
             process: None,
             claude_shells: 0,
+            browsers: Vec::new(),
             shell_pid: None,
             pty: pty_fd,
             size,
@@ -259,6 +262,7 @@ impl Terminal {
             agent: Agent::default(),
             process: None,
             claude_shells: 0,
+            browsers: Vec::new(),
             shell_pid: None,
             pty: None,
             size,

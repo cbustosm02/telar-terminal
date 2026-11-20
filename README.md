@@ -70,6 +70,7 @@ Cada tab sabe en qué está su sesión de Claude Code y lo muestra con un punto 
 | sin punto | shell normal, o sesión esperando tu prompt |
 
 - **Tus mensajes** en la conversación se distinguen de las respuestas. Claude Code los pinta con un gris fijo que casi no se ve en muchos temas, así que en los tabs con Claude Telar lo cambia por un tono del acento del tema y les pone una barrita a la izquierda.
+- **Navegador del agente:** si el agente abre un navegador con una herramienta que avisa a Telar (p. ej. el Chrome de pruebas de pirani-cli), el tab muestra un globo a la izquierda de la ✕. Late mientras el agente lo usa y se apaga (gris) tras 2 min sin uso. Al pasar el puntero muestra de quién es y su estado; con un clic lo trae al frente, y si corría sin ventana, lo reabre con ventana. Si el navegador se cierra, el globo desaparece. Ver «Navegadores de los agentes» más abajo.
 - **⌘J** salta al siguiente tab que te necesita (o, si no hay, al siguiente que terminó).
 - **Bandeja de agentes** (⌘⇧J, o el ícono de bandeja junto a «GRUPOS», que lleva un punto si alguien te necesita): todas las sesiones de Claude de todos los grupos, de la más urgente a la menos, con su estado, desde hace cuánto, y la pregunta pendiente o el último paso (la última línea con ⏺). Un permiso se responde desde ahí con los botones de las opciones que muestra Claude (o con las teclas 1–9), sin cambiar de tab; «Ir al tab» lo abre.
 - Si interrumpes a Claude con Esc o el turno se corta por un error de la API o por el límite de uso, el tab deja de figurar como trabajando: Telar escucha `StopFailure` y, además, si un Claude «trabajando» pasa 10 s sin mostrar nada (mientras trabaja, su indicador se redibuja varias veces por segundo), lo da por detenido.
@@ -224,6 +225,7 @@ Mouse:
 | `src/settings.rs` / `src/config.rs` | Modal de configuración y `~/.config/telar/config.json` |
 | `src/claude_usage.rs` / `src/cuentas.rs` | Uso de Claude (API de uso) y cuentas guardadas (Llavero) |
 | `src/confirm.rs` | Diálogo de confirmación |
+| `src/browsers.rs` | Navegadores que abrió el agente de cada tab: protocolo, vida y el ícono que los trae al frente |
 | `src/update.rs` | Actualizaciones desde los releases de GitHub |
 | `src/signing.rs` | Firma local estable de Telar.app, para que los permisos de macOS sobrevivan a las actualizaciones |
 | `src/appicon.rs` / `src/logo.rs` | Ícono de la app, paneles de macOS y el logo de Claude |
@@ -244,6 +246,20 @@ Este comando:
 3. guarda el frame leído desde la GPU en un BMP y cierra la app.
 
 No necesita el permiso de grabación de pantalla. Otras variables del modo captura: `TELAR_SNAPSHOT_SETTINGS=general|apariencia|icono|rendimiento|inactividad`, `TELAR_SNAPSHOT_MENU=tab|group|cuentas`, `TELAR_SNAPSHOT_INBOX=1` (la bandeja con estados de prueba), `TELAR_SNAPSHOT_UPDATE=X.Y.Z`, `TELAR_SNAPSHOT_DELETE=n`, `TELAR_SNAPSHOT_HOVER=x,y`.
+
+### Navegadores de los agentes
+
+Una herramienta que abre un navegador para el agente le avisa a Telar por el socket del tab (`TELAR_SOCKET`, con el tab de `TELAR_TAB_ID`). Es una línea JSON por evento, sin esperar respuesta; sin Telar, la herramienta no hace nada:
+
+```json
+{"cmd":"browser","event":"open","tab":3,"name":"claude-123","pid":4567,"headless":false,"app":"pirani-cli","label":"claude 5365","show":["/ruta/node","/ruta/pirani-cli.js","frontend","browser-inspector","browser","show","claude-123"]}
+{"cmd":"browser","event":"activity","tab":3,"name":"claude-123"}
+{"cmd":"browser","event":"close","tab":3,"name":"claude-123"}
+```
+
+- `show` es opcional: es el comando que Telar corre al hacer clic, antes de activar la app del pid.
+- Telar revisa cada 5 s que el pid siga vivo, así que un `close` perdido no deja el ícono colgado.
+- Desde la shell, lo mismo con `telar browser open|activity|close --name N [--pid P] [--headless] [--app A] [--label L] [-- comando…]`.
 
 ### Vista previa
 

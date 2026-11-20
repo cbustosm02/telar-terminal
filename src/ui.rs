@@ -17,6 +17,7 @@ use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 
 use crate::awake;
+use crate::browsers;
 use crate::statsview;
 use crate::kit::{Kit, Text, Variant, icons};
 use crate::update::{self, Status};
@@ -70,6 +71,8 @@ pub enum Hit {
     NewGroup,
     Tab(usize),
     CloseTab(usize),
+    /// Ícono del navegador que abrió el agente del tab: lo trae al frente.
+    TabBrowser(usize),
     NewTab,
     /// Interruptor de `caffeinate`, abajo en la barra lateral.
     Awake,
@@ -218,6 +221,12 @@ impl Layout {
         let r = self.tab_rect(i);
         let side = r.h - 8.0 * self.s;
         Rect { x: r.x + r.w - side - 4.0 * self.s, y: r.y + 4.0 * self.s, w: side, h: side }
+    }
+
+    /// Ícono del navegador del tab, a la izquierda de la ✕.
+    pub fn tab_browser_rect(&self, i: usize) -> Rect {
+        let c = self.tab_close_rect(i);
+        Rect { x: c.x - c.w - 2.0 * self.s, ..c }
     }
 
     fn new_tab_rect(&self, n_tabs: usize) -> Rect {
@@ -658,6 +667,7 @@ pub fn draw(out: &mut Vec<Quad>, fg: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layo
         ime_cell = draw_terminal(out, fg, fonts, l, &term, v, working, claude);
     }
     out.append(fg);
+    draw_browser_tip(out, fonts, l, v);
     let mut k = Kit::new(out, fonts, l.s);
     if let Some(f) = active.and_then(|t| t.frozen.as_ref()) {
         let claude = active.is_some_and(|t| t.agent.session_id.is_some() && t.agent.state != crate::terminal::AgentState::None);
@@ -1198,12 +1208,30 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
                 tx += k.tag(tx, cy, "SSH", green, theme::alpha(green, 0.16)) + 6.0 * s;
             }
         }
+        // El navegador que abrió el agente: late mientras lo usa y se apaga si no lo usa.
+        let mut title_end = close.x;
+        if let Some(b) = term.and_then(|t| browsers::main(&t.browsers)) {
+            let br = l.tab_browser_rect(i);
+            let hovered_icon = v.hover == Hit::TabBrowser(i);
+            let color = if b.active() {
+                theme::mix(th.text_dim, th.accent, 0.5 + 0.5 * (v.time * 6.0).sin())
+            } else if b.idle() {
+                theme::alpha(th.text_dim, 0.45)
+            } else {
+                th.accent
+            };
+            if hovered_icon {
+                k.rounded(br, 4.0, th.hover);
+            }
+            k.icon(br.x + br.w / 2.0, br.y + br.h / 2.0, icons::GLOBE, 13.0, color);
+            title_end = br.x;
+        }
         match v.editing {
             Some((Edit::Tab(e), buf)) if e == *id => {
-                k.input(Rect { x: tx - 4.0 * s, y: r.y + 2.0 * s, w: close.x - tx, h: r.h - 4.0 * s }, buf, "Nombre del tab", None, true);
+                k.input(Rect { x: tx - 4.0 * s, y: r.y + 2.0 * s, w: title_end - tx, h: r.h - 4.0 * s }, buf, "Nombre del tab", None, true);
             }
             _ => {
-                k.text_in(Rect { w: close.x - r.x - 4.0 * s, ..r }, tx, title, style);
+                k.text_in(Rect { w: title_end - r.x - 4.0 * s, ..r }, tx, title, style);
             }
         }
         if active || hovered {
@@ -1213,6 +1241,41 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
     let r = l.new_tab_rect(g.tabs.len());
     k.icon_button(r, icons::PLUS, 15.0, v.hover == Hit::NewTab);
     Some(())
+}
+
+/// Globo bajo el ícono del navegador de un tab: de quién es y cómo está.
+fn draw_browser_tip(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
+    let Hit::TabBrowser(i) = v.hover else { return };
+    let Some(t) = v.ws.group().and_then(|g| g.tabs.get(i)).and_then(|id| v.terms.get(id)) else { return };
+    let Some(b) = browsers::main(&t.browsers) else { return };
+    let s = l.s;
+    let th = theme::t();
+    let mut k = Kit::new(out, fonts, s);
+    let who = b.app.as_deref().unwrap_or("Navegador");
+    let mut lines = vec![(format!("{who} · «{}»", b.name), Text::label())];
+    let mode = if b.headless { "sin ventana" } else { "con ventana" };
+    lines.push((format!("{mode} · pid {}", b.pid), Text::small()));
+    if let Some(label) = &b.label {
+        lines.push((format!("agente: {label}"), Text::small()));
+    }
+    let used = if b.active() { "usándolo ahora".to_string() } else { format!("última acción {}", browsers::ago(b.last_activity.elapsed())) };
+    lines.push((used, Text::small()));
+    if t.browsers.len() > 1 {
+        lines.push((format!("{} navegadores en este tab (se muestra el último usado)", t.browsers.len()), Text::small()));
+    }
+    let action = if b.headless { "Clic: abrirlo con ventana y traerlo al frente" } else { "Clic: traerlo al frente" };
+    lines.push((action.to_string(), Text::small().color(th.accent)));
+    let pad = 10.0 * s;
+    let line_h = 18.0 * s;
+    let w = lines.iter().map(|(t, st)| k.measure(t, *st)).fold(0.0, f32::max) + 2.0 * pad;
+    let h = lines.len() as f32 * line_h + 2.0 * pad - 4.0 * s;
+    let anchor = l.tab_browser_rect(i);
+    let x = (anchor.x + anchor.w / 2.0 - w / 2.0).clamp(l.sidebar_w() + 6.0 * s, l.w - w - 6.0 * s);
+    let y = l.titlebar_h() + 4.0 * s;
+    k.bordered(Rect { x, y, w, h }, 8.0, th.surface, th.border);
+    for (n, (text, style)) in lines.iter().enumerate() {
+        k.text(x + pad, y + pad + n as f32 * line_h, text, *style, w - 2.0 * pad);
+    }
 }
 
 fn resolve(color: Color, colors: &Colors, palette: &[Rgba; COUNT], flags: Flags) -> Rgba {

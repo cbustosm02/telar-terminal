@@ -3,6 +3,7 @@
 mod app;
 mod appicon;
 mod awake;
+mod browsers;
 mod cli;
 mod claude_usage;
 mod config;
@@ -99,6 +100,8 @@ pub enum UserEvent {
     UsageAll(Vec<(String, Result<claude_usage::Usage, String>)>),
     /// Terminó una operación de cuentas: mensaje para avisar, o el error.
     AccountDone(Result<String, String>),
+    /// Terminó el comando para mostrar el navegador `name` del tab: hay que activarlo.
+    BrowserShown(u64, String),
 }
 
 /// Para qué se abrió un panel de macOS.
@@ -498,6 +501,10 @@ impl ApplicationHandler<UserEvent> for App {
                 st.window.request_redraw();
                 return;
             }
+            UserEvent::BrowserShown(tab, name) => {
+                st.browser_shown(tab, &name);
+                return;
+            }
             UserEvent::NotificationClicked(tab) => {
                 st.window.focus_window();
                 if let Some(id) = tab.filter(|id| st.terms.contains_key(id)) {
@@ -646,7 +653,7 @@ impl ApplicationHandler<UserEvent> for App {
             st.next_save = now + SAVE_TICK;
         }
         let mut wake = Some(st.snapshot.as_ref().map_or(st.next_save, |s| s.at.min(st.next_save)));
-        if !st.occluded && st.terms.values().any(|t| t.agent.state == AgentState::Working) {
+        if !st.occluded && (st.terms.values().any(|t| t.agent.state == AgentState::Working) || st.browser_pulsing()) {
             if now >= st.next_tick {
                 st.window.request_redraw();
                 st.next_tick = now + if st.focused { SPINNER_TICK } else { SPINNER_TICK_UNFOCUSED };
@@ -825,6 +832,7 @@ impl State {
             }
         }
         changed |= self.unstick_working();
+        changed |= self.prune_browsers();
         if changed {
             self.window.request_redraw();
         }

@@ -98,7 +98,7 @@ impl State {
             return;
         }
         let n_tabs = self.ws.group().map_or(0, |g| g.tabs.len());
-        let hit = l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs);
+        let hit = self.refine_hit(&l, l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs));
         // Sobre un enlace que se abriría con un clic: mano y resaltado.
         let link_cell = if hit == Hit::Terminal && !self.selecting && self.mouse_button.is_none() {
             let (col, row, _) = l.cell_at(self.cursor.0, self.cursor.1);
@@ -124,6 +124,7 @@ impl State {
                 | Hit::NewGroup
                 | Hit::Tab(_)
                 | Hit::CloseTab(_)
+                | Hit::TabBrowser(_)
                 | Hit::NewTab
                 | Hit::Awake
                 | Hit::Update
@@ -159,10 +160,21 @@ impl State {
         }
     }
 
+    /// Sobre un tab con navegador, su ícono cuenta aparte (`Layout::hit` no sabe de ellos).
+    fn refine_hit(&self, l: &Layout, hit: Hit) -> Hit {
+        match hit {
+            Hit::Tab(i) => {
+                let has = self.ws.group().and_then(|g| g.tabs.get(i)).and_then(|id| self.terms.get(id)).is_some_and(|t| !t.browsers.is_empty());
+                if has && l.tab_browser_rect(i).contains(self.cursor.0, self.cursor.1) { Hit::TabBrowser(i) } else { hit }
+            }
+            _ => hit,
+        }
+    }
+
     pub(crate) fn on_mouse(&mut self, state: ElementState, button: MouseButton) {
         let l = self.layout();
         let n_tabs = self.ws.group().map_or(0, |g| g.tabs.len());
-        let hit = l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs);
+        let hit = self.refine_hit(&l, l.hit(self.cursor.0, self.cursor.1, self.ws.groups.len(), n_tabs));
         let pressed = state == ElementState::Pressed;
 
         // Confirmación abierta: solo sus botones; un clic fuera la cancela.
@@ -307,7 +319,12 @@ impl State {
                     }
                 }
             }
-            (Hit::Tab(i) | Hit::CloseTab(i), MouseButton::Right) => {
+            (Hit::TabBrowser(i), MouseButton::Left) => {
+                if let Some(id) = self.ws.group().and_then(|g| g.tabs.get(i).copied()) {
+                    self.show_browser(id);
+                }
+            }
+            (Hit::Tab(i) | Hit::CloseTab(i) | Hit::TabBrowser(i), MouseButton::Right) => {
                 if let Some(id) = self.ws.group().and_then(|g| g.tabs.get(i).copied()) {
                     self.open_menu(Some(id), self.ws.active);
                 }
