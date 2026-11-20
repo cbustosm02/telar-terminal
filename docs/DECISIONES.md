@@ -313,3 +313,11 @@ El usuario pidió una revisión de optimizaciones e integraciones (la hizo Fable
 - Telar guardaba como carpeta del tab la última en la que estuvo, por ejemplo `pirani-reports-web` después de que Claude hiciera `cd`, y retomaba desde ahí.
 - Ahora `resume_claude` lee el primer `cwd` del transcript (la carpeta del proyecto) y, si es otra, escribe `cd '<proyecto>' && claude --resume <id>`.
 - La vista previa se abre desde una sesión de Claude, y `open --env` le pasa el entorno de quien la lanza. Sus tabs heredaban `CLAUDE_CODE_CHILD_SESSION=1` y otras variables, así que cada `claude` ahí se creía una sesión anidada: no guardaba la conversación en disco (`saving_off`) y `/restart` respondía «It isn't saved to disk». Ahora Telar borra al arrancar las variables que Claude Code pone a sus procesos hijos (`PARENT_SESSION_ENV`) y las `TELAR_*` del tab desde el que se abrió. No toca las de configuración, como `CLAUDE_CONFIG_DIR`.
+
+## Comandos de shell de Claude en segundo plano (2026-11-20)
+
+- Una sesión «en espera» puede tener comandos corriendo, como un servidor o un watcher lanzado en segundo plano, y parecía que no hacía nada. Claude Code ejecuta cada comando de la herramienta Bash como hijo directo del proceso `claude`, con la forma `zsh -c 'source …/shell-snapshots/snapshot-….sh … && eval …'`.
+- `proc::claude_shells` cuenta esos hijos: `proc_listchildpids` y `KERN_PROCARGS2`. Solo cuentan las shells cuyos argumentos traen `shell-snapshots/snapshot-`. Los servidores MCP, `caffeinate` y los hooks no cuentan.
+- Se calcula en el reloj periódico (cada 5 s), en `refresh_process`. Con Claude en primer plano, el grupo de procesos lo encabeza `claude`.
+- Es el indicador de menor prioridad: si Claude trabaja, te necesita o terminó, se muestra ese estado. Es el ícono `square-terminal` en el color de acento, distinto de los puntos. En el grupo aparece junto a los demás estados.
+- `telar tabs` lo expone como `claude_shells`.

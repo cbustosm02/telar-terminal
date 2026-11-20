@@ -215,6 +215,8 @@ impl State {
             "name": t.name,
             "process": t.process,
             "state": t.agent.state.name(),
+            // Comandos de shell que Claude dejó corriendo (servidores, watchers…).
+            "claude_shells": t.claude_shells,
             "suspended": t.is_suspended(),
             "state_secs": t.agent.since.elapsed().as_secs(),
             "idle_secs": t.last_used.get().elapsed().as_secs(),

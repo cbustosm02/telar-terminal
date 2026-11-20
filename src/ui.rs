@@ -580,13 +580,27 @@ fn last_step_marker(term: &Term<Listener>) -> Option<(usize, usize)> {
     })
 }
 
+/// Prioridad del indicador «comandos de shell de Claude corriendo» (debajo de los demás).
+const SHELLS: u8 = 0;
+
 fn status(t: &Terminal, time: f32) -> Option<(u8, Rgba)> {
     match t.agent.state {
         AgentState::NeedsYou => Some((4, theme::t().attention)),
         AgentState::Done => Some((3, theme::t().done)),
         _ if t.attention => Some((2, theme::t().attention)),
         AgentState::Working => Some((1, status_pulse(time))),
+        // Claude no está trabajando, pero dejó comandos corriendo (un servidor, un watcher…).
+        _ if t.claude_shells > 0 => Some((SHELLS, theme::t().accent)),
         _ => None,
+    }
+}
+
+/// Un indicador de estado: un punto, o el ícono de terminal si son comandos de shell.
+fn status_mark(k: &mut Kit, cx: f32, cy: f32, (prio, color): (u8, Rgba)) {
+    if prio == SHELLS {
+        k.icon(cx, cy, icons::SQUARE_TERMINAL, 12.0, color);
+    } else {
+        k.dot(cx, cy, 7.0, color);
     }
 }
 
@@ -849,9 +863,10 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
         }
         if !states.is_empty() {
             // El más urgente queda pegado al contador; los demás, a su izquierda.
-            for (_, color) in &states {
-                k.dot(name_right - 3.0 * s, cy, 7.0, *color);
-                name_right -= 11.0 * s;
+            for st in &states {
+                let w = if st.0 == SHELLS { 15.0 } else { 11.0 };
+                status_mark(&mut k, name_right - if st.0 == SHELLS { 5.0 * s } else { 3.0 * s }, cy, *st);
+                name_right -= w * s;
             }
             name_right -= 3.0 * s;
         } else if asleep {
@@ -1169,9 +1184,14 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
                 k.claude_logo(tx + 6.0 * s, cy, 13.0);
                 tx += 18.0 * s;
             }
-            if let Some((_, color)) = term.and_then(|t| status(t, v.time)) {
-                k.dot(tx + 3.5 * s, cy, 7.0, color);
-                tx += 14.0 * s;
+            if let Some(st) = term.and_then(|t| status(t, v.time)) {
+                if st.0 == SHELLS {
+                    status_mark(&mut k, tx + 6.0 * s, cy, st);
+                    tx += 18.0 * s;
+                } else {
+                    status_mark(&mut k, tx + 3.5 * s, cy, st);
+                    tx += 14.0 * s;
+                }
             }
             if term.is_some_and(Terminal::is_remote) {
                 let green = th.done;

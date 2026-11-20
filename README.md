@@ -66,6 +66,7 @@ Cada tab sabe en qué está su sesión de Claude Code y lo muestra con un punto 
 | azul pulsando | trabajando |
 | ámbar | te necesita (permiso o pregunta) |
 | verde | terminó y no lo has visto |
+| ícono de terminal (acento) | Claude no está trabajando, pero dejó comandos de shell corriendo (un servidor, un watcher, una tarea en segundo plano) |
 | sin punto | shell normal, o sesión esperando tu prompt |
 
 - **Tus mensajes** en la conversación se distinguen de las respuestas. Claude Code los pinta con un gris fijo que casi no se ve en muchos temas, así que en los tabs con Claude Telar lo cambia por un tono del acento del tema y les pone una barrita a la izquierda.

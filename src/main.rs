@@ -810,9 +810,9 @@ impl State {
         }
         let mut changed = false;
         for t in self.terms.values_mut() {
-            let before = t.process.clone();
+            let before = (t.process.clone(), t.claude_shells);
             t.refresh_process();
-            changed |= before != t.process;
+            changed |= before != (t.process.clone(), t.claude_shells);
             // Claude se cerró sin avisar (sin SessionEnd): si hace rato que en primer plano
             // hay una shell, el tab vuelve a ser una shell normal y no se retoma al reabrir.
             let shell = t.process.as_deref().is_some_and(proc::is_shell);

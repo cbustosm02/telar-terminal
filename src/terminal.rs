@@ -165,6 +165,8 @@ pub struct Terminal {
     pub agent: Agent,
     /// Nombre del proceso en primer plano (se refresca cada pocos segundos).
     pub process: Option<String>,
+    /// Comandos de shell que lanzó Claude y siguen corriendo (ver `proc::claude_shells`).
+    pub claude_shells: usize,
     /// Pid de la shell del tab (se anota cuando está en primer plano). Sirve para saber
     /// la carpeta cuando lo que corre no se deja leer (p. ej. `top`, que es de root).
     shell_pid: Option<i32>,
@@ -229,6 +231,7 @@ impl Terminal {
             attention: false,
             agent: Agent::default(),
             process: None,
+            claude_shells: 0,
             shell_pid: None,
             pty: pty_fd,
             size,
@@ -255,6 +258,7 @@ impl Terminal {
             attention: false,
             agent: Agent::default(),
             process: None,
+            claude_shells: 0,
             shell_pid: None,
             pty: None,
             size,
@@ -349,6 +353,11 @@ impl Terminal {
             // Arrancó con un comando y la shell nunca estuvo en primer plano.
             self.shell_pid = fg.and_then(crate::proc::shell_of);
         }
+        // Con Claude en primer plano, su grupo de procesos lo encabeza `claude`.
+        self.claude_shells = match fg {
+            Some(pid) if self.agent.state != AgentState::None => crate::proc::claude_shells(pid),
+            _ => 0,
+        };
     }
 
     /// Lo que corre en primer plano es una sesión remota (ssh o mosh).

@@ -2,7 +2,7 @@
 
 Telar agrupa tabs, y cada tab suele tener una sesión de Claude Code. El comando `telar` (en `~/.local/bin`, o `"$TELAR_BIN"`) controla los otros tabs. `<tab>` puede ser el id, `self`, `grupo/n` o parte del título.
 
-- `telar tabs`: JSON con los grupos y tabs, el estado de Claude en cada uno (`working`, `needs-you`, `done`, `idle`, `shell`), y su carpeta.
+- `telar tabs`: JSON con los grupos y tabs, el estado de Claude en cada uno (`working`, `needs-you`, `done`, `idle`, `shell`), cuántos comandos de shell dejó corriendo (`claude_shells`) y su carpeta.
 - `telar read <tab> [-n 200]`: texto de la pantalla y el scrollback de otro tab. Úsalo para ver logs de un servidor o de tests que corren en otro tab, en lugar de pedirle al usuario que copie la salida.
 - `telar send <tab> "texto" [--enter]`: escribe en otro tab.
 - `telar new [--group G] [--cwd DIR] [--focus] -- <comando>`: abre un tab, por defecto en tu mismo grupo y sin quitarle el foco al usuario. Imprime su id.

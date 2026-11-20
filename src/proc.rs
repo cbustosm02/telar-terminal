@@ -84,6 +84,28 @@ fn pgrp_members(pgrp: i32) -> Vec<i32> {
     buf
 }
 
+/// Hijos directos de `pid`.
+pub fn children(pid: i32) -> Vec<i32> {
+    let mut buf = vec![0i32; 256];
+    let n = unsafe { libc::proc_listchildpids(pid, buf.as_mut_ptr() as *mut c_void, (buf.len() * 4) as i32) };
+    buf.truncate(n.max(0) as usize);
+    buf.retain(|p| *p > 0);
+    buf
+}
+
+/// Si es una shell que lanzó la herramienta Bash de Claude Code: `zsh -c 'source
+/// …/shell-snapshots/snapshot-….sh … && eval …'`. Los demás hijos de Claude (servidores
+/// MCP, `caffeinate`, hooks) no cuentan.
+pub fn is_claude_shell(args: &[String]) -> bool {
+    args.len() >= 3 && is_shell(args[0].rsplit('/').next().unwrap_or("")) && args.iter().skip(1).any(|a| a.contains("shell-snapshots/snapshot-"))
+}
+
+/// Comandos de shell de Claude que siguen corriendo (en segundo plano si Claude está en
+/// espera). `pid` es el proceso `claude`.
+pub fn claude_shells(pid: i32) -> usize {
+    children(pid).into_iter().filter(|c| argv(*c).is_some_and(|a| is_claude_shell(&a))).count()
+}
+
 /// Argumentos con los que se ejecutó `pid` (`KERN_PROCARGS2`: argc, la ruta del
 /// ejecutable, relleno de ceros, argv y después el entorno).
 pub fn argv(pid: i32) -> Option<Vec<String>> {
@@ -190,6 +212,16 @@ mod tests {
         for n in ["zsh", "node", "1.2", "v2.1.3", "2..1", "python3.13"] {
             assert_eq!(display_name(n.into()), n);
         }
+    }
+
+    #[test]
+    fn shells_de_claude() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_claude_shell(&args(&["/bin/zsh", "-c", "source /Users/x/.claude/shell-snapshots/snapshot-zsh-1-a.sh 2>/dev/null || true && eval 'npm run dev'"])));
+        // Un servidor MCP, un hook o una shell cualquiera no.
+        assert!(!is_claude_shell(&args(&["/usr/local/bin/node", "/Users/x/.claude/mcp/proxy.mjs"])));
+        assert!(!is_claude_shell(&args(&["/bin/sh", "-c", "telar hook"])));
+        assert!(!is_claude_shell(&args(&["-zsh"])));
     }
 
     #[test]
