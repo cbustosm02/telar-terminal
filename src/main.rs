@@ -653,6 +653,15 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::ScaleFactorChanged { .. } => st.apply_font_size(),
+            // Archivos arrastrados a la ventana: su ruta escapada, como pegada (Claude Code
+            // adjunta las imágenes que reconoce así).
+            WindowEvent::DroppedFile(path) => {
+                if st.editing.is_none() {
+                    let text = format!("{} ", input::shell_escape(&path.to_string_lossy()));
+                    let bytes = input::paste_bytes(&text, st.active_mode());
+                    st.send_input(bytes);
+                }
+            }
             WindowEvent::Focused(focused) => {
                 st.focused = focused;
                 // Al cambiar de app, el menú se cierra (salvo en modo captura, sin foco).

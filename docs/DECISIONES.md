@@ -283,3 +283,8 @@ El usuario pidió una revisión de optimizaciones e integraciones (la hizo Fable
 - Riesgo aceptado: alguien con acceso a tu usuario podría firmar otro binario con ese certificado y heredar los permisos. Ese acceso ya le daría lo mismo de otras formas.
 - Descartado firmar en CI con un certificado guardado como secreto. El paquete `.app` se arma en el Mac (Info.plist, ícono), así que su firma igual se rehace allí.
 - «Acceso total al disco» (Configuración › General) abre `x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles`. Para saber si está concedido, se intenta abrir `~/Library/Application Support/com.apple.TCC/TCC.db`: sin el permiso falla sin mostrar ningún diálogo.
+
+## Pegar imágenes y arrastrar archivos (2026-11-20)
+
+- Claude Code no recibe la imagen por la terminal. Cuando le llega un **pegado vacío** (`ESC[200~ESC[201~`), en macOS lee él mismo el portapapeles con `osascript` y adjunta la imagen. Así funciona ⌘V en iTerm2 o Ghostty. Telar no enviaba nada si el portapapeles no tenía texto. Ahora, con bracketed paste activo, envía el pegado vacío. ⌃V también funciona: es el atajo `chat:imagePaste` de Claude Code, y Telar ya lo enviaba como 0x16.
+- `WindowEvent::DroppedFile` pega la ruta escapada con barras invertidas (como Terminal o iTerm2), seguida de un espacio. Claude Code reconoce las rutas de imágenes pegadas y las adjunta.

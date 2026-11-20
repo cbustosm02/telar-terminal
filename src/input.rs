@@ -107,6 +107,18 @@ fn csi_ss3(final_byte: char, m: u8) -> Vec<u8> {
     if m > 1 { format!("\x1b[1;{m}{final_byte}").into_bytes() } else { format!("\x1bO{final_byte}").into_bytes() }
 }
 
+/// Ruta para la shell con barra invertida antes de lo especial, como en Terminal o iTerm2.
+pub fn shell_escape(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c.is_whitespace() || "\\'\"`$&*?!;|<>()[]{}#~^".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Texto pegado, con bracketed paste si la aplicación lo pidió.
 pub fn paste_bytes(text: &str, mode: TermMode) -> Vec<u8> {
     if mode.contains(TermMode::BRACKETED_PASTE) {
@@ -129,6 +141,10 @@ mod tests {
     #[test]
     fn pegado_con_bracketed_paste() {
         assert_eq!(paste_bytes("ls\nrm", TermMode::BRACKETED_PASTE), b"\x1b[200~ls\nrm\x1b[201~");
+        assert_eq!(shell_escape("/Users/x/Mis capturas/a (1).png"), "/Users/x/Mis\\ capturas/a\\ \\(1\\).png");
+        assert_eq!(shell_escape("/tmp/plano.png"), "/tmp/plano.png");
+        // Pegado vacío (una imagen en el portapapeles): Claude Code lo usa para leerla.
+        assert_eq!(paste_bytes("", TermMode::BRACKETED_PASTE), b"\x1b[200~\x1b[201~");
     }
 
     /// Un ESC dentro del texto pegado podría cerrar el bracketed paste y ejecutar lo que sigue.

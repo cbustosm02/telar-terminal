@@ -181,7 +181,8 @@ Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina so
 | ⌘⇧← / ⌘⇧→, ⌃Tab | Tab anterior / siguiente |
 | ⌘⇧↑ / ⌘⇧↓ | Grupo anterior / siguiente |
 | ⌘⇧R o doble clic | Renombrar grupo (Enter guarda, Esc cancela) |
-| ⌘C / ⌘V | Copiar selección / pegar (con bracketed paste) |
+| ⌘C / ⌘V | Copiar selección / pegar (con bracketed paste). Con una imagen en el portapapeles, ⌘V (o ⌃V) la adjunta en Claude Code |
+| Arrastrar archivos a la ventana | Escribe su ruta escapada; Claude Code adjunta las imágenes |
 | ⌘+ / ⌘- / ⌘0 | Tamaño de fuente |
 | ⇧Enter, ⌥Enter | Salto de línea en Claude Code (envía ESC CR) |
 | ⌥← / ⌥→ / ⌥⌫ | Moverse o borrar por palabra |

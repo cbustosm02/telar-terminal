@@ -306,7 +306,16 @@ impl State {
     }
 
     pub(crate) fn paste(&mut self) {
-        let Some(text) = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) else { return };
+        let text = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()).unwrap_or_default();
+        if text.is_empty() {
+            // Sin texto (p. ej. una imagen copiada): con bracketed paste se manda un pegado
+            // vacío, como iTerm2 o Ghostty. Claude Code lo interpreta como «leer la imagen
+            // del portapapeles» y la adjunta.
+            if self.editing.is_none() && self.active_mode().contains(TermMode::BRACKETED_PASTE) {
+                self.send_input(input::paste_bytes("", self.active_mode()));
+            }
+            return;
+        }
         if let Some((_, buf)) = self.editing.as_mut() {
             buf.extend(text.chars().filter(|c| !c.is_control()));
             self.window.request_redraw();
