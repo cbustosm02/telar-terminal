@@ -163,6 +163,11 @@ impl State {
             }
             settings::Hit::ScrollbackDown => self.set_scrollback(-1),
             settings::Hit::ScrollbackUp => self.set_scrollback(1),
+            settings::Hit::FullDiskAccess => {
+                let _ = std::process::Command::new("/usr/bin/open")
+                    .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+                    .spawn();
+            }
             settings::Hit::ClearStartDir => {
                 self.config.start_dir = None;
                 self.config.save();

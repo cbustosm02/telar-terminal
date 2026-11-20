@@ -267,3 +267,17 @@ El usuario pidió una revisión de optimizaciones e integraciones (la hizo Fable
   - La pregunta y las opciones de un permiso se leen de la pantalla del tab: el último bloque de líneas numeradas «1.», «2.»… seguidas, sin los bordes de caja ni el «❯» de la elegida. Responder es mandarle al tab la tecla de la opción, igual que apretarla allí.
   - El último paso es la última línea que empieza con ⏺.
   - El hook `PermissionRequest` permitiría responder con una decisión formal, pero el hook tendría que esperar la respuesta de Telar y hoy no espera (`ipc::hook_main`). Leer la pantalla alcanza y no cambia los hooks.
+
+## Firma local estable para los permisos de macOS (2026-11-20)
+
+- Problema: al abrir Telar o tras actualizar, macOS pedía acceso a «Documentos» casi por cada tab. TCC guarda cada permiso con el requisito designado de la firma. Con firma ad hoc, ese requisito es `cdhash H"…"`, la huella exacta del binario: cada actualización la cambia y el permiso deja de valer. Varios tabs que arrancan a la vez generan varias consultas.
+- Solución: `signing.rs` crea una sola vez un certificado autofirmado para firmar código.
+  - Se genera con `/usr/bin/openssl` (LibreSSL). El PKCS#12 de OpenSSL 3+ no lo acepta `security import`.
+  - Se guarda en un llavero propio (`~/.config/telar/firma/telar.keychain-db`, con su clave aleatoria en `clave`, 0600).
+  - El llavero no entra en la lista de búsqueda del usuario. La clave privada solo la puede usar `codesign` (`-T`).
+  - Con este certificado, el requisito queda `identifier "dev.cbustos.telar" and certificate leaf = H"…"`, estable entre versiones.
+  - El certificado no tiene confianza del sistema (`CSSMERR_TP_NOT_TRUSTED`). No hace falta: `codesign` firma igual, la app arranca y TCC compara el requisito, no la cadena de confianza.
+- `update::sign` (actualizar, instalar y `ensure_bundle`) firma con esa identidad y, si falla, ad hoc. `ensure_bundle` vuelve a firmar una `.app` que llegó ad hoc, por ejemplo cuando una versión vieja instala esta.
+- Riesgo aceptado: alguien con acceso a tu usuario podría firmar otro binario con ese certificado y heredar los permisos. Ese acceso ya le daría lo mismo de otras formas.
+- Descartado firmar en CI con un certificado guardado como secreto. El paquete `.app` se arma en el Mac (Info.plist, ícono), así que su firma igual se rehace allí.
+- «Acceso total al disco» (Configuración › General) abre `x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles`. Para saber si está concedido, se intenta abrir `~/Library/Application Support/com.apple.TCC/TCC.db`: sin el permiso falla sin mostrar ningún diálogo.

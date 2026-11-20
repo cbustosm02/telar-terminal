@@ -28,6 +28,8 @@ pub mod icons {
     pub const GAUGE: char = '\u{e1bf}';
     pub const IMAGE: char = '\u{e0f6}';
     pub const UPLOAD: char = '\u{e19e}';
+    pub const SHIELD_CHECK: char = '\u{e1ff}';
+    pub const EXTERNAL_LINK: char = '\u{e0b9}';
     pub const MEMORY: char = '\u{e445}';
     pub const ARROW_DOWN_CIRCLE: char = '\u{e078}';
     pub const BOT: char = '\u{e1bb}';

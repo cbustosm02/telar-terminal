@@ -24,6 +24,7 @@ mod proc;
 mod renderer;
 mod screen;
 mod session;
+mod signing;
 mod stats;
 mod statsview;
 mod settings;
@@ -116,6 +117,14 @@ fn main() {
         Some("uninstall" | "uninstall-hooks") => return finish(hooks::uninstall()),
         Some("-h" | "--help" | "help") => return println!("{}", cli::USAGE),
         Some("-V" | "--version" | "version") => return println!("telar {}", update::VERSION),
+        // Interno (scripts/vista-previa.sh): firma un paquete con la firma local estable.
+        Some("__firmar") => {
+            return finish(match args.get(1) {
+                Some(p) if signing::sign(Path::new(p)) => Ok(String::new()),
+                Some(_) => Err("se firmó ad hoc: no se pudo usar la firma local".into()),
+                None => Err("uso: telar __firmar <ruta>".into()),
+            });
+        }
         Some(cmd) => return finish(cli::run(cmd, &args[1..])),
     }
 
@@ -813,6 +822,7 @@ impl State {
                 show_meters: self.config.show_meters,
                 lazy_restore: self.config.lazy_restore,
                 scrollback: self.config.scrollback,
+                full_disk: signing::has_full_disk_access(),
             };
             st.draw(&mut self.quads, &mut self.fonts, &l, &ctx);
             ime_cell = None;

@@ -37,6 +37,15 @@ Al pie de la barra lateral se ve la versión. Telar busca una nueva al abrirse (
 - Desde la terminal: `telar update --check` (solo busca) y `telar update`.
 - Una compilación de desarrollo (`target/…`) no se actualiza sola: se actualiza con `git pull` y `cargo build`.
 
+### Permisos de macOS (Documentos y demás carpetas)
+
+macOS guarda los permisos de privacidad atados a la firma de la app. Con una firma ad hoc, cada actualización cambia esa firma, y macOS volvía a preguntar por «Documentos» en cada tab. Por eso Telar.app se firma con un **certificado local estable**:
+
+- Se crea en este Mac la primera vez, en un llavero propio (`~/.config/telar/firma/`) que no se suma a tus llaveros.
+- Con cada actualización se vuelve a firmar con el mismo certificado, así que los permisos que concedas se conservan. Si algo falla, se firma ad hoc como antes.
+- Una versión anterior firmada ad hoc pasa a la firma estable al abrirse. Después de eso, macOS pregunta una última vez.
+- En **Configuración › General › Permisos de macOS**, «Abrir Ajustes» lleva a «Acceso total al disco». Si lo concedes una vez, ni Telar ni lo que corre en sus tabs vuelven a pedir permiso por carpeta. La tarjeta indica si ya está concedido.
+
 ## Sesiones que sobreviven
 
 Al cerrar Telar y volver a abrirlo se recuperan los grupos, los tabs y la carpeta de cada uno. Los tabs que tenían Claude Code abierto ejecutan `claude --resume <id>` y retoman su conversación.
@@ -212,6 +221,7 @@ Mouse:
 | `src/claude_usage.rs` / `src/cuentas.rs` | Uso de Claude (API de uso) y cuentas guardadas (Llavero) |
 | `src/confirm.rs` | Diálogo de confirmación |
 | `src/update.rs` | Actualizaciones desde los releases de GitHub |
+| `src/signing.rs` | Firma local estable de Telar.app, para que los permisos de macOS sobrevivan a las actualizaciones |
 | `src/appicon.rs` / `src/logo.rs` | Ícono de la app, paneles de macOS y el logo de Claude |
 
 Solo se dibuja cuando hay cambios (`ControlFlow::Wait`). Los tabs que no se ven no consumen GPU. En reposo usa 0 % de CPU y unos 50 MB de memoria. Mientras algún Claude trabaja, el indicador late a ~12 fps con la ventana al frente, a ~2 fps sin foco y nada con la ventana tapada.
@@ -233,7 +243,7 @@ No necesita el permiso de grabación de pantalla. Otras variables del modo captu
 
 ### Vista previa
 
-`scripts/vista-previa.sh` compila y abre la versión en desarrollo como «Telar (vista previa).app», con su propia sesión (`~/.config/telar/vista-previa.json`) y su propio identificador de paquete: no toca Telar.app ni tu sesión, y permite probar lo que necesita un paquete (las notificaciones nativas). `TELAR_NOTIFY_TEST=segundos` manda una notificación de prueba del tab visible.
+`scripts/vista-previa.sh` compila y abre la versión en desarrollo como «Telar (vista previa).app», con su propia sesión (`~/.config/telar/vista-previa.json`) y su propio identificador de paquete: no toca Telar.app ni tu sesión, y permite probar lo que necesita un paquete (las notificaciones nativas). Se firma con la misma firma local estable (`telar __firmar`), así que los permisos que le des sobreviven a cada recompilación. `TELAR_NOTIFY_TEST=segundos` manda una notificación de prueba del tab visible.
 
 ## Uso de Claude en la barra lateral
 

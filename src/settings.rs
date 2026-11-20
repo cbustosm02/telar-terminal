@@ -79,6 +79,8 @@ pub struct Ctx<'a> {
     pub show_meters: bool,
     pub lazy_restore: bool,
     pub scrollback: usize,
+    /// Si macOS ya le dio a Telar «Acceso total al disco».
+    pub full_disk: bool,
 }
 
 /// Sección del ícono de la app.
@@ -86,7 +88,7 @@ pub const ICON_SECTION: usize = 2;
 const ICON_CARD_H: f32 = 168.0;
 
 const PANEL_W: f32 = 760.0;
-const PANEL_H: f32 = 620.0;
+const PANEL_H: f32 = 700.0;
 const NAV_W: f32 = 190.0;
 const ROW_H: f32 = 28.0;
 const THEME_COLS: usize = 3;
@@ -133,6 +135,8 @@ pub enum Hit {
     LazyRestore,
     ScrollbackDown,
     ScrollbackUp,
+    /// Permisos de macOS: abre «Acceso total al disco» en Ajustes del Sistema.
+    FullDiskAccess,
 }
 
 #[derive(Default)]
@@ -285,6 +289,10 @@ struct Geometry {
     scrollback: Rect,
     scrollback_down: Rect,
     scrollback_up: Rect,
+    /// Sección General: permisos de macOS.
+    permissions_y: f32,
+    full_disk: Rect,
+    full_disk_open: Rect,
 }
 
 fn geometry(l: &Layout) -> Geometry {
@@ -339,6 +347,9 @@ fn geometry(l: &Layout) -> Geometry {
     let lazy_restore = Rect { y: sessions_y + 22.0 * s, ..show_claude };
     let scrollback = Rect { y: lazy_restore.y + lazy_restore.h + 8.0 * s, ..show_claude };
     let (scrollback_down, scrollback_up) = stepper(scrollback, s);
+    let permissions_y = scrollback.y + scrollback.h + 22.0 * s;
+    let full_disk = Rect { y: permissions_y + 22.0 * s, ..show_claude };
+    let full_disk_open = Rect { x: full_disk.x + full_disk.w - 10.0 * s - 140.0 * s, y: full_disk.y + (full_disk.h - 28.0 * s) / 2.0, w: 140.0 * s, h: 28.0 * s };
     Geometry {
         panel,
         close,
@@ -368,6 +379,9 @@ fn geometry(l: &Layout) -> Geometry {
         scrollback,
         scrollback_down,
         scrollback_up,
+        permissions_y,
+        full_disk,
+        full_disk_open,
     }
 }
 
@@ -455,6 +469,8 @@ impl Settings {
                 Hit::ScrollbackDown
             } else if g.scrollback_up.contains(x, y) {
                 Hit::ScrollbackUp
+            } else if g.full_disk_open.contains(x, y) {
+                Hit::FullDiskAccess
             } else {
                 Hit::Inside
             };
@@ -848,6 +864,22 @@ impl Settings {
         let d = g.scrollback_down;
         let value = Rect { x: d.x + d.w, y: d.y, w: g.scrollback_up.x - d.x - d.w, h: d.h };
         k.text_center(value, &format!("{} líneas", thousands(ctx.scrollback)), Text::label());
+
+        // Con la firma estable, lo que se conceda aquí sobrevive a las actualizaciones.
+        k.text(cx, g.permissions_y, "PERMISOS DE MACOS", Text::caption(), g.content_w);
+        let r = g.full_disk;
+        k.bordered(r, 8.0, th.chrome, th.border);
+        k.icon(r.x + 24.0 * s, r.y + r.h / 2.0, icons::SHIELD_CHECK, 18.0, if ctx.full_disk { th.done } else { th.text_dim });
+        let tx = r.x + 46.0 * s;
+        let right = g.full_disk_open.x - 12.0 * s;
+        let (title, sub) = if ctx.full_disk {
+            ("Acceso total al disco: concedido", "Telar y sus tabs ya no piden permiso por carpetas")
+        } else {
+            ("Acceso total al disco", "Una sola vez: no vuelve a pedir permiso por carpetas")
+        };
+        k.text(tx, r.y + 7.0 * s, title, Text::label(), right - tx);
+        k.text(tx, r.y + 26.0 * s, sub, Text::small(), right - tx);
+        k.button(g.full_disk_open, "Abrir Ajustes", Some(icons::EXTERNAL_LINK), Variant::Subtle, self.hover == Some(Hit::FullDiskAccess));
     }
 
     fn draw_icons(&self, k: &mut Kit, g: &Geometry, current: &str) {

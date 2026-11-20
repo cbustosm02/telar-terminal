@@ -29,8 +29,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-codesign --force --sign - "$APP" 2>/dev/null
+# Con la firma local estable (la misma de Telar.app; se crea si falta), los permisos de
+# macOS de la vista previa sobreviven a cada recompilación.
+"$APP/Contents/MacOS/telar" __firmar "$APP" || echo "Aviso: la vista previa quedó firmada ad hoc"
 pkill -f "target/vista-previa/Telar" 2>/dev/null || true
 pkill -f "target/release/telar$" 2>/dev/null || true
-env TELAR_SESSION_FILE="$HOME/.config/telar/vista-previa.json" "$@" nohup "$APP/Contents/MacOS/telar" >/dev/null 2>&1 &
-echo "Vista previa abierta (pid $!)"
+# Con `open` (no como hijo de esta shell), macOS la trata como app propia: los permisos
+# que pida son de la vista previa, no de la terminal desde la que se lanzó.
+ENVS=(--env "TELAR_SESSION_FILE=$HOME/.config/telar/vista-previa.json")
+for v in "$@"; do ENVS+=(--env "$v"); done
+open -n "$APP" "${ENVS[@]}"
+echo "Vista previa abierta"

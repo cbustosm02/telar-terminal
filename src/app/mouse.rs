@@ -78,6 +78,7 @@ impl State {
                         | settings::Hit::LazyRestore
                         | settings::Hit::ScrollbackDown
                         | settings::Hit::ScrollbackUp
+                        | settings::Hit::FullDiskAccess
                 ) || (hit == settings::Hit::ClearStartDir && self.config.start_dir.is_some());
                 self.window.set_cursor(if pointer { CursorIcon::Pointer } else { CursorIcon::Default });
                 self.window.request_redraw();

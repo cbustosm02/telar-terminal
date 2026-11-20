@@ -249,10 +249,11 @@ fn apply(progress: &dyn Fn(Status), r: &Release, exe: &Path, tmp: &Path) -> Resu
     Ok(())
 }
 
-/// Firma ad hoc (sin certificado): macOS exige firma en Apple Silicon y la del paquete
-/// deja de valer al cambiar el binario.
+/// macOS exige firma en Apple Silicon y la del paquete deja de valer al cambiar el binario.
+/// Se firma con la identidad local estable para que los permisos de privacidad (Documentos,
+/// etc.) no se pierdan con cada actualización; ver `signing`.
 fn sign(path: &Path) {
-    let _ = Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"]).arg(path).stderr(Stdio::null()).status();
+    crate::signing::sign(path);
 }
 
 /// Reinicia Telar cuando este proceso termine (la sesión ya quedó guardada al salir).
@@ -335,6 +336,10 @@ pub fn ensure_bundle() {
     let plist = app.join("Contents").join("Info.plist");
     let current = std::fs::read_to_string(&plist).unwrap_or_default();
     if current == info_plist() && app.join("Contents/Resources/Telar.icns").is_file() {
+        // Firmado ad hoc (una versión anterior se actualizó a esta): pasa a la firma estable.
+        if !crate::signing::is_stable(app) {
+            sign(app);
+        }
         return;
     }
     if write_bundle_files(app).is_ok() {
