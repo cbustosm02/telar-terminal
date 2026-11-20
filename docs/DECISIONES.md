@@ -40,6 +40,8 @@ Descartados:
   - Heredan el entorno del proceso `claude`, que a su vez hereda el del tab. Por eso `TELAR_TAB_ID` identifica de qué tab viene cada evento sin configurar nada más.
   - Con `claude -p` se disparan SessionStart, UserPromptSubmit, Stop y SessionEnd.
   - El aviso de inactividad (`notification_type: idle_prompt`, «waiting for your input») no cambia el estado. Si lo cambiara, todo tab terminado pasaría a ámbar a los 60 s.
+  - Solo pasan a «te necesita» los avisos que piden algo: `permission_prompt`, `worker_permission_prompt`, `elicitation_dialog` y `agent_needs_input`. Los demás son informativos y no cambian el estado. Por ejemplo, `push_notification` es el resumen que Claude manda con la herramienta PushNotification al terminar: antes dejaba el tab en ámbar, y ese estado no se limpiaba al verlo. Un tipo desconocido tampoco cambia el estado. Sin tipo (versiones viejas), todo menos «waiting for your input».
+  - El grupo muestra un punto por cada estado distinto de sus tabs, no solo el más urgente. Así, un ámbar no tapa a otro tab que sigue trabajando.
 - **El hook no espera la respuesta del socket:** escribe la línea y cierra, para no frenar a Claude.
 - **Animación del indicador:** solo mientras algún tab trabaja, con `ControlFlow::WaitUntil` a ~12 fps. Si nadie trabaja, la app duerme.
 - **Proceso en primer plano:** `tcgetpgrp` sobre una copia (`dup`) del descriptor del PTY, y luego `proc_pidinfo(PROC_PIDVNODEPATHINFO)` para la carpeta y `proc_name` para el nombre. La copia evita usar un descriptor ya cerrado y reasignado si la shell muere.

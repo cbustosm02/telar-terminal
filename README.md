@@ -58,7 +58,7 @@ Al cerrar Telar y volver a abrirlo se recuperan los grupos, los tabs y la carpet
 
 ## Claude Code
 
-Cada tab sabe en qué está su sesión de Claude Code y lo muestra con un punto en el tab y en su grupo. El grupo muestra el estado más urgente de sus tabs:
+Cada tab sabe en qué está su sesión de Claude Code y lo muestra con un punto en el tab. El grupo muestra un punto por cada estado distinto de sus tabs, del más urgente (junto al contador) al menos urgente. Por ejemplo, si un tab te necesita y otro sigue trabajando, el grupo muestra ámbar y el pulso azul:
 
 | Indicador | Estado |
 |---|---|

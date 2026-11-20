@@ -106,13 +106,7 @@ impl State {
         let new = match p["hook_event_name"].as_str().unwrap_or_default() {
             "SessionStart" => Some(AgentState::Idle),
             "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some(AgentState::Working),
-            "Notification" => {
-                // El aviso de «sigo esperando tu input» (a los 60 s) no cambia nada:
-                // la sesión ya está en «terminó» o «en espera».
-                let idle = p["notification_type"].as_str() == Some("idle_prompt")
-                    || message.contains("waiting for your input");
-                if idle { None } else { Some(AgentState::NeedsYou) }
-            }
+            "Notification" => notification_needs_you(p["notification_type"].as_str(), message).then_some(AgentState::NeedsYou),
             // `StopFailure`: el turno murió por un error de la API o por el límite de uso.
             "Stop" | "StopFailure" => Some(if visible { AgentState::Idle } else { AgentState::Done }),
             "SessionEnd" => Some(AgentState::None),
@@ -245,5 +239,36 @@ impl State {
             b.clamp(entries.len(), &l);
         }
         self.window.request_redraw();
+    }
+}
+
+/// Si un aviso de Claude Code (hook `Notification`) significa que la sesión espera algo de
+/// ti. Solo los pedidos de permiso o de respuesta: los demás (`idle_prompt` a los 60 s,
+/// `push_notification` con el resumen al terminar, `agent_completed` de un agente en
+/// segundo plano, `auth_success`…) son informativos y no cambian el estado.
+pub(crate) fn notification_needs_you(kind: Option<&str>, message: &str) -> bool {
+    match kind {
+        Some(k) => matches!(k, "permission_prompt" | "worker_permission_prompt" | "elicitation_dialog" | "agent_needs_input"),
+        // Versiones viejas sin tipo: todo menos el aviso de inactividad.
+        None => !message.contains("waiting for your input"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::notification_needs_you as needs;
+
+    #[test]
+    fn avisos_que_piden_algo() {
+        assert!(needs(Some("permission_prompt"), "Claude needs your permission to use Bash"));
+        assert!(needs(Some("elicitation_dialog"), ""));
+        // El resumen que manda Claude al terminar no es un pedido.
+        assert!(!needs(Some("push_notification"), "Hice las dos cosas"));
+        assert!(!needs(Some("idle_prompt"), "Claude is waiting for your input"));
+        assert!(!needs(Some("agent_completed"), "x finished"));
+        assert!(!needs(Some("auth_success"), ""));
+        assert!(!needs(Some("tipo_nuevo"), ""));
+        assert!(needs(None, "Claude needs your permission to use Bash"));
+        assert!(!needs(None, "Claude is waiting for your input"));
     }
 }

@@ -835,16 +835,24 @@ fn draw_sidebar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) {
         let badge_w = k.measure(&count, badge_style) + 12.0 * s;
         let bx = right - badge_w;
         k.tag(bx, cy, &count, th.text_dim, if active { th.hover } else { th.active });
-        let worst = grp.tabs.iter().filter_map(|id| v.terms.get(id)).filter_map(|t| status(t, v.time)).max_by_key(|(p, _)| *p);
+        // Un punto por cada estado distinto de sus tabs, del más urgente al menos
+        // (p. ej. amarillo si uno te necesita y el pulso si otro sigue trabajando).
+        let mut states: Vec<(u8, Rgba)> = grp.tabs.iter().filter_map(|id| v.terms.get(id)).filter_map(|t| status(t, v.time)).collect();
+        states.sort_by_key(|(p, _)| std::cmp::Reverse(*p));
+        states.dedup_by(|a, b| a.1 == b.1);
         let mut name_right = bx - 6.0 * s;
         // Grupo pasado de su límite de memoria.
         if v.over_groups.get(i).copied().unwrap_or(false) {
             k.icon(name_right - 7.0 * s, cy, icons::CIRCLE_ALERT, 13.0, th.danger);
             name_right -= 18.0 * s;
         }
-        if let Some((_, color)) = worst {
-            k.dot(name_right - 3.0 * s, cy, 7.0, color);
-            name_right -= 14.0 * s;
+        if !states.is_empty() {
+            // El más urgente queda pegado al contador; los demás, a su izquierda.
+            for (_, color) in &states {
+                k.dot(name_right - 3.0 * s, cy, 7.0, *color);
+                name_right -= 11.0 * s;
+            }
+            name_right -= 3.0 * s;
         } else if asleep {
             k.icon(name_right - 4.0 * s, cy, icons::MOON, 13.0, th.text_dim);
             name_right -= 16.0 * s;
