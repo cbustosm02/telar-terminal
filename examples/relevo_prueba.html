@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telar remoto (prueba)</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+<style>
+  body { margin: 0; font: 14px -apple-system, sans-serif; background: #1e1f29; color: #e6e6e6; display: flex; height: 100vh; }
+  #side { width: 260px; overflow: auto; border-right: 1px solid #333; padding: 8px; }
+  #main { flex: 1; display: flex; flex-direction: column; }
+  #term { flex: 1; padding: 4px; }
+  .g { font-size: 11px; text-transform: uppercase; color: #888; margin: 10px 0 4px; }
+  .t { padding: 6px; border-radius: 6px; cursor: pointer; }
+  .t:hover, .t.on { background: #333; }
+  .s { font-size: 11px; color: #aaa; }
+  #bar { display: flex; gap: 4px; padding: 6px; border-top: 1px solid #333; flex-wrap: wrap; }
+  button, input { font: inherit; background: #2b2c38; color: inherit; border: 1px solid #444; border-radius: 6px; padding: 6px 10px; }
+  input { flex: 1; min-width: 200px; }
+  #st { font-size: 12px; color: #aaa; padding: 4px 8px; }
+</style>
+</head>
+<body>
+<div id="side"><div id="st">conectando…</div><div id="tabs"></div></div>
+<div id="main">
+  <div id="term"></div>
+  <div id="bar">
+    <input id="txt" placeholder="Escribe y Enviar (texto + Enter)">
+    <button data-k="send">Enviar</button>
+    <button data-k="&#13;">Enter</button><button data-k="&#27;">Esc</button>
+    <button data-k="&#27;[A">↑</button><button data-k="&#27;[B">↓</button>
+    <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+    <button data-k="&#3;">Ctrl-C</button><button data-k="detach">Soltar</button>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<script>
+const term = new Terminal({ fontSize: 13, convertEol: false });
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById('term'));
+fit.fit();
+let ws, tab = null, lastSeq = {};
+const send = (m) => ws && ws.readyState === 1 && ws.send(JSON.stringify(m));
+function connect() {
+  ws = new WebSocket('ws://127.0.0.1:8787/client');
+  ws.onopen = () => { document.getElementById('st').textContent = 'conectado al relevo'; send({ type: 'hello' }); if (tab) attach(tab); };
+  ws.onclose = () => { document.getElementById('st').textContent = 'relevo desconectado, reintentando…'; setTimeout(connect, 1000); };
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'state') render(m);
+    else if (m.type === 'screen' && m.tab === tab) { term.write(m.ansi); }
+    else if (m.type === 'bridges') document.getElementById('st').textContent = m.list.some(b => b.online) ? 'Mac conectado' : 'Mac desconectado';
+    else if (m.type === 'error') console.warn(m);
+  };
+}
+function render(st) {
+  const el = document.getElementById('tabs');
+  el.innerHTML = '';
+  for (const g of st.groups) {
+    const h = document.createElement('div'); h.className = 'g'; h.textContent = g.name; el.appendChild(h);
+    for (const t of g.tabs) {
+      const d = document.createElement('div'); d.className = 't' + (t.id === tab ? ' on' : '');
+      d.innerHTML = `<div>${t.title}</div><div class="s">${t.state}${t.claude_shells ? ' · shells ' + t.claude_shells : ''}${t.browser ? ' · navegador' : ''}${t.question ? ' · ' + t.question : ''}</div>`;
+      if (t.options) for (const o of t.options) {
+        const b = document.createElement('button'); b.textContent = o.digit + '. ' + o.label;
+        b.onclick = (ev) => { ev.stopPropagation(); send({ type: 'answer', tab: t.id, question_id: t.question_id, digit: o.digit }); };
+        d.appendChild(b);
+      }
+      d.onclick = () => attach(t.id);
+      el.appendChild(d);
+    }
+  }
+}
+function attach(id) { tab = id; term.reset(); fit.fit(); send({ type: 'attach', tab: id, cols: term.cols, rows: term.rows }); }
+window.onresize = () => { fit.fit(); if (tab) send({ type: 'resize', tab, cols: term.cols, rows: term.rows }); };
+term.onData((d) => tab && send({ type: 'input', tab, data: d }));
+document.querySelectorAll('#bar button').forEach(b => b.onclick = () => {
+  const k = b.dataset.k;
+  if (!tab) return;
+  if (k === 'send') { const i = document.getElementById('txt'); send({ type: 'input', tab, data: i.value + '\r' }); i.value = ''; }
+  else if (k === 'detach') { send({ type: 'detach', tab }); tab = null; term.reset(); }
+  else send({ type: 'input', tab, data: k });
+});
+connect();
+</script>
+</body>
+</html>

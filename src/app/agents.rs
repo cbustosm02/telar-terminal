@@ -3,6 +3,38 @@
 use crate::*;
 
 impl State {
+    /// Hook de un Claude que corre en un servidor (por SSH), llegado por la terminal del
+    /// tab. Solo se acepta con ssh en primer plano (si no, cualquier archivo que se muestre
+    /// podría inventar estados), y la sesión y la carpeta no se usan para nada local: son
+    /// de la otra máquina.
+    pub(crate) fn on_inband_hook(&mut self, tab: u64, mut payload: Value) {
+        // Lo que corre en primer plano se refresca cada pocos segundos: aquí, en el momento
+        // (un `ssh` recién abierto todavía no figura).
+        let Some(t) = self.terms.get_mut(&tab) else { return };
+        t.refresh_process();
+        if !t.is_remote() {
+            return;
+        }
+        // `telar-remote.sh test` (claude-mods): solo confirma que el camino funciona.
+        if payload["notification_type"] == "telar_test" {
+            let msg = payload["message"].as_str().unwrap_or("Prueba de telar-remote").chars().take(200).collect::<String>();
+            notify::send("Telar · Claude por SSH", &format!("Llegó: {msg}"), Some(tab));
+            if let Some(t) = self.terms.get_mut(&tab) {
+                t.attention = self.ws.active_term() != Some(tab);
+            }
+            self.window.request_redraw();
+            return;
+        }
+        if let Some(obj) = payload.as_object_mut() {
+            obj.remove("session_id");
+            obj.remove("cwd");
+            obj.retain(|k, _| matches!(k.as_str(), "hook_event_name" | "notification_type" | "message"));
+        }
+        self.on_hook(tab, &payload);
+        self.remote.state_dirty = true;
+        self.update_awake();
+    }
+
     /// El tab activo ya se vio: se limpia la campana y «terminó» pasa a «en espera».
     pub(crate) fn mark_seen(&mut self) {
         if let Some(t) = self.ws.active_term().and_then(|id| self.terms.get_mut(&id)) {

@@ -33,6 +33,10 @@ impl State {
     /// Suspende un tab: guarda su pantalla y cierra su shell (y Claude, si corre ahí).
     /// Queda la vista previa; al reanudarlo, Claude retoma la misma sesión.
     pub(crate) fn suspend(&mut self, id: u64) -> bool {
+        // Si lo miraba alguien desde Telar web, vuelve a su tamaño antes de congelarse.
+        if self.remote.watches.contains_key(&id) {
+            self.remote_release(id);
+        }
         let Some(old) = self.terms.get_mut(&id) else { return false };
         if old.is_suspended() {
             return false;
@@ -86,8 +90,15 @@ impl State {
 
     /// El tab a la vista quedó en espera al abrir Telar: arranca ahora.
     pub(crate) fn wake_lazy_active(&mut self) {
+        if let Some(id) = self.ws.active_term() {
+            self.wake_lazy(id);
+        }
+    }
+
+    /// Arranca un tab que esperaba a mostrarse (no uno que suspendiste tú).
+    pub(crate) fn wake_lazy(&mut self, id: u64) {
         let lazy = |t: &Terminal| t.frozen.as_ref().is_some_and(|f| f.lazy);
-        if let Some(id) = self.ws.active_term().filter(|id| self.terms.get(id).is_some_and(lazy)) {
+        if self.terms.get(&id).is_some_and(lazy) {
             // Si no se pudo abrir la shell, queda como suspendido (no se reintenta en cada vuelta).
             if !self.resume(id) {
                 if let Some(f) = self.terms.get_mut(&id).and_then(|t| t.frozen.as_mut()) {
@@ -308,6 +319,14 @@ impl State {
     pub(crate) fn paste(&mut self) {
         let text = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()).unwrap_or_default();
         if text.is_empty() {
+            // Por SSH, el Claude de allá no ve el portapapeles de este Mac: la imagen se sube
+            // al servidor y se pega su ruta (ver `sshpaste`).
+            if self.editing.is_none() && self.active().is_some_and(Terminal::is_remote) {
+                if let Some(img) = self.clipboard.as_mut().and_then(sshpaste::clipboard_image) {
+                    self.ssh_upload(move || sshpaste::png(&img).map(|b| (b, ".png".to_string())).ok_or_else(|| "no se pudo leer la imagen".to_string()));
+                    return;
+                }
+            }
             // Sin texto (p. ej. una imagen copiada): con bracketed paste se manda un pegado
             // vacío, como iTerm2 o Ghostty. Claude Code lo interpreta como «leer la imagen
             // del portapapeles» y la adjunta.
@@ -323,6 +342,42 @@ impl State {
         }
         let bytes = input::paste_bytes(&text, self.active_mode());
         self.send_input(bytes);
+    }
+
+    /// Sube `bytes` al servidor del `ssh` del tab visible, en un hilo (tarda lo que tarde
+    /// la red); al terminar se pega la ruta remota (`ssh_uploaded`).
+    pub(crate) fn ssh_upload(&mut self, file: impl FnOnce() -> Result<(Vec<u8>, String), String> + Send + 'static) {
+        let Some(id) = self.ws.active_term() else { return };
+        if let Err(e) = self.ssh_upload_to(id, file) {
+            notify_macos("Pegar por SSH", &e);
+        }
+    }
+
+    /// Como `ssh_upload`, al tab `id`.
+    pub(crate) fn ssh_upload_to(&mut self, id: u64, file: impl FnOnce() -> Result<(Vec<u8>, String), String> + Send + 'static) -> Result<(), String> {
+        let argv = self.terms.get(&id).and_then(Terminal::foreground_pid).and_then(proc::argv);
+        let Some(target) = argv.filter(|a| a.first().is_some_and(|c| c.rsplit('/').next() == Some("ssh"))).and_then(|a| sshpaste::target(&a)) else {
+            return Err("Solo funciona con ssh en primer plano (no con mosh ni dentro de otro programa).".into());
+        };
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let result = file().and_then(|(bytes, ext)| sshpaste::upload(&target, &bytes, &ext));
+            let _ = proxy.send_event(UserEvent::SshUploaded(id, result));
+        });
+        Ok(())
+    }
+
+    /// Se subió: la ruta remota se pega en el tab (Claude Code adjunta la imagen).
+    pub(crate) fn ssh_uploaded(&mut self, id: u64, result: Result<String, String>) {
+        match result {
+            Ok(path) => {
+                if let Some(t) = self.terms.get(&id) {
+                    let mode = *t.term.lock().mode();
+                    t.write(input::paste_bytes(&format!("{path} "), mode));
+                }
+            }
+            Err(e) => notify_macos("No se pudo pegar por SSH", &e),
+        }
     }
 
     pub(crate) fn start_rename(&mut self, group: usize) {

@@ -41,6 +41,10 @@ pub struct Config {
     pub lazy_restore: bool,
     /// Líneas de historial de cada tab (ver `SCROLLBACK_STEPS`).
     pub scrollback: usize,
+    /// Telar remoto: la app lanza `telar bridge` (si hay sesión de Telar web en el Llavero).
+    pub remote: bool,
+    /// Servidor de Telar web (`None`: el de siempre, `bridge::DEFAULT_SERVER`).
+    pub remote_server: Option<String>,
 }
 
 /// Valores del historial por tab que se eligen con − / +.
@@ -68,6 +72,8 @@ impl Default for Config {
             show_meters: true,
             lazy_restore: true,
             scrollback: 10_000,
+            remote: false,
+            remote_server: None,
         }
     }
 }
@@ -89,6 +95,10 @@ impl Config {
                 "show_meters": self.show_meters,
                 "lazy_restore": self.lazy_restore,
                 "scrollback_lines": self.scrollback,
+            },
+            "remote": {
+                "enabled": self.remote,
+                "server": self.remote_server,
             },
             "appearance": {
                 "theme": self.theme,
@@ -134,6 +144,8 @@ impl Config {
             show_meters: v["general"]["show_meters"].as_bool().unwrap_or(d.show_meters),
             lazy_restore: v["general"]["lazy_restore"].as_bool().unwrap_or(d.lazy_restore),
             scrollback: v["general"]["scrollback_lines"].as_u64().map_or(d.scrollback, |n| (n as usize).clamp(SCROLLBACK_STEPS[0], 100_000)),
+            remote: v["remote"]["enabled"].as_bool().unwrap_or(d.remote),
+            remote_server: v["remote"]["server"].as_str().filter(|s| !s.is_empty()).map(String::from),
         }
     }
 
@@ -183,6 +195,8 @@ mod tests {
             show_meters: false,
             lazy_restore: false,
             scrollback: 50_000,
+            remote: true,
+            remote_server: Some("https://telar.ejemplo.dev".into()),
         };
         assert_eq!(Config::from_json(&c.to_json()), c);
     }

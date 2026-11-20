@@ -76,6 +76,8 @@ pub enum Hit {
     NewTab,
     /// Interruptor de `caffeinate`, abajo en la barra lateral.
     Awake,
+    /// Zona de Telar web (sesión y quién mira), encima de «Despierto»: abre su menú.
+    Web,
     /// Versión y actualización, al pie de la barra lateral.
     Update,
     /// Engranaje: abre la configuración.
@@ -248,7 +250,7 @@ impl Layout {
         } else if self.meters {
             self.meters_rect().y
         } else {
-            self.awake_rect().y - 8.0 * self.s
+            self.web_rect().y - 8.0 * self.s
         }
     }
 
@@ -261,13 +263,19 @@ impl Layout {
     /// Bloque de Claude (cuenta, sesión y semana), encima de los medidores y su divisor.
     fn claude_rect(&self) -> Rect {
         let s = self.s;
-        let below = if self.meters { self.meters_rect().y } else { self.awake_rect().y };
+        let below = if self.meters { self.meters_rect().y } else { self.web_rect().y };
         Rect { x: 8.0 * s, y: below - (14.0 + CLAUDE_H) * s, w: (SIDEBAR_W - 16.0) * s, h: CLAUDE_H * s }
     }
 
     fn meters_rect(&self) -> Rect {
         let s = self.s;
-        Rect { x: 8.0 * s, y: self.awake_rect().y - 54.0 * s, w: (SIDEBAR_W - 16.0) * s, h: 40.0 * s }
+        Rect { x: 8.0 * s, y: self.web_rect().y - 54.0 * s, w: (SIDEBAR_W - 16.0) * s, h: 40.0 * s }
+    }
+
+    /// Zona de Telar web, encima de «Despierto».
+    fn web_rect(&self) -> Rect {
+        let s = self.s;
+        Rect { x: 8.0 * s, y: self.awake_rect().y - 48.0 * s, w: (SIDEBAR_W - 16.0) * s, h: 46.0 * s }
     }
 
     /// Bloque de «Despierto», encima del de la versión.
@@ -280,6 +288,9 @@ impl Layout {
         if x < self.sidebar_w() {
             if self.awake_rect().contains(x, y) {
                 return Hit::Awake;
+            }
+            if self.web_rect().contains(x, y) {
+                return Hit::Web;
             }
             if self.update_rect().contains(x, y) {
                 return Hit::Update;
@@ -378,6 +389,15 @@ pub enum Action {
     RemoveAccount(usize),
     SaveAccount,
     LoginAccount,
+    /// Telar web (menú de su zona): iniciar sesión, cancelar, abrir la web o la página de
+    /// autorización, conectar o desconectar, cerrar sesión, e ir al tab que mira alguien.
+    WebLogin,
+    WebCancel,
+    WebOpen,
+    WebOpenLogin,
+    WebToggle,
+    WebLogout,
+    WebShowTab(u64),
 }
 
 pub struct MenuItem {
@@ -510,6 +530,8 @@ pub struct View<'a> {
     pub time: f32,
     /// Modo de `caffeinate` y si está corriendo ahora.
     pub awake: (awake::Mode, bool),
+    /// Telar web: sesión, estado del puente y quién mira.
+    pub web: WebView<'a>,
     pub menu: Option<&'a Menu>,
     pub update: &'a Status,
     pub stats: Option<&'a crate::stats::Sample>,
@@ -942,8 +964,9 @@ fn draw_footer(k: &mut Kit, l: &Layout, v: &View) {
     if l.meters {
         draw_meters(k, l, v);
     }
-    let top = l.awake_rect().y - 8.0 * s;
+    let top = l.web_rect().y - 8.0 * s;
     k.rect(Rect { x: 12.0 * s, y: top, w: l.sidebar_w() - 24.0 * s, h: s }, th.border);
+    draw_web(k, l, v);
     draw_awake(k, l, v);
     draw_update(k, l, v);
 }
@@ -1088,6 +1111,77 @@ fn draw_awake(k: &mut Kit, l: &Layout, v: &View) {
     k.kbd(r.x + r.w - 8.0 * s, r.y + r.h / 2.0, &["⌘", "⇧", "C"]);
 }
 
+/// Lo que muestra la zona de Telar web.
+pub struct WebView<'a> {
+    /// Correo (o nombre) de la sesión vinculada.
+    pub who: Option<&'a str>,
+    /// Estado del puente: off, login, connecting, connected, error, revoked.
+    pub status: &'a str,
+    pub detail: &'a str,
+    /// Código para comparar con el del navegador mientras se inicia sesión.
+    pub user_code: Option<&'a str>,
+    pub enabled: bool,
+    /// Navegadores con Telar web abierto, y cuántos de ellos miran un tab.
+    pub viewers: usize,
+    pub watching: usize,
+    /// El dispositivo, si es uno solo (para nombrarlo).
+    pub device: Option<&'a str>,
+}
+
+/// Zona de Telar web: con quién está vinculado este Mac y si alguien lo mira.
+fn draw_web(k: &mut Kit, l: &Layout, v: &View) {
+    let s = l.s;
+    let th = theme::t();
+    let r = l.web_rect();
+    let hovered = v.hover == Hit::Web;
+    if hovered {
+        k.rounded(r, 7.0, th.hover);
+    }
+    let bg = if hovered { th.hover } else { th.chrome };
+    let w = &v.web;
+    let watching = w.viewers > 0 && w.status == "connected";
+    let count = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+    let (icon, color, dot) = match (w.who, w.status) {
+        (_, "login") => (icons::LOG_IN, th.attention, Some(th.attention)),
+        (_, "error") => (icons::CLOUD_OFF, th.danger, Some(th.danger)),
+        (Some(_), "connected") if watching => (icons::SMARTPHONE, th.done, Some(th.done)),
+        (Some(_), "connected") => (icons::CLOUD, th.text, Some(th.accent)),
+        (Some(_), "connecting") => (icons::CLOUD, th.text_dim, Some(th.attention)),
+        (Some(_), _) => (icons::CLOUD_OFF, th.text_dim, Some(th.muted)),
+        (None, _) => (icons::CLOUD_OFF, th.text_dim, None),
+    };
+    let box_bg = if watching { theme::mix(bg, th.done, 0.16) } else { th.active };
+    status_icon(k, r, icon, color, box_bg, dot, bg);
+    let tx = r.x + 46.0 * s;
+    let max = r.x + r.w - tx - 8.0 * s;
+    let desc = match (w.who, w.status) {
+        (_, "login") => match w.user_code {
+            Some(code) => format!("Código {code}"),
+            None => "Abriendo el navegador…".to_string(),
+        },
+        (_, "error") if !w.detail.is_empty() => w.detail.to_string(),
+        (_, "revoked") => "Sesión cerrada desde la web".to_string(),
+        // Alguien mira un tab, o solo tiene Telar web abierto.
+        (Some(_), "connected") if w.watching > 0 => match (w.watching, w.device) {
+            (1, Some(d)) => format!("{d} mira un tab"),
+            (n, _) => format!("{n} dispositivos miran un tab"),
+        },
+        (Some(_), "connected") if watching => match w.device {
+            Some(d) => format!("Abierto en {d}"),
+            None => count(w.viewers, "dispositivo", "dispositivos con Telar web"),
+        },
+        (Some(who), "connected") => who.to_string(),
+        (Some(_), "connecting") if !w.detail.is_empty() => w.detail.to_string(),
+        (Some(_), "connecting") => "Conectando…".to_string(),
+        (Some(who), _) if !w.enabled => format!("Desconectado · {who}"),
+        (Some(who), _) => who.to_string(),
+        (None, _) => "Sin sesión · clic para entrar".to_string(),
+    };
+    let on = w.who.is_some() && w.enabled;
+    k.text(tx, r.y + 7.0 * s, "Telar web", Text::label().color(if on { th.text } else { th.text_dim }), max);
+    k.text(tx, r.y + 25.0 * s, &desc, Text::small().color(if watching { th.done } else { th.text_dim }), max);
+}
+
 /// Versión y actualizaciones: ícono de estado, texto y botón según el estado.
 fn draw_update(k: &mut Kit, l: &Layout, v: &View) {
     let s = l.s;
@@ -1202,6 +1296,11 @@ fn draw_tabbar(out: &mut Vec<Quad>, fonts: &mut Fonts, l: &Layout, v: &View) -> 
                     status_mark(&mut k, tx + 3.5 * s, cy, st);
                     tx += 14.0 * s;
                 }
+            }
+            // Lo está mirando alguien desde Telar web (y tiene el tamaño de su pantalla).
+            if term.is_some_and(|t| t.remote_size.is_some()) {
+                k.icon(tx + 6.0 * s, cy, icons::SMARTPHONE, 12.0, th.done);
+                tx += 16.0 * s;
             }
             if term.is_some_and(Terminal::is_remote) {
                 let green = th.done;

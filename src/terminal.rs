@@ -175,6 +175,11 @@ pub struct Terminal {
     /// Copia del descriptor del PTY, para preguntar por el proceso en primer plano.
     pty: Option<OwnedFd>,
     size: GridSize,
+    /// Tamaño que le da la ventana de Telar; `size` puede ser otro mientras lo mira un
+    /// cliente remoto (`remote_size`).
+    local_size: GridSize,
+    /// Columnas y filas de quien lo mira desde Telar remoto (el celular), si alguien lo mira.
+    pub remote_size: Option<(usize, usize)>,
     /// Último uso: lo viste, escribiste en él o su programa mostró algo (ver `idle`).
     pub last_used: Cell<Instant>,
     /// Cuándo mostró algo por última vez su programa, y cuántas veces cambió lo que muestra
@@ -192,7 +197,7 @@ impl Terminal {
         cwd: Option<&Path>,
         scrollback: usize,
     ) -> std::io::Result<Self> {
-        let listener = Listener::new(id, proxy);
+        let listener = Listener::new(id, proxy.clone());
         let mut env = HashMap::from([
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -219,6 +224,8 @@ impl Terminal {
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
         let pty = tty::new(&options, size.window_size(), id)?;
         let pty_fd = pty.file().try_clone().ok().map(OwnedFd::from);
+        // Lee lo mismo y reconoce los hooks de un Claude remoto (ver `inband`).
+        let pty = crate::inband::ScanPty::new(pty, id, proxy)?;
         let listener_generation = listener.generation;
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
         let notifier = Notifier(event_loop.channel());
@@ -238,6 +245,8 @@ impl Terminal {
             shell_pid: None,
             pty: pty_fd,
             size,
+            local_size: size,
+            remote_size: None,
             last_used: Cell::new(Instant::now()),
             output_at: Cell::new(Instant::now()),
             version: Cell::new(0),
@@ -266,6 +275,8 @@ impl Terminal {
             shell_pid: None,
             pty: None,
             size,
+            local_size: size,
+            remote_size: None,
             last_used: Cell::new(Instant::now()),
             output_at: Cell::new(Instant::now()),
             version: Cell::new(0),
@@ -305,6 +316,21 @@ impl Terminal {
     }
 
     pub fn resize(&mut self, size: GridSize) {
+        self.local_size = size;
+        self.apply_size();
+    }
+
+    /// Lo mira (o deja de mirarlo) un cliente remoto: toma su tamaño o vuelve al local.
+    pub fn set_remote_size(&mut self, remote: Option<(usize, usize)>) {
+        self.remote_size = remote;
+        self.apply_size();
+    }
+
+    fn apply_size(&mut self) {
+        let size = match self.remote_size {
+            Some((cols, rows)) => GridSize { cols, rows, ..self.local_size },
+            None => self.local_size,
+        };
         if size == self.size {
             return;
         }

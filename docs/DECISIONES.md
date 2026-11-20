@@ -338,3 +338,49 @@ El usuario pidió una revisión de optimizaciones e integraciones (la hizo Fable
   - Late entre el gris y el acento mientras el agente lo usa.
   - Queda en el color de acento si lo usó hace poco y en gris translúcido tras 2 min sin uso.
   - El tooltip se dibuja después de la terminal, para quedar encima.
+
+## Telar web: Telar desde el celular (2026-11-20)
+
+- **Decisión:** una web aparte en el homelab, en vez de una app nativa de iOS.
+  - Una app nativa con cuenta gratuita hay que reinstalarla cada 7 días.
+  - La web sirve en cualquier dispositivo y usa la autenticación del homelab.
+  - La construye homeLabFix (repo `telar-remoto`). Telar pone el puente.
+- **Arquitectura:** `navegador ⇄ relevo (homelab) ⇄ telar bridge (Mac, conexión saliente) ⇄ socket de Telar`.
+  - El relevo no guarda pantallas ni lo que se escribe.
+  - El protocolo completo está en `/srv/homelab/telar-remoto/docs/telar-remoto.md`.
+- **Usuarios (pedido del usuario):** nada de tokens pegados a mano; cada usuario inicia sesión y vincula su Mac.
+  - Flujo de dispositivo al estilo OAuth: `POST /api/devices/start` → se abre `verification_url` con un `user_code` para comparar.
+  - Luego `POST /api/devices/poll` (pending, slow_down, denied, expired u ok). El ok trae `token`, `bridge_url` y `access`, el service token de Cloudflare Access de ese dispositivo.
+  - `/bridge` y `revoke` siguen detrás de Access. Solo start y poll quedan fuera, con códigos de 256 bits y un límite de pedidos por IP.
+  - Al revocar: `error` fatal y cierre 4003. Con 4000–4003 no se reintenta; con 401 o 403 en el handshake, tampoco.
+- **HTTP con `/usr/bin/curl`,** como el actualizador. Los secretos (Bearer y service token) van a curl por la fd 3 con `-K`, nunca en los argumentos, que cualquiera ve con `ps`.
+- **WebSocket:** `tungstenite` con `native-tls`, que en macOS usa el TLS del sistema (Security.framework). No se compila una librería criptográfica dentro de Telar y se usan los certificados del Mac.
+- **Rendimiento:**
+  - El puente es otro proceso y duerme en `poll()` sobre el socket y una tubería que despierta Telar. Medido en reposo: 0 % de CPU, 7 MB y 0 s de CPU acumulados.
+  - En la app, sin suscriptor, `remote_tick` sale en el acto.
+  - Con suscriptor: el estado se manda solo si cambió (como mucho 4 veces por segundo, revisado cada 1 s); las pantallas, solo de los tabs que alguien mira y solo cuando muestran algo nuevo (hasta 10 por segundo).
+- **Tamaño:** el tab que alguien mira toma el tamaño más chico de quienes lo miran, como tmux (`Terminal::set_remote_size`). `local_size` guarda el de la ventana para volver a él.
+- **Errores encontrados al probarlo:**
+  - El socket de la suscripción heredaba el límite de lectura de 2 s de `ipc::handle`, y Telar daba al bridge por ido a los 2 s.
+  - `security -w` devuelve en hexadecimal lo que se guardó con `-X` si tiene comillas: `kc_get` decodifica el hexadecimal de un JSON.
+
+## Pegar imágenes por SSH (2026-11-20)
+
+- Por SSH, Claude Code corre en el servidor. El pegado vacío le hace leer el portapapeles de allá, donde no está la imagen.
+- `sshpaste`: con `ssh` en primer plano en el tab, Telar lee la imagen del portapapeles y la codifica a PNG en un hilo, para no trabar la ventana. Luego la sube con otro `ssh` a la misma máquina y pega la ruta remota, que el Claude de allá adjunta. Lo mismo pasa con un archivo soltado en la ventana.
+- Del `argv` del ssh del tab (`KERN_PROCARGS2`) se reusan sus opciones y su destino:
+  - sin el comando remoto;
+  - sin `-t`, `-N` ni `-f`;
+  - sin reenvíos (`-L`, `-R`, `-D`, `-W`), que chocarían con los de la conexión abierta.
+- Se agregan `BatchMode=yes` (nunca pregunta) y `ConnectTimeout=10`. Con una llave o un ControlMaster entra sin preguntar; si el servidor pide contraseña, una notificación lo explica.
+- En el servidor: `umask 077; mkdir -p /tmp/telar-pegado && cat > <archivo>`. El archivo queda solo para el usuario y con un nombre único. Máximo 50 MB.
+- No funciona con mosh, ni si el `ssh` corre dentro de otro programa (tmux local, por ejemplo): avisa.
+
+## Estado de Claude por SSH (2026-11-20)
+
+- Se descartó deducirlo del título (el ◐ que gira) y de la pantalla: era aproximado, y en tmux el título no pasa. El usuario eligió hooks en el servidor; los construye la sesión «mods» en claude-mods.
+- **Canal:** el hook remoto escribe en su tty `ESC ] 7768 ; telar-hook ; <base64 del JSON> BEL` (o ST). Viaja por la conexión SSH hasta el PTY del tab, así que se sabe de qué tab viene sin configurar nada. En tmux va envuelto en paso directo (`ESC P tmux; … ESC \`, con `allow-passthrough on`). Solo se emite si la sesión es por SSH.
+- **Recepción:** alacritty_terminal descarta los OSC que no conoce, y no hay forma de engancharse a su parser. `inband::ScanPty` envuelve el `Pty` (implementa `EventedReadWrite`, `EventedPty` y `OnResize`, y delega todo) y lee con su propio `ScanReader`: otro descriptor del mismo PTY, sin bloqueo igual que el original. Los bytes pasan intactos al emulador.
+- **Costo:** el escáner solo salta de ESC en ESC; sin ESC no hace nada más por byte. Payload de 8 KB como máximo.
+- **Seguridad:** cualquier programa (o un `cat` de un archivo) puede escribir esa secuencia. Por eso solo se acepta con ssh, mosh o autossh en primer plano en el tab, verificado en el momento. Del JSON solo se usan `hook_event_name`, `notification_type` y `message`: nunca `session_id` (se usaría para retomar una sesión local) ni `cwd` (se usaría para adoptar carpetas). Lo peor que se puede falsear es el punto de estado y una notificación.
+- `polling` se agregó como dependencia directa en la misma versión que usa alacritty_terminal: el binario no suma código.

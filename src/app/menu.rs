@@ -92,6 +92,33 @@ impl State {
                 }
             }
             (Action::SaveAccount, _) => self.account_task(|| cuentas::save_current().map(|a| format!("Cuenta guardada: {}", a.email))),
+            (Action::WebLogin, _) => self.remote_login_start(),
+            (Action::WebCancel, _) => self.remote_login_cancel(),
+            (Action::WebOpen, _) => {
+                let url = self.remote_session.as_ref().map_or_else(|| self.remote_server(), |s| s.server.clone());
+                let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+            }
+            (Action::WebOpenLogin, _) => {
+                if let Some(url) = self.remote_login.as_ref().map(|l| l.url.clone()).filter(|u| !u.is_empty()) {
+                    let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+                }
+            }
+            (Action::WebToggle, _) => {
+                self.config.remote = !self.config.remote;
+                self.config.save();
+                self.bridge_started = None;
+                if !self.config.remote {
+                    self.remote_release_all();
+                    self.remote_viewers.clear();
+                }
+                self.sync_bridge();
+            }
+            (Action::WebLogout, _) => self.remote_logout(),
+            (Action::WebShowTab(id), _) => {
+                if self.terms.contains_key(&id) {
+                    self.show_tab(id);
+                }
+            }
             (Action::LoginAccount, _) => {
                 // Antes de iniciar sesión con otra, se guarda la actual (si no, se perdería).
                 if self.account_key.is_some() {

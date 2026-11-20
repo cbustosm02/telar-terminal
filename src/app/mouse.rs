@@ -127,6 +127,7 @@ impl State {
                 | Hit::TabBrowser(_)
                 | Hit::NewTab
                 | Hit::Awake
+                | Hit::Web
                 | Hit::Update
                 | Hit::Settings
                 | Hit::Agents
@@ -343,6 +344,7 @@ impl State {
                 self.new_tab();
             }
             (Hit::Awake, MouseButton::Left) => self.cycle_awake(),
+            (Hit::Web, MouseButton::Left) => self.open_web_menu(),
             (Hit::Update, MouseButton::Left) => self.update_action(),
             (Hit::Settings, MouseButton::Left) => self.toggle_settings(),
             (Hit::Agents, MouseButton::Left) => self.toggle_inbox(),

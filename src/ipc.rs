@@ -56,6 +56,11 @@ fn handle(stream: UnixStream, proxy: EventLoopProxy<UserEvent>) {
         Ok(v) => v,
         Err(e) => return reply(&stream, json!({ "ok": false, "error": e.to_string() })),
     };
+    // `telar bridge` (Telar remoto): la conexión queda abierta y Telar le empuja líneas
+    // (estado y pantallas) hasta que alguno de los dos la cierre.
+    if body["cmd"] == "remote-subscribe" {
+        return stream_lines(stream, proxy);
+    }
     let (tx, rx) = mpsc::channel();
     if proxy.send_event(UserEvent::Ipc(Request { body, reply: tx })).is_err() {
         return;
@@ -64,6 +69,40 @@ fn handle(stream: UnixStream, proxy: EventLoopProxy<UserEvent>) {
         .recv_timeout(Duration::from_secs(2))
         .unwrap_or_else(|_| json!({ "ok": false, "error": "la app no respondió" }));
     reply(&stream, response);
+}
+
+fn stream_lines(mut stream: UnixStream, proxy: EventLoopProxy<UserEvent>) {
+    let (tx, rx) = mpsc::channel::<String>();
+    if proxy.send_event(UserEvent::RemoteSubscribe(tx)).is_err() {
+        return;
+    }
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    // Sin el límite de lectura de `handle`: esta conexión vive mientras viva el bridge.
+    let _ = stream.set_read_timeout(None);
+    // El bridge no escribe nada más: si su lado se cierra, la lectura termina.
+    let open = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    if let Ok(mut reader) = stream.try_clone() {
+        let open = open.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 256];
+            while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
+            open.store(false, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+    loop {
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(line) => {
+                if writeln!(stream, "{line}").is_err() {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if open.load(std::sync::atomic::Ordering::Relaxed) => {}
+            Err(_) => break,
+        }
+    }
+    // Sin `rx`, Telar ve que este suscriptor se fue y devuelve los tabs a su tamaño.
+    drop(rx);
+    let _ = proxy.send_event(UserEvent::RemoteGone);
 }
 
 fn reply(mut stream: &UnixStream, value: Value) {

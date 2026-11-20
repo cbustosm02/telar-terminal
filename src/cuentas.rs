@@ -98,17 +98,28 @@ pub fn key_of(email: &str, org_uuid: Option<&str>) -> String {
 
 // ── Llavero ─────────────────────────────────────────────────────────────────────
 
-fn kc_get(service: &str, account: &str) -> Result<Option<String>, String> {
+pub(crate) fn kc_get(service: &str, account: &str) -> Result<Option<String>, String> {
     let out = Command::new(SECURITY)
         .args(["find-generic-password", "-a", account, "-w", "-s", service])
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("no se pudo usar el Llavero: {e}"))?;
     match out.status.code() {
-        Some(0) => Ok(Some(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())),
+        Some(0) => Ok(Some(unhex_json(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n')))),
         Some(NOT_FOUND) => Ok(None),
         _ => Err(format!("el Llavero no respondió: {}", String::from_utf8_lossy(&out.stderr).trim())),
     }
+}
+
+/// `security -w` muestra en hexadecimal un valor que tiene comillas (como un JSON): si lo
+/// que vino es hexadecimal de un JSON, se decodifica.
+fn unhex_json(text: &str) -> String {
+    let looks_hex = text.len() % 2 == 0 && text.starts_with("7b") && text.bytes().all(|b| b.is_ascii_hexdigit());
+    if !looks_hex {
+        return text.to_string();
+    }
+    let bytes: Option<Vec<u8>> = (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok()).collect();
+    bytes.and_then(|b| String::from_utf8(b).ok()).unwrap_or_else(|| text.to_string())
 }
 
 /// Comillas para una línea de `security -i` (la vuelve a partir como una shell).
@@ -116,7 +127,7 @@ fn quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn kc_set(service: &str, account: &str, value: &str) -> Result<(), String> {
+pub(crate) fn kc_set(service: &str, account: &str, value: &str) -> Result<(), String> {
     let hex: String = value.bytes().map(|b| format!("{b:02x}")).collect();
     let line = format!("add-generic-password -U -a {} -s {} -X {hex}\n", quote(account), quote(service));
     // `security -i` lee líneas de hasta 4096 bytes; una más larga se cortaría y dañaría el
@@ -146,7 +157,7 @@ fn kc_set(service: &str, account: &str, value: &str) -> Result<(), String> {
     }
 }
 
-fn kc_delete(service: &str, account: &str) -> Result<(), String> {
+pub(crate) fn kc_delete(service: &str, account: &str) -> Result<(), String> {
     let out = Command::new(SECURITY)
         .args(["delete-generic-password", "-a", account, "-s", service])
         .output()
@@ -487,6 +498,13 @@ mod tests {
     fn plan_de_la_credencial() {
         assert_eq!(plan_of(r#"{"claudeAiOauth":{"subscriptionType":"max"}}"#).as_deref(), Some("Max"));
         assert_eq!(plan_of("no es json"), None);
+    }
+
+    #[test]
+    fn json_en_hexadecimal() {
+        assert_eq!(unhex_json("7b2261223a317d"), r#"{"a":1}"#);
+        assert_eq!(unhex_json(r#"{"a":1}"#), r#"{"a":1}"#);
+        assert_eq!(unhex_json("abc123"), "abc123");
     }
 
     #[test]

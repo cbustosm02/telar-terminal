@@ -70,6 +70,7 @@ Cada tab sabe en qué está su sesión de Claude Code y lo muestra con un punto 
 | sin punto | shell normal, o sesión esperando tu prompt |
 
 - **Tus mensajes** en la conversación se distinguen de las respuestas. Claude Code los pinta con un gris fijo que casi no se ve en muchos temas, así que en los tabs con Claude Telar lo cambia por un tono del acento del tema y les pone una barrita a la izquierda.
+- **Claude por SSH:** con los hooks remotos de claude-mods instalados en el servidor, un Claude que corre allá le manda su estado a Telar por la misma conexión SSH. Son secuencias de escape invisibles (`ESC ] 7768 ; telar-hook ; <base64> BEL`), y el tab muestra trabajando, te necesita o terminó como si fuera local. Con tmux en el servidor hace falta `set -g allow-passthrough on`. Solo se acepta en tabs con ssh en primer plano, y la sesión y la carpeta del aviso no se usan para nada local.
 - **Navegador del agente:** si el agente abre un navegador con una herramienta que avisa a Telar (p. ej. el Chrome de pruebas de pirani-cli), el tab muestra un globo a la izquierda de la ✕. Late mientras el agente lo usa y se apaga (gris) tras 2 min sin uso. Al pasar el puntero muestra de quién es y su estado; con un clic lo trae al frente, y si corría sin ventana, lo reabre con ventana. Si el navegador se cierra, el globo desaparece. Ver «Navegadores de los agentes» más abajo.
 - **⌘J** salta al siguiente tab que te necesita (o, si no hay, al siguiente que terminó).
 - **Bandeja de agentes** (⌘⇧J, o el ícono de bandeja junto a «GRUPOS», que lleva un punto si alguien te necesita): todas las sesiones de Claude de todos los grupos, de la más urgente a la menos, con su estado, desde hace cuánto, y la pregunta pendiente o el último paso (la última línea con ⏺). Un permiso se responde desde ahí con los botones de las opciones que muestra Claude (o con las teclas 1–9), sin cambiar de tab; «Ir al tab» lo abre.
@@ -187,6 +188,7 @@ Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina so
 | ⌘⇧R o doble clic | Renombrar grupo (Enter guarda, Esc cancela) |
 | ⌘C / ⌘V | Copiar selección / pegar (con bracketed paste). Con una imagen en el portapapeles, ⌘V (o ⌃V) la adjunta en Claude Code |
 | Arrastrar archivos a la ventana | Escribe su ruta escapada; Claude Code adjunta las imágenes |
+| ⌘V con imagen o arrastrar, en un tab con `ssh` | Sube el archivo al servidor (`/tmp/telar-pegado/`, con las mismas opciones de esa conexión, sin pedir nada) y pega su ruta remota: el Claude de allá la adjunta. Necesita una llave SSH o ControlMaster |
 | ⌘+ / ⌘- / ⌘0 | Tamaño de fuente |
 | ⇧Enter, ⌥Enter | Salto de línea en Claude Code (envía ESC CR) |
 | ⌥← / ⌥→ / ⌥⌫ | Moverse o borrar por palabra |
@@ -225,6 +227,8 @@ Mouse:
 | `src/settings.rs` / `src/config.rs` | Modal de configuración y `~/.config/telar/config.json` |
 | `src/claude_usage.rs` / `src/cuentas.rs` | Uso de Claude (API de uso) y cuentas guardadas (Llavero) |
 | `src/confirm.rs` | Diálogo de confirmación |
+| `src/remote.rs` / `src/bridge.rs` | Telar web: estado y pantallas para el celular, toma de tamaño, inicio de sesión del dispositivo y el puente saliente |
+| `src/inband.rs` | Hooks de un Claude remoto que llegan por la terminal (envuelve el PTY y reconoce su secuencia) |
 | `src/browsers.rs` | Navegadores que abrió el agente de cada tab: protocolo, vida y el ícono que los trae al frente |
 | `src/update.rs` | Actualizaciones desde los releases de GitHub |
 | `src/signing.rs` | Firma local estable de Telar.app, para que los permisos de macOS sobrevivan a las actualizaciones |
@@ -246,6 +250,36 @@ Este comando:
 3. guarda el frame leído desde la GPU en un BMP y cierra la app.
 
 No necesita el permiso de grabación de pantalla. Otras variables del modo captura: `TELAR_SNAPSHOT_SETTINGS=general|apariencia|icono|rendimiento|inactividad`, `TELAR_SNAPSHOT_MENU=tab|group|cuentas`, `TELAR_SNAPSHOT_INBOX=1` (la bandeja con estados de prueba), `TELAR_SNAPSHOT_UPDATE=X.Y.Z`, `TELAR_SNAPSHOT_DELETE=n`, `TELAR_SNAPSHOT_HOVER=x,y`.
+
+### Telar web (Telar remoto)
+
+Ver y manejar Telar desde el celular o desde otro computador, con tu cuenta de Telar web (por defecto `https://telar.cesarbustos.dev`).
+
+- **Iniciar sesión:** en la zona **Telar web** del pie de la barra lateral, o con `telar remote login [--server URL]`.
+  - Se abre la página de Telar web: inicias sesión ahí y autorizas este Mac.
+  - Antes de autorizar, compara el código `XXXX-XXXX` que muestra Telar con el de la página: así confirmas que estás aprobando tu propio Mac.
+  - La sesión queda en el Llavero, servicio «Telar remoto». Cada usuario vincula sus propios Macs.
+- **La zona Telar web** muestra:
+  - sin sesión;
+  - el código mientras esperas la autorización;
+  - tu correo;
+  - **«N dispositivos mirando»** en verde cuando alguien tiene Telar web abierto.
+  Su menú lista los dispositivos que miran (con un clic vas al tab que miran), abre Telar web, conecta o desconecta este Mac y cierra la sesión. El tab que se mira desde otro dispositivo lleva un ícono de teléfono.
+- **Cómo se conecta:**
+  - `telar bridge` es un proceso aparte que lanza la app y que hace solo conexiones **salientes** (WebSocket con TLS del sistema), con ping cada 20 s y reconexión con espera creciente.
+  - El Mac no acepta conexiones.
+  - En reposo, el puente duerme en `poll()`: 0 % de CPU y unos 7 MB.
+  - Sin la página abierta, Telar no calcula nada.
+- **También se puede suspender y reanudar** tabs y grupos, **cerrar tabs** y **eliminar grupos**: la web pide confirmación, y suspender un tab con Claude trabajando pide una confirmación extra. Una imagen pegada en la web (o una foto del iPhone, en HEIC, que se pasa a JPEG) llega al tab como su ruta y Claude la adjunta; por SSH, se sube primero al servidor.
+- **Desde la web se pueden crear tabs** (terminal o agente de Claude, en la carpeta del grupo) **y grupos nuevos.** No se ejecutan comandos arbitrarios, y no le quita el foco a quien esté en el Mac.
+- **Mientras alguien mira un tab,** ese tab toma el tamaño de su pantalla, para que Claude se dibuje bien en el celular. Al soltarlo, o si se corta, vuelve al tamaño de la ventana.
+- **Comandos:**
+  - `telar remote status`;
+  - `telar remote on|off`: conectar o desconectar este Mac sin cerrar la sesión;
+  - `telar remote logout`.
+- **Para probar sin servidor:**
+  - `cargo run --example relevo_prueba` levanta un relevo local con login de prueba en http://127.0.0.1:8788;
+  - `cargo run --example remote_probe -- <tab> "<texto>"` hace de navegador.
 
 ### Navegadores de los agentes
 

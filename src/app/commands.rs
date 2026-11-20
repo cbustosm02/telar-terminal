@@ -9,10 +9,17 @@ impl State {
                 if let Some(tab) = body["tab"].as_u64() {
                     self.on_hook(tab, &body["payload"]);
                 }
+                self.remote.state_dirty = true;
                 json!({ "ok": true })
             }
             Some("tabs") => self.tabs_json(),
             Some("browser") => self.ipc_browser(body),
+            Some(cmd @ ("remote-attach" | "remote-release" | "remote-answer" | "remote-new" | "remote-close" | "remote-delete-group" | "remote-paste-file")) => {
+                self.ipc_remote(cmd, body)
+            }
+            Some(cmd @ ("remote-status" | "remote-control" | "remote-info" | "remote-viewers" | "remote-login" | "remote-logout")) => {
+                self.ipc_remote_admin(cmd, body)
+            }
             Some("status") => match self.resolve_tab(&body["tab"]) {
                 Ok(id) => json!({ "ok": true, "tab": self.tab_json(id) }),
                 Err(e) => json!({ "ok": false, "error": e }),
@@ -173,7 +180,7 @@ impl State {
                 Ok(id) => {
                     let busy = self.terms[&id].agent.state;
                     if suspend && !force && matches!(busy, AgentState::Working | AgentState::NeedsYou) {
-                        return json!({ "ok": false, "error": format!("Claude está {} en el tab {id}; usa --force para suspenderlo igual", if busy == AgentState::Working { "trabajando" } else { "esperando tu respuesta" }) });
+                        return json!({ "ok": false, "code": "busy", "error": format!("Claude está {} en el tab {id}; usa --force para suspenderlo igual", if busy == AgentState::Working { "trabajando" } else { "esperando tu respuesta" }) });
                     }
                     vec![id]
                 }

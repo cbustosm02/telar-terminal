@@ -34,6 +34,10 @@ Sin comando abre la terminal. Comandos (dentro de Telar):
                                      avisa que el agente de este tab abrió, usó o cerró un
                                      navegador; el tab muestra un ícono que lo trae al frente
                                      (corre el comando, si lo hay, y activa la app del pid)
+  remote login [--server URL]        Telar web: abre el navegador para iniciar sesión y
+                                     vincular este Mac a tu cuenta
+  remote logout|on|off|status        cierra la sesión, conecta o desconecta el puente, o
+                                     muestra quién está conectado y quién mira
   update [--check]                   busca la última versión y la instala (--check: solo busca)
   version                            versión instalada
   wait <tab> [--state S] [--timeout SEG]
@@ -227,6 +231,7 @@ pub fn run(cmd: &str, raw: &[String]) -> Result<String, String> {
             let now = if v["active"] == json!(true) { "activo ahora" } else { "inactivo ahora" };
             Ok(format!("Despierto: {what} ({mode}); caffeinate {now}"))
         }
+        "remote" => remote(raw),
         "browser" => {
             // Lo usan las herramientas que abren un navegador para el agente (ver `browsers`).
             let a = Args::parse(raw, &["--name", "--pid", "--tab", "--app", "--label"]);
@@ -398,4 +403,52 @@ mod tests {
     fn comando_desconocido() {
         assert!(run("nada", &[]).unwrap_err().starts_with("Comando desconocido"));
     }
+}
+
+/// `telar remote …`: la sesión de Telar web y el puente de este Mac.
+fn remote(raw: &[String]) -> Result<String, String> {
+    let a = Args::parse(raw, &["--server"]);
+    let control = |on: bool| call(json!({ "cmd": "remote-control", "enabled": on }));
+    match a.positional.first().map(String::as_str).unwrap_or("status") {
+        "login" => {
+            let v = call(json!({ "cmd": "remote-login", "server": a.value(&["--server"]) }))?;
+            Ok(format!("Se abre {} en el navegador: inicia sesión y autoriza este Mac. Telar se conecta solo al terminar.", v["server"].as_str().unwrap_or("Telar web")))
+        }
+        "logout" => {
+            call(json!({ "cmd": "remote-logout" }))?;
+            Ok("Sesión de Telar web cerrada en este Mac.".into())
+        }
+        "on" => {
+            let v = control(true)?;
+            Ok(format!("Telar web: conectar al abrir ({})", describe(&v)))
+        }
+        "off" => {
+            control(false)?;
+            Ok("Telar web desconectado (la sesión sigue guardada; `telar remote on` vuelve a conectar).".into())
+        }
+        "status" => {
+            let v = call(json!({ "cmd": "remote-info" }))?;
+            let who = v["who"].as_str().map_or("sin sesión".to_string(), |w| format!("sesión de {w}"));
+            Ok(format!("Telar web ({}): {who} · {}", v["server"].as_str().unwrap_or_default(), describe(&v)))
+        }
+        other => Err(format!("remote {other}: usa login, logout, on, off o status")),
+    }
+}
+
+fn describe(v: &Value) -> String {
+    if let Some(code) = v["login"]["user_code"].as_str() {
+        return format!("esperando que autorices el código {code} en el navegador");
+    }
+    let status = match v["status"].as_str().unwrap_or_default() {
+        "connected" => "conectado",
+        "connecting" => "conectando",
+        "login" => "iniciando sesión",
+        "revoked" => "sesión cerrada desde la web",
+        "error" => "con error",
+        _ => "desconectado",
+    };
+    let detail = v["detail"].as_str().filter(|d| !d.is_empty()).map(|d| format!(": {d}")).unwrap_or_default();
+    let viewers = v["viewers"].as_array().map_or(0, Vec::len);
+    let watching = if viewers > 0 { format!(" · {viewers} dispositivo(s) mirando") } else { String::new() };
+    format!("{status}{detail}{watching}")
 }

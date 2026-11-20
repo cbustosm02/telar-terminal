@@ -3,6 +3,7 @@
 mod app;
 mod appicon;
 mod awake;
+mod bridge;
 mod browsers;
 mod cli;
 mod claude_usage;
@@ -13,6 +14,7 @@ mod font;
 mod fontlist;
 mod hooks;
 mod idle;
+mod inband;
 mod inbox;
 mod input;
 mod kit;
@@ -22,10 +24,12 @@ mod notify;
 mod logo;
 mod ipc;
 mod proc;
+mod remote;
 mod renderer;
 mod screen;
 mod session;
 mod signing;
+mod sshpaste;
 mod stats;
 mod statsview;
 mod settings;
@@ -100,6 +104,16 @@ pub enum UserEvent {
     UsageAll(Vec<(String, Result<claude_usage::Usage, String>)>),
     /// Terminó una operación de cuentas: mensaje para avisar, o el error.
     AccountDone(Result<String, String>),
+    /// `telar bridge` se suscribió (ver `remote`).
+    RemoteSubscribe(std::sync::mpsc::Sender<String>),
+    /// Se cerró la conexión de un `telar bridge`.
+    RemoteGone,
+    /// Avance del inicio de sesión en Telar web (lo hace un hilo, ver `remote_login`).
+    RemoteLogin(remote::LoginEvent),
+    /// Terminó de subirse por SSH lo pegado o soltado en un tab: su ruta remota, o el error.
+    SshUploaded(u64, Result<String, String>),
+    /// Hook de un Claude remoto que llegó por la terminal del tab (ver `inband`).
+    InbandHook(u64, serde_json::Value),
     /// Terminó el comando para mostrar el navegador `name` del tab: hay que activarlo.
     BrowserShown(u64, String),
 }
@@ -120,6 +134,11 @@ fn main() {
         Some("uninstall" | "uninstall-hooks") => return finish(hooks::uninstall()),
         Some("-h" | "--help" | "help") => return println!("{}", cli::USAGE),
         Some("-V" | "--version" | "version") => return println!("telar {}", update::VERSION),
+        // Interno: lo lanza la app cuando Telar remoto está activo (ver `bridge`).
+        Some("bridge") => {
+            env_logger::init();
+            return finish(bridge::run());
+        }
         // Interno (actualizador): el binario nuevo arma y firma su paquete.
         Some("__preparar-paquete") => {
             if let Some(app) = args.get(1) {
@@ -246,6 +265,16 @@ struct State {
     stats_detail: Option<statsview::Detail>,
     /// Bandeja de agentes abierta (⌘⇧J).
     inbox: Option<inbox::Inbox>,
+    /// Telar remoto: suscripción de `telar bridge` y los tabs que se miran desde el celular.
+    remote: remote::Hub,
+    /// Proceso `telar bridge` (si Telar remoto está activo), cuándo se lanzó y su estado.
+    bridge: Option<std::process::Child>,
+    bridge_started: Option<Instant>,
+    bridge_status: (String, String),
+    /// Sesión de Telar web (quién y en qué servidor), inicio de sesión en curso y quién mira.
+    remote_session: Option<remote::SessionInfo>,
+    remote_login: Option<remote::LoginUi>,
+    remote_viewers: Vec<remote::Viewer>,
     /// Diálogo de confirmación abierto (eliminar un grupo).
     confirm: Option<confirm::Confirm>,
     /// Enlace bajo el puntero que se abriría con un clic (su celda, para resaltarlo) y el
@@ -353,6 +382,13 @@ impl ApplicationHandler<UserEvent> for App {
             stats_on: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             stats_detail: None,
             inbox: None,
+            remote: remote::Hub::default(),
+            bridge: None,
+            bridge_started: None,
+            bridge_status: ("off".into(), String::new()),
+            remote_session: None,
+            remote_login: None,
+            remote_viewers: Vec::new(),
             confirm: None,
             link_cell: None,
             link_press: None,
@@ -462,6 +498,9 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if state.snapshot.is_none() {
             update::cleanup_leftovers();
+            // Telar remoto: quién está vinculado y, si está activo, el puente.
+            state.load_remote_session();
+            state.sync_bridge();
             // Una versión nueva puede escuchar eventos de Claude Code que la anterior no registraba.
             match hooks::upgrade_hooks() {
                 Ok(added) if !added.is_empty() => log::info!("hooks de Claude agregados: {}", added.join(", ")),
@@ -499,6 +538,29 @@ impl ApplicationHandler<UserEvent> for App {
                     st.update_quiet = false;
                 }
                 st.window.request_redraw();
+                return;
+            }
+            UserEvent::RemoteSubscribe(tx) => {
+                st.remote_subscribe(tx);
+                return;
+            }
+            UserEvent::InbandHook(tab, payload) => {
+                st.on_inband_hook(tab, payload);
+                return;
+            }
+            UserEvent::SshUploaded(tab, result) => {
+                st.ssh_uploaded(tab, result);
+                return;
+            }
+            UserEvent::RemoteLogin(ev) => {
+                st.on_remote_login(ev);
+                return;
+            }
+            UserEvent::RemoteGone => {
+                if !st.remote.prune() {
+                    st.remote_release_all();
+                    log::info!("telar remoto: sin bridge");
+                }
                 return;
             }
             UserEvent::BrowserShown(tab, name) => {
@@ -576,6 +638,7 @@ impl ApplicationHandler<UserEvent> for App {
             if t.agent.state == AgentState::None {
                 t.touch();
             }
+            st.remote_output(id);
         }
         match event {
             TermEvent::Wakeup if visible => st.window.request_redraw(),
@@ -653,6 +716,10 @@ impl ApplicationHandler<UserEvent> for App {
             st.next_save = now + SAVE_TICK;
         }
         let mut wake = Some(st.snapshot.as_ref().map_or(st.next_save, |s| s.at.min(st.next_save)));
+        // Telar remoto: sin bridge suscrito no hace nada.
+        if let Some(at) = st.remote_tick(now) {
+            wake = wake.map(|w| w.min(at));
+        }
         if !st.occluded && (st.terms.values().any(|t| t.agent.state == AgentState::Working) || st.browser_pulsing()) {
             if now >= st.next_tick {
                 st.window.request_redraw();
@@ -679,6 +746,9 @@ impl ApplicationHandler<UserEvent> for App {
         // quedan registradas como abiertas y se retoman al volver a abrir.
         if let Some(st) = self.state.as_mut() {
             st.save_session_final();
+        }
+        if let Some(st) = self.state.as_mut() {
+            st.stop_bridge();
         }
         // Lo que cambió con la app abierta (el ícono elegido) se aplica al paquete al salir.
         update::ensure_bundle_on_exit();
@@ -707,7 +777,11 @@ impl ApplicationHandler<UserEvent> for App {
             // Archivos arrastrados a la ventana: su ruta escapada, como pegada (Claude Code
             // adjunta las imágenes que reconoce así).
             WindowEvent::DroppedFile(path) => {
-                if st.editing.is_none() {
+                // Por SSH, el archivo está en este Mac: se sube y se pega la ruta de allá.
+                if st.editing.is_none() && st.active().is_some_and(Terminal::is_remote) {
+                    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+                    st.ssh_upload(move || std::fs::read(&path).map(|b| (b, ext)).map_err(|e| format!("no se pudo leer el archivo: {e}")));
+                } else if st.editing.is_none() {
                     let text = format!("{} ", input::shell_escape(&path.to_string_lossy()));
                     let bytes = input::paste_bytes(&text, st.active_mode());
                     st.send_input(bytes);
@@ -833,6 +907,10 @@ impl State {
         }
         changed |= self.unstick_working();
         changed |= self.prune_browsers();
+        // Telar remoto: si el bridge se cayó, se relanza (como mucho una vez por minuto).
+        if self.config.remote {
+            self.sync_bridge();
+        }
         if changed {
             self.window.request_redraw();
         }
@@ -859,6 +937,16 @@ impl State {
             palette: &self.palette,
             time: self.started.elapsed().as_secs_f32(),
             awake: (self.awake.mode, self.awake.active()),
+            web: ui::WebView {
+                who: self.remote_session.as_ref().map(|s| s.who.as_str()),
+                status: &self.bridge_status.0,
+                detail: &self.bridge_status.1,
+                user_code: self.remote_login.as_ref().and_then(|l| l.user_code.as_deref()),
+                enabled: self.config.remote,
+                viewers: self.remote_viewers.len(),
+                watching: self.remote_viewers.iter().filter(|v| v.tab.is_some()).count(),
+                device: (self.remote_viewers.len() == 1).then(|| self.remote_viewers[0].device.as_str()),
+            },
             menu: self.menu.as_ref(),
             update: &self.update,
             stats: self.stats.as_ref(),

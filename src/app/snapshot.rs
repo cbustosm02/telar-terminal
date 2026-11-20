@@ -75,6 +75,32 @@ impl State {
             self.ask_delete_group(gi);
         }
         self.snapshot_hover();
+        // TELAR_SNAPSHOT_WEB=login|conectado|mirando: la zona de Telar web en ese estado.
+        if let Ok(mode) = std::env::var("TELAR_SNAPSHOT_WEB") {
+            let who = remote::SessionInfo { who: "cesar@ejemplo.dev".into(), server: "https://telar.ejemplo.dev".into() };
+            match mode.as_str() {
+                "login" => {
+                    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    self.remote_login = Some(remote::LoginUi { user_code: Some("K7QX-M2PD".into()), url: String::new(), cancel });
+                    self.bridge_status = ("login".into(), String::new());
+                }
+                _ => {
+                    self.remote_session = Some(who);
+                    self.config.remote = true;
+                    self.bridge_status = ("connected".into(), String::new());
+                    if mode == "mirando" {
+                        let tab = self.ws.active_term();
+                        self.remote_viewers = vec![remote::Viewer { device: "iPhone · Safari".into(), tab }];
+                        if let Some(t) = tab.and_then(|id| self.terms.get_mut(&id)) {
+                            t.set_remote_size(Some((48, 16)));
+                        }
+                    }
+                }
+            }
+            if std::env::var_os("TELAR_SNAPSHOT_WEB_MENU").is_some() {
+                self.open_web_menu();
+            }
+        }
         // TELAR_SNAPSHOT_SETTINGS=1: captura con la configuración abierta.
         if let Ok(section) = std::env::var("TELAR_SNAPSHOT_SETTINGS") {
             self.toggle_settings();
