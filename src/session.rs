@@ -43,6 +43,48 @@ pub struct Saved {
     pub groups: Vec<SavedGroup>,
     /// Modo de `caffeinate` (`off`, `on`, `auto`).
     pub awake: String,
+    /// Dónde estaba la ventana, para abrirla igual.
+    pub window: Option<WindowFrame>,
+}
+
+/// Posición y tamaño de la ventana en puntos (las coordenadas globales de macOS, iguales en
+/// todas las pantallas aunque tengan distinta escala), y si estaba maximizada o en
+/// pantalla completa.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WindowFrame {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub maximized: bool,
+    pub fullscreen: bool,
+}
+
+impl WindowFrame {
+    fn to_json(self) -> Value {
+        json!({ "x": self.x, "y": self.y, "w": self.w, "h": self.h, "maximized": self.maximized, "fullscreen": self.fullscreen })
+    }
+
+    fn from_json(v: &Value) -> Option<Self> {
+        let n = |k: &str| v[k].as_f64().filter(|x| x.is_finite());
+        let frame = Self {
+            x: n("x")?,
+            y: n("y")?,
+            w: n("w")?,
+            h: n("h")?,
+            maximized: v["maximized"].as_bool().unwrap_or(false),
+            fullscreen: v["fullscreen"].as_bool().unwrap_or(false),
+        };
+        (frame.w >= 100.0 && frame.h >= 100.0).then_some(frame)
+    }
+
+    /// Si se ve en alguna de estas pantallas (rectángulos en puntos): al menos un trozo de
+    /// la barra de título, para poder agarrarla. Si no (se desconectó el monitor), la
+    /// ventana abre donde macOS la ponga.
+    pub fn visible_on(&self, screens: &[(f64, f64, f64, f64)]) -> bool {
+        let (left, right, top) = (self.x, self.x + self.w, self.y);
+        screens.iter().any(|&(sx, sy, sw, sh)| right - 80.0 > sx && left + 80.0 < sx + sw && top >= sy - 1.0 && top + 30.0 <= sy + sh)
+    }
 }
 
 fn path() -> PathBuf {
@@ -60,6 +102,7 @@ impl Saved {
             "version": 1,
             "active": self.active,
             "awake": self.awake,
+            "window": self.window.map(WindowFrame::to_json),
             "groups": self.groups.iter().map(|g| json!({
                 "name": g.name,
                 "dir": g.dir,
@@ -111,8 +154,16 @@ impl Saved {
             active: v["active"].as_u64().unwrap_or(0) as usize,
             groups,
             awake: v["awake"].as_str().unwrap_or("off").to_string(),
+            window: WindowFrame::from_json(&v["window"]),
         })
     }
+}
+
+/// Solo la ventana (se necesita antes de crearla, antes de restaurar los tabs).
+pub fn load_window() -> Option<WindowFrame> {
+    let text = std::fs::read_to_string(path()).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    WindowFrame::from_json(&v["window"])
 }
 
 pub fn load() -> Option<Saved> {
@@ -142,6 +193,7 @@ mod tests {
         Saved {
             active: 1,
             awake: "auto".into(),
+            window: Some(WindowFrame { x: -1440.0, y: 25.0, w: 1200.0, h: 780.0, maximized: false, fullscreen: true }),
             groups: vec![
                 SavedGroup {
                     name: "telar".into(),
@@ -157,6 +209,21 @@ mod tests {
                 SavedGroup { name: "Grupo 2".into(), dir: None, ram_limit_mb: 0, idle_exempt: false, active: 0, tabs: vec![SavedTab { title: None, name: None, cwd: None, claude: None, screen: None, command: None, lazy: false }] },
             ],
         }
+    }
+
+    #[test]
+    fn ventana_visible_o_no() {
+        let main = (0.0, 0.0, 1512.0, 982.0);
+        let left = (-1920.0, -100.0, 1920.0, 1080.0);
+        let f = |x: f64, y: f64| WindowFrame { x, y, w: 1200.0, h: 780.0, ..Default::default() };
+        assert!(f(100.0, 40.0).visible_on(&[main]));
+        // En el monitor de la izquierda: visible si está conectado, si no, no.
+        assert!(f(-1500.0, 0.0).visible_on(&[main, left]));
+        assert!(!f(-1500.0, 0.0).visible_on(&[main]));
+        // La barra de título por encima o por debajo de todas las pantallas: no.
+        assert!(!f(100.0, 2000.0).visible_on(&[main]));
+        // Tamaños absurdos se descartan al leer.
+        assert_eq!(WindowFrame::from_json(&json!({"x":0,"y":0,"w":10,"h":10})), None);
     }
 
     #[test]

@@ -51,7 +51,25 @@ impl State {
                     .collect(),
             })
             .collect();
-        Saved { active: self.ws.active, groups, awake: self.awake.mode.name().to_string() }
+        Saved { active: self.ws.active, groups, awake: self.awake.mode.name().to_string(), window: self.window_frame() }
+    }
+
+    /// Dónde está la ventana ahora, en puntos (ver `WindowFrame`).
+    fn window_frame(&self) -> Option<session::WindowFrame> {
+        if self.snapshot.is_some() {
+            return None;
+        }
+        let scale = self.window.scale_factor();
+        let pos = self.window.outer_position().ok()?.to_logical::<f64>(scale);
+        let size = self.window.inner_size().to_logical::<f64>(scale);
+        Some(session::WindowFrame {
+            x: pos.x.round(),
+            y: pos.y.round(),
+            w: size.width.round(),
+            h: size.height.round(),
+            maximized: self.window.is_maximized(),
+            fullscreen: self.window.fullscreen().is_some(),
+        })
     }
 
     pub(crate) fn save_session(&mut self) {

@@ -430,3 +430,10 @@ Hallazgos del lado de Telar y cómo se resolvieron. El lado web lo atiende homeL
 - Al cerrar Telar solo se guardaba el comando de los tabs suspendidos (`suspended_command`), así que un tab con `ssh` abierto volvía como una shell sin conexión.
 - Ahora, de los tabs abiertos se guarda también el comando en primer plano si es una conexión remota (`proc::is_remote_command`: ssh, mosh o autossh, sin tuberías). Al restaurar se vuelve a ejecutar: el tab visible en el momento y los demás al mostrarse (reanudación perezosa). Otros programas no se relanzan solos.
 - `process` se refresca cada 5 s. Un tab recién restaurado todavía no lo tiene, así que también se mira al guardar. Si no, cerrar Telar enseguida perdía la conexión.
+
+## La ventana abre donde estaba (2026-11-20)
+
+- La ventana se creaba siempre de 1200×780, donde macOS quisiera. Ahora la sesión guarda `window` (posición y tamaño en puntos, maximizada y pantalla completa) cada vez que se guarda la sesión, y al cerrar.
+- **Puntos, no píxeles:** en macOS las coordenadas globales en puntos son las mismas en todas las pantallas aunque tengan distinta escala. Con píxeles, una ventana en un monitor externo de otra escala se correría al reabrir.
+- **Al abrir:** `session::load_window()` se lee antes de crear la ventana. Se restaura solo si su barra de título cae en alguna pantalla conectada (`WindowFrame::visible_on` con `available_monitors`). Si se desconectó el monitor, abre donde macOS la ponga.
+- En el modo captura no se restaura nada (capturas siempre iguales).

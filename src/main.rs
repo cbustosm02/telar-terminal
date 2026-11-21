@@ -358,15 +358,31 @@ impl ApplicationHandler<UserEvent> for App {
         if self.state.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
+        // Donde estaba la ventana al cerrar (si esa pantalla sigue conectada).
+        let screens: Vec<(f64, f64, f64, f64)> = event_loop
+            .available_monitors()
+            .map(|m| {
+                let k = m.scale_factor();
+                let (p, z) = (m.position(), m.size());
+                (p.x as f64 / k, p.y as f64 / k, z.width as f64 / k, z.height as f64 / k)
+            })
+            .collect();
+        let frame = session::load_window().filter(|f| std::env::var_os("TELAR_SNAPSHOT").is_none() && f.visible_on(&screens));
+        let mut attrs = Window::default_attributes()
             .with_title("Telar")
-            .with_inner_size(LogicalSize::new(1200.0, 780.0))
+            .with_inner_size(frame.map_or(LogicalSize::new(1200.0, 780.0), |f| LogicalSize::new(f.w, f.h)))
             .with_min_inner_size(LogicalSize::new(520.0, 300.0))
             .with_titlebar_transparent(true)
             .with_fullsize_content_view(true)
             .with_title_hidden(true)
             // Modo captura: la ventana de prueba no le quita el foco a lo que estés usando.
             .with_active(std::env::var_os("TELAR_SNAPSHOT").is_none());
+        if let Some(f) = frame {
+            attrs = attrs.with_position(winit::dpi::LogicalPosition::new(f.x, f.y)).with_maximized(f.maximized);
+            if f.fullscreen {
+                attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            }
+        }
         let window = Arc::new(event_loop.create_window(attrs).expect("ventana"));
         window.set_ime_allowed(true);
         appicon::set_window_movable(&window, false);

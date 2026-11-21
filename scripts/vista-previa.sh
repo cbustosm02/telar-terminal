@@ -32,6 +32,11 @@ PLIST
 # Con la firma local estable (la misma de Telar.app; se crea si falta), los permisos de
 # macOS de la vista previa sobreviven a cada recompilación.
 "$APP/Contents/MacOS/telar" __firmar "$APP" || echo "Aviso: la vista previa quedó firmada ad hoc"
+# Cerrarla como con ⌘Q (guarda su sesión y dónde estaba la ventana); si no responde, a la fuerza.
+if pgrep -f "target/vista-previa/Telar" >/dev/null; then
+  osascript -e 'tell application "Telar (vista previa)" to quit' >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "target/vista-previa/Telar" >/dev/null || break; sleep 0.3; done
+fi
 pkill -f "target/vista-previa/Telar" 2>/dev/null || true
 pkill -f "target/release/telar$" 2>/dev/null || true
 # Con `open` (no como hijo de esta shell), macOS la trata como app propia: los permisos
