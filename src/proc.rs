@@ -175,6 +175,14 @@ pub fn shell_of(pgrp: i32) -> Option<i32> {
     top_level(pgrp).0.filter(|s| name(*s).is_some_and(|n| is_shell(&n)))
 }
 
+/// Un comando de conexión remota (`ssh …`, `mosh …`, `autossh …`): el único que se
+/// vuelve a abrir solo al reiniciar Telar.
+pub fn is_remote_command(cmd: &str) -> bool {
+    let first = cmd.split_whitespace().next().unwrap_or_default();
+    let name = first.rsplit('/').next().unwrap_or(first);
+    matches!(name, "ssh" | "mosh" | "autossh") && !cmd.contains('|')
+}
+
 /// Lo que corre en primer plano en una terminal cuyo grupo de procesos en primer plano
 /// es `pgrp`, para volver a ejecutarlo: `None` si es la shell o un pipeline incompleto.
 /// Un pipeline entero (`tail -f log | grep x`) se vuelve a armar con sus partes.
@@ -222,6 +230,15 @@ mod tests {
         assert!(!is_claude_shell(&args(&["/usr/local/bin/node", "/Users/x/.claude/mcp/proxy.mjs"])));
         assert!(!is_claude_shell(&args(&["/bin/sh", "-c", "telar hook"])));
         assert!(!is_claude_shell(&args(&["-zsh"])));
+    }
+
+    #[test]
+    fn comandos_remotos() {
+        assert!(is_remote_command("ssh homelab"));
+        assert!(is_remote_command("/usr/bin/ssh -p 2222 yo@srv"));
+        assert!(is_remote_command("mosh srv"));
+        assert!(!is_remote_command("npm run dev"));
+        assert!(!is_remote_command("ssh srv | tee log"));
     }
 
     #[test]

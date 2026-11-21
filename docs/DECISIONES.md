@@ -424,3 +424,9 @@ Hallazgos del lado de Telar y cómo se resolvieron. El lado web lo atiende homeL
   - `bridge.log` rota al pasar de 1 MB.
 - **No aplicado:** pasar el Llavero a la API nativa (`security-framework`). Los ítems existentes los creó `/usr/bin/security`, y leerlos desde Telar con la API haría que macOS pidiera permiso. La sesión pesa unos 2 KB, lejos del límite de 4 KB que obligaba a pasar el secreto por argumentos.
 - **Mensaje nuevo:** `{"type":"paste","tab","data"}`. Texto de varias líneas que Telar pega con `paste_bytes` (bracketed paste si el programa lo pidió, sin ESC).
+
+## Reabrir las conexiones SSH al reiniciar (2026-11-20)
+
+- Al cerrar Telar solo se guardaba el comando de los tabs suspendidos (`suspended_command`), así que un tab con `ssh` abierto volvía como una shell sin conexión.
+- Ahora, de los tabs abiertos se guarda también el comando en primer plano si es una conexión remota (`proc::is_remote_command`: ssh, mosh o autossh, sin tuberías). Al restaurar se vuelve a ejecutar: el tab visible en el momento y los demás al mostrarse (reanudación perezosa). Otros programas no se relanzan solos.
+- `process` se refresca cada 5 s. Un tab recién restaurado todavía no lo tiene, así que también se mira al guardar. Si no, cerrar Telar enseguida perdía la conexión.

@@ -181,7 +181,8 @@ fn epoch_secs(ago: Duration) -> u64 {
 }
 
 /// Grupos y tabs para el celular.
-pub fn state(ws: &Workspace, terms: &HashMap<u64, Terminal>) -> Value {
+/// `view_only`: el Mac está en «Solo ver desde la web» (la web oculta los controles).
+pub fn state(ws: &Workspace, terms: &HashMap<u64, Terminal>, view_only: bool) -> Value {
     let entries: HashMap<u64, inbox::Entry> = inbox::entries(ws, terms).into_iter().map(|e| (e.tab, e)).collect();
     let groups: Vec<Value> = ws
         .groups
@@ -223,7 +224,7 @@ pub fn state(ws: &Workspace, terms: &HashMap<u64, Terminal>) -> Value {
             json!({ "name": g.name, "dir": g.dir, "tabs": tabs })
         })
         .collect();
-    json!({ "type": "state", "groups": groups })
+    json!({ "type": "state", "view_only": view_only, "groups": groups })
 }
 
 /// Pantalla visible de un tab, con el cursor donde está.

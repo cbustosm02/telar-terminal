@@ -36,7 +36,16 @@ impl State {
                         } else {
                             t.cwd()
                         };
-                        let command = t.frozen.as_ref().and_then(|f| f.command.clone());
+                        // Suspendido: lo que corría al suspenderlo. Abierto con una conexión remota
+                        // (ssh, mosh) en primer plano: esa conexión, para volver a abrirla al
+                        // reiniciar Telar (otros programas no se relanzan solos).
+                        let command = match &t.frozen {
+                            Some(f) => f.command.clone(),
+                            // `process` se refresca cada 5 s: un tab recién abierto todavía no
+                            // lo tiene, y se mira igual.
+                            None if t.is_remote() || t.process.is_none() => t.foreground_command().filter(|c| proc::is_remote_command(c)),
+                            None => None,
+                        };
                         SavedTab { title: t.title.clone(), name: t.name.clone(), cwd, claude, screen, command, lazy }
                     })
                     .collect(),
@@ -105,6 +114,11 @@ impl State {
                         // Era un Claude sin conversación: el título que puso Claude ya no corresponde.
                         if tab.claude.is_some() && !claude {
                             tab.title = None;
+                        }
+                        // Una conexión remota que estaba abierta (o lo que corría al suspenderlo):
+                        // la shell todavía arranca, lo escrito se ejecuta al estar lista.
+                        if let Some(command) = tab.command.as_ref().filter(|_| !claude) {
+                            t.write(format!("{command}\r").into_bytes());
                         }
                         t
                     }

@@ -105,6 +105,8 @@ telar clear <tab>                                          # limpiar pantalla y 
 
 `telar install` también deja la regla `~/.claude/rules/telar.md` (copia de `claude/telar.md`). Con ella, Claude sabe que puede leer otros tabs (logs de servidores, tests) y coordinar agentes.
 
+Los tabs con una conexión `ssh`, `mosh` o `autossh` abierta la vuelven a abrir al reiniciar Telar (otros programas no se relanzan solos).
+
 ## Suspender tabs y grupos
 
 Para tener muchas sesiones a la vista sin que consuman recursos:

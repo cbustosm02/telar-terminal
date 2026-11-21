@@ -117,6 +117,7 @@ impl State {
             (Action::WebViewOnly, _) => {
                 self.config.remote_view_only = !self.config.remote_view_only;
                 self.config.save();
+                self.remote.state_dirty = true;
             }
             (Action::WebLogout, _) => self.remote_logout(),
             (Action::WebShowTab(id), _) => {

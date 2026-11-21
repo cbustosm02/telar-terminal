@@ -17,7 +17,7 @@ impl State {
             return None;
         }
         if self.remote.state_due(now) {
-            let state = remote::state(&self.ws, &self.terms);
+            let state = remote::state(&self.ws, &self.terms, self.config.remote_view_only);
             if !self.remote.send_state(state, now) {
                 self.remote_release_all();
                 return None;
@@ -343,6 +343,7 @@ impl State {
                 if let Some(v) = body["view_only"].as_bool() {
                     self.config.remote_view_only = v;
                     self.config.save();
+                    self.remote.state_dirty = true;
                 }
                 if let Some(on) = body["enabled"].as_bool() {
                     self.config.remote = on;
@@ -486,6 +487,11 @@ impl State {
         }
         match ev {
             remote::LoginEvent::Started { user_code, url, .. } => {
+                // El código, también en una notificación: si apruebas desde otra red (el
+                // celular con datos), la web pide teclearlo.
+                if let Some(code) = &user_code {
+                    notify::send("Telar web: código para vincular", &format!("{code} · compáralo (o escríbelo) en la página que se abrió"), None);
+                }
                 if let Some(l) = self.remote_login.as_mut() {
                     l.user_code = user_code;
                     l.url = url;
