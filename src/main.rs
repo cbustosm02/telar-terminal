@@ -368,6 +368,7 @@ impl ApplicationHandler<UserEvent> for App {
             })
             .collect();
         let frame = session::load_window().filter(|f| std::env::var_os("TELAR_SNAPSHOT").is_none() && f.visible_on(&screens));
+
         let mut attrs = Window::default_attributes()
             .with_title("Telar")
             .with_inner_size(frame.map_or(LogicalSize::new(1200.0, 780.0), |f| LogicalSize::new(f.w, f.h)))
@@ -377,13 +378,24 @@ impl ApplicationHandler<UserEvent> for App {
             .with_title_hidden(true)
             // Modo captura: la ventana de prueba no le quita el foco a lo que estés usando.
             .with_active(std::env::var_os("TELAR_SNAPSHOT").is_none());
-        if let Some(f) = frame {
-            attrs = attrs.with_position(winit::dpi::LogicalPosition::new(f.x, f.y)).with_maximized(f.maximized);
-            if f.fullscreen {
-                attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
-            }
+        // Con posición guardada se crea oculta: al crearla, macOS la acomoda en la pantalla
+        // principal (no respeta una posición en otra pantalla). Ya creada, se mueve a su
+        // lugar, recién ahí se maximiza o pasa a pantalla completa (en la pantalla donde
+        // quedó), y se muestra.
+        if frame.is_some() {
+            attrs = attrs.with_visible(false);
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("ventana"));
+        if let Some(f) = frame {
+            window.set_outer_position(winit::dpi::LogicalPosition::new(f.x, f.y));
+            if f.maximized {
+                window.set_maximized(true);
+            }
+            if f.fullscreen {
+                window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            }
+            window.set_visible(true);
+        }
         window.set_ime_allowed(true);
         appicon::set_window_movable(&window, false);
         let renderer = pollster::block_on(Renderer::new(window.clone()));
