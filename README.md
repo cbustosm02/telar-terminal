@@ -273,6 +273,7 @@ Ver y manejar Telar desde el celular o desde otro computador, con tu cuenta de T
   - En reposo, el puente duerme en `poll()`: 0 % de CPU y unos 7 MB.
   - Sin la página abierta, Telar no calcula nada.
 - **También se puede suspender y reanudar** tabs y grupos, **cerrar tabs** y **eliminar grupos**: la web pide confirmación, y suspender un tab con Claude trabajando pide una confirmación extra. Una imagen pegada en la web (o una foto del iPhone, en HEIC, que se pasa a JPEG) llega al tab como su ruta y Claude la adjunta; por SSH, se sube primero al servidor.
+- **Cuentas de Claude desde la web:** la web ve las cuentas guardadas en el Mac, cuál está activa y su uso (sesión y semana), y puede cambiar a otra en caliente, como el menú del correo en la barra lateral. «Solo ver» lo bloquea.
 - **Desde la web se pueden crear tabs** (terminal o agente de Claude, en la carpeta del grupo) **y grupos nuevos.** No se ejecutan comandos arbitrarios, y no le quita el foco a quien esté en el Mac.
 - **Seguridad:** la primera vez que un dispositivo escribe o cambia algo desde la web, el Mac muestra una notificación. Con **«Solo ver desde la web»** (menú de la zona o `telar remote readonly on`), Telar no deja que la web escriba ni cambie nada.
 - **Mientras alguien mira un tab,** ese tab toma el tamaño de su pantalla, para que Claude se dibuje bien en el celular. Al soltarlo, o si se corta, vuelve al tamaño de la ventana.

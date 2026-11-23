@@ -549,6 +549,7 @@ impl Bridge {
             "close-tab" | "delete-group" => Some("cerrar tabs"),
             "suspend" | "resume" => Some("suspender o reanudar tabs"),
             "paste-image" => Some("pegar imágenes"),
+            "switch-account" => Some("cambiar la cuenta de Claude"),
             _ => None,
         };
         if let Some(action) = action {
@@ -634,6 +635,16 @@ impl Bridge {
                 };
                 let r = self.telar(json!({ "cmd": "remote-paste-file", "tab": tab, "path": path }));
                 done_or_error("paste-image", msg, &r)
+            }
+            // Cuentas de Claude: cambiar a una guardada (en caliente, como el menú de Telar)
+            // y pedir el uso de todas. El estado (`accounts`) trae la lista y la activa.
+            "switch-account" => {
+                let r = self.telar(json!({ "cmd": "remote-switch-account", "key": msg["key"] }));
+                done_or_error("switch-account", msg, &r)
+            }
+            "refresh-accounts" => {
+                self.telar(json!({ "cmd": "remote-refresh-accounts" }));
+                Vec::new()
             }
             // Tab nuevo en un grupo (o grupo nuevo con su primer tab): shell o agente.
             "new-tab" | "new-group" => {

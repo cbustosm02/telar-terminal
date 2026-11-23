@@ -17,7 +17,7 @@ impl State {
             return None;
         }
         if self.remote.state_due(now) {
-            let state = remote::state(&self.ws, &self.terms, self.config.remote_view_only);
+            let state = remote::state(&self.ws, &self.terms, self.config.remote_view_only, self.accounts_json());
             if !self.remote.send_state(state, now) {
                 self.remote_release_all();
                 return None;
@@ -117,6 +117,35 @@ impl State {
         json!({ "ok": true, "errors": errors })
     }
 
+    /// Cuentas de Claude guardadas para Telar web: cuál está activa y el uso de cada una
+    /// (porcentaje y reinicio, en segundos desde 1970), sin secretos.
+    pub(crate) fn accounts_json(&self) -> Value {
+        let limit = |l: Option<claude_usage::Limit>| {
+            l.map(|l| {
+                let resets = l.resets_at.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs());
+                json!({ "percent": (l.percent * 10.0).round() / 10.0, "resets_at": resets })
+            })
+        };
+        let list: Vec<Value> = self
+            .accounts
+            .iter()
+            .map(|a| {
+                let usage = self.claude_use.get(&a.key);
+                let error = self.usage_errors.get(&a.key).map(|e| if e == claude_usage::DEAD_LOGIN { "login" } else { "sin-datos" });
+                json!({
+                    "key": a.key,
+                    "email": a.email,
+                    "org": a.org,
+                    "plan": a.plan,
+                    "session": limit(usage.and_then(|u| u.session)),
+                    "week": limit(usage.and_then(|u| u.week)),
+                    "error": error,
+                })
+            })
+            .collect();
+        json!({ "active": self.account_key, "list": list })
+    }
+
     /// Pedidos `remote-*` del bridge.
     pub(crate) fn ipc_remote(&mut self, cmd: &str, body: &Value) -> Value {
         if cmd == "remote-new" {
@@ -124,6 +153,25 @@ impl State {
         }
         if cmd == "remote-sync" {
             return self.remote_sync(body);
+        }
+        // Cuentas de Claude: como el menú del correo en la barra lateral.
+        if cmd == "remote-switch-account" {
+            let Some(a) = body["key"].as_str().and_then(|k| self.accounts.iter().find(|a| a.key == k)).cloned() else {
+                return json!({ "ok": false, "error": "esa cuenta no está guardada en este Mac" });
+            };
+            if self.account_key.as_deref() != Some(a.key.as_str()) {
+                let key = a.key.clone();
+                self.account_task(move || cuentas::switch(&key).map(|a| format!("Claude Code ahora usa {} (desde Telar web)", a.email)));
+            }
+            return json!({ "ok": true, "email": a.email });
+        }
+        if cmd == "remote-refresh-accounts" {
+            // El uso de todas, como al abrir el menú: como mucho una vez por minuto.
+            if self.usage_fetched_all.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
+                self.refresh_claude_account();
+                self.refresh_usage();
+            }
+            return json!({ "ok": true });
         }
         if cmd == "remote-delete-group" {
             let name = body["group"].as_str().unwrap_or_default();

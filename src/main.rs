@@ -610,6 +610,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Accounts(saved, current) => {
                 st.accounts = saved;
                 st.account_key = current;
+                st.remote.state_dirty = true;
                 return;
             }
             UserEvent::AccountDone(result) => {
@@ -618,6 +619,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::UsageAll(results) => {
                 st.usage_fetching = false;
+                st.remote.state_dirty = true;
                 for (key, r) in results {
                     match r {
                         Ok(u) => {

@@ -9,7 +9,7 @@ impl State {
         if body["remote"] == json!(true) && self.config.remote_view_only {
             let acts = matches!(
                 body["cmd"].as_str(),
-                Some("send" | "suspend" | "resume" | "remote-new" | "remote-close" | "remote-delete-group" | "remote-paste-file" | "remote-paste" | "remote-answer")
+                Some("send" | "suspend" | "resume" | "remote-new" | "remote-close" | "remote-delete-group" | "remote-paste-file" | "remote-paste" | "remote-answer" | "remote-switch-account")
             );
             if acts {
                 return json!({ "ok": false, "code": "view-only", "error": "Este Mac solo deja mirar desde Telar web (modo «Solo ver»)" });
@@ -25,7 +25,7 @@ impl State {
             }
             Some("tabs") => self.tabs_json(),
             Some("browser") => self.ipc_browser(body),
-            Some(cmd @ ("remote-attach" | "remote-release" | "remote-answer" | "remote-new" | "remote-close" | "remote-delete-group" | "remote-paste-file" | "remote-paste" | "remote-sync")) => {
+            Some(cmd @ ("remote-attach" | "remote-release" | "remote-answer" | "remote-new" | "remote-close" | "remote-delete-group" | "remote-paste-file" | "remote-paste" | "remote-sync" | "remote-switch-account" | "remote-refresh-accounts")) => {
                 self.ipc_remote(cmd, body)
             }
             Some(cmd @ ("remote-status" | "remote-control" | "remote-info" | "remote-viewers" | "remote-login" | "remote-logout" | "remote-notice")) => {

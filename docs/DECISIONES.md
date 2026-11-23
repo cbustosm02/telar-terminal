@@ -437,3 +437,9 @@ Hallazgos del lado de Telar y cómo se resolvieron. El lado web lo atiende homeL
 - **Puntos, no píxeles:** en macOS las coordenadas globales en puntos son las mismas en todas las pantallas aunque tengan distinta escala. Con píxeles, una ventana en un monitor externo de otra escala se correría al reabrir.
 - **Al abrir:** `session::load_window()` se lee antes de crear la ventana. Se restaura solo si su barra de título cae en alguna pantalla conectada (`WindowFrame::visible_on` con `available_monitors`). Si se desconectó el monitor, abre donde macOS la ponga.
 - En el modo captura no se restaura nada (capturas siempre iguales).
+
+## Cuentas de Claude desde Telar web (2026-11-23)
+
+- El `state` lleva `accounts`, con la activa y la lista. Cada cuenta trae key, correo, organización, plan, sesión y semana (porcentaje y `resets_at` en segundos desde 1970) y un error (`login` o `sin-datos`). Sin secretos: los tokens siguen en el Llavero.
+- `refresh-accounts` pide el uso de todas, como al abrir el menú (como mucho una vez por minuto). `switch-account` usa el mismo `cuentas::switch` que el menú: en caliente, las sesiones abiertas siguen. Solo acepta keys guardadas en el Mac. Es una acción que actúa: «Solo ver» la rechaza y la primera vez dispara el aviso en el Mac.
+- Los cambios de cuentas y de uso marcan el estado como sucio, así llega a la web sin sondeo.
