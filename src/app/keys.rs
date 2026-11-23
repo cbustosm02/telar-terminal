@@ -6,6 +6,9 @@ impl State {
     /// Devuelve `true` si hay que cerrar la app.
     pub(crate) fn on_key(&mut self, event: &KeyEvent) -> bool {
         let m = self.mods;
+        // Al escribir, el cursor se ve (y vuelve a titilar desde aquí).
+        self.caret_since = Instant::now();
+        self.next_caret = self.caret_since + CARET_BLINK;
 
         if self.confirm.is_some() {
             match event.logical_key {
@@ -62,9 +65,7 @@ impl State {
                     self.editing = None;
                 }
                 Key::Named(NamedKey::Escape) => self.editing = None,
-                Key::Named(NamedKey::Backspace) => {
-                    buf.pop();
-                }
+                Key::Named(NamedKey::Backspace) => input::delete_back(buf, m),
                 _ if m.super_key() => {
                     if matches!(event.key_without_modifiers(), Key::Character(ref s) if s.as_str() == "v") {
                         self.paste();
@@ -204,4 +205,24 @@ impl State {
             Ime::Enabled | Ime::Disabled => {}
         }
     }
+
+    /// Hay un campo de texto con el foco: renombrando, buscando o filtrando fuentes.
+    pub(crate) fn text_field_focused(&self) -> bool {
+        self.editing.is_some() || self.search.is_some() || self.settings.as_ref().is_some_and(|s| s.section == settings::APPEARANCE_SECTION)
+    }
+
+    /// El cursor está en su mitad visible: medio segundo sí, medio no, contando desde la
+    /// última tecla (así se ve mientras escribes). Sin el foco de la ventana, fijo.
+    pub(crate) fn caret_visible(&self, now: Instant) -> bool {
+        !self.focused || (now.duration_since(self.caret_since).as_millis() / CARET_BLINK.as_millis()).is_multiple_of(2)
+    }
+
+    /// Cuándo cambia el cursor la próxima vez.
+    pub(crate) fn next_caret_toggle(&self, now: Instant) -> Instant {
+        let n = now.duration_since(self.caret_since).as_millis() / CARET_BLINK.as_millis() + 1;
+        self.caret_since + CARET_BLINK * n as u32
+    }
 }
+
+/// Medio ciclo del cursor de los campos de texto (como en macOS).
+pub(crate) const CARET_BLINK: Duration = Duration::from_millis(530);

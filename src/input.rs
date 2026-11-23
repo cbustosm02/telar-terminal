@@ -107,6 +107,24 @@ fn csi_ss3(final_byte: char, m: u8) -> Vec<u8> {
     if m > 1 { format!("\x1b[1;{m}{final_byte}").into_bytes() } else { format!("\x1bO{final_byte}").into_bytes() }
 }
 
+/// Delete en un campo de texto de Telar (renombrar, buscar, filtrar), que escribe siempre
+/// al final: ⌘⌫ borra todo, ⌥⌫ la palabra anterior (los espacios y después la palabra,
+/// como macOS) y ⌫ una letra.
+pub fn delete_back(buf: &mut String, mods: ModifiersState) {
+    if mods.super_key() {
+        buf.clear();
+    } else if mods.alt_key() {
+        let trimmed = buf.trim_end_matches(char::is_whitespace).len();
+        buf.truncate(trimmed);
+        let start = buf.char_indices().rev().take_while(|(_, c)| c.is_alphanumeric() || *c == '_').last().map_or(buf.len(), |(i, _)| i);
+        // Sin letras antes (p. ej. «foo-»): borra el resto de signos seguidos.
+        let start = if start == buf.len() { buf.char_indices().rev().take_while(|(_, c)| !c.is_alphanumeric() && !c.is_whitespace()).last().map_or(buf.len(), |(i, _)| i) } else { start };
+        buf.truncate(start);
+    } else {
+        buf.pop();
+    }
+}
+
 /// Ruta para la shell con barra invertida antes de lo especial, como en Terminal o iTerm2.
 pub fn shell_escape(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
@@ -143,6 +161,26 @@ mod tests {
         assert_eq!(paste_bytes("ls\nrm", TermMode::BRACKETED_PASTE), b"\x1b[200~ls\nrm\x1b[201~");
         assert_eq!(shell_escape("/Users/x/Mis capturas/a (1).png"), "/Users/x/Mis\\ capturas/a\\ \\(1\\).png");
         assert_eq!(shell_escape("/tmp/plano.png"), "/tmp/plano.png");
+        // Borrar en los campos de texto.
+        let opt = ModifiersState::ALT;
+        let mut s = String::from("Proyectos pirani  ");
+        delete_back(&mut s, opt);
+        assert_eq!(s, "Proyectos ");
+        delete_back(&mut s, opt);
+        assert_eq!(s, "");
+        let mut s = String::from("telar-web");
+        delete_back(&mut s, opt);
+        assert_eq!(s, "telar-");
+        delete_back(&mut s, opt);
+        assert_eq!(s, "telar");
+        let mut s = String::from("Año ñandú");
+        delete_back(&mut s, opt);
+        assert_eq!(s, "Año ");
+        delete_back(&mut s, ModifiersState::SUPER);
+        assert_eq!(s, "");
+        let mut s = String::from("ab");
+        delete_back(&mut s, ModifiersState::empty());
+        assert_eq!(s, "a");
         // Pegado vacío (una imagen en el portapapeles): Claude Code lo usa para leerla.
         assert_eq!(paste_bytes("", TermMode::BRACKETED_PASTE), b"\x1b[200~\x1b[201~");
     }

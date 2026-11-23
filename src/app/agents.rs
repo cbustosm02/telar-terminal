@@ -94,17 +94,23 @@ impl State {
     }
 
     /// Claude dejó de trabajar sin avisar: lo interrumpiste con Esc (no dispara `Stop`) o
-    /// el turno se cortó sin `StopFailure`. Mientras trabaja, su interfaz se redibuja varias
-    /// veces por segundo (el indicador y el tiempo corren, también durante una herramienta
-    /// larga); si lleva `STUCK_AFTER` sin mostrar nada, ya no está trabajando.
+    /// el turno se cortó sin `StopFailure`. Dos señales:
+    /// - su título: mientras trabaja empieza con un indicador que gira; en reposo, con «✳».
+    ///   Si lleva `TITLE_AT_REST` en reposo, ya no está trabajando.
+    /// - su pantalla: mientras trabaja se redibuja varias veces por segundo (el indicador y
+    ///   el tiempo corren, también durante una herramienta larga); si lleva `STUCK_AFTER`
+    ///   sin mostrar nada, tampoco. (Sola no basta: una barra de estado que se refresca
+    ///   sigue cambiando la pantalla después de interrumpirlo.)
     pub(crate) fn unstick_working(&mut self) -> bool {
         let visible = self.ws.active_term().filter(|_| self.focused);
         let mut changed = false;
         for (id, t) in self.terms.iter_mut() {
+            let resting_title = t.title.as_deref().is_some_and(claude_title_at_rest) && t.title_at.elapsed() > TITLE_AT_REST;
+            let silent = t.output_at.get().elapsed() > STUCK_AFTER && t.agent.since.elapsed() > STUCK_AFTER;
             let stuck = t.agent.state == AgentState::Working
                 && !t.is_suspended()
-                && t.output_at.get().elapsed() > STUCK_AFTER
-                && t.agent.since.elapsed() > STUCK_AFTER;
+                && t.agent.since.elapsed() > TITLE_AT_REST
+                && (resting_title || silent);
             if stuck {
                 log::info!("el tab {id} figuraba trabajando sin mostrar nada: pasa a terminado");
                 t.agent.set_state(if visible == Some(*id) { AgentState::Idle } else { AgentState::Done });
@@ -278,6 +284,14 @@ impl State {
 /// ti. Solo los pedidos de permiso o de respuesta: los demás (`idle_prompt` a los 60 s,
 /// `push_notification` con el resumen al terminar, `agent_completed` de un agente en
 /// segundo plano, `auth_success`…) son informativos y no cambian el estado.
+/// Tiempo con el título en reposo tras el cual Claude ya no está trabajando.
+const TITLE_AT_REST: Duration = Duration::from_secs(4);
+
+/// Título de Claude Code en reposo («✳ Tarea»); trabajando empieza con un indicador que gira.
+pub(crate) fn claude_title_at_rest(title: &str) -> bool {
+    title.trim_start().starts_with('✳')
+}
+
 pub(crate) fn notification_needs_you(kind: Option<&str>, message: &str) -> bool {
     match kind {
         Some(k) => matches!(k, "permission_prompt" | "worker_permission_prompt" | "elicitation_dialog" | "agent_needs_input"),
@@ -289,6 +303,15 @@ pub(crate) fn notification_needs_you(kind: Option<&str>, message: &str) -> bool 
 #[cfg(test)]
 mod tests {
     use super::notification_needs_you as needs;
+
+    #[test]
+    fn titulo_en_reposo() {
+        use super::claude_title_at_rest as rest;
+        assert!(rest("✳ BCM"));
+        assert!(!rest("◑ Terceros"));
+        assert!(!rest("⠐ Terceros"));
+        assert!(!rest("zsh"));
+    }
 
     #[test]
     fn avisos_que_piden_algo() {

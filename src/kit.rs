@@ -14,6 +14,14 @@ use crate::renderer::{KIND_COLOR, KIND_MASK, Quad};
 use crate::theme::{self, Rgba};
 use crate::ui::Rect;
 
+/// Si el cursor de los campos de texto está en su mitad visible (titila; lo fija la app
+/// en cada cuadro, ver `State::caret_visible`).
+static CARET_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_caret(on: bool) {
+    CARET_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Códigos de los íconos de Lucide que usa Telar (fuente `assets/fonts/lucide.ttf`).
 /// Para sumar uno: buscar su código en `font/info.json` del paquete `lucide-static`.
 #[allow(dead_code)] // catálogo: no todos se usan todavía
@@ -342,6 +350,8 @@ impl<'a> Kit<'a> {
     /// Campo de texto (de una línea): valor o texto de ayuda, con cursor si tiene foco.
     pub fn input(&mut self, r: Rect, value: &str, placeholder: &str, icon: Option<char>, focused: bool) {
         let th = theme::t();
+        // El cursor titila (ver `set_caret`): se dibuja solo en la mitad visible.
+        let focused_caret = focused && CARET_ON.load(std::sync::atomic::Ordering::Relaxed);
         self.bordered(r, 6.0, th.chrome, if focused { theme::mix(th.border, th.accent, 0.6) } else { th.border });
         let mut x = r.x + 10.0 * self.s;
         if let Some(ic) = icon {
@@ -350,13 +360,13 @@ impl<'a> Kit<'a> {
         }
         if value.is_empty() {
             self.text_in(r, x, placeholder, Text::body().color(th.text_dim));
-            if focused {
-                self.rect(Rect { x, y: r.y + 7.0 * self.s, w: 1.5 * self.s, h: r.h - 14.0 * self.s }, th.accent);
+            if focused_caret {
+                self.rect(Rect { x, y: r.y + 6.0 * self.s, w: 2.0 * self.s, h: r.h - 12.0 * self.s }, th.accent);
             }
         } else {
             let w = self.text_in(r, x, value, Text::body());
-            if focused {
-                self.rect(Rect { x: x + w + self.s, y: r.y + 7.0 * self.s, w: 1.5 * self.s, h: r.h - 14.0 * self.s }, th.accent);
+            if focused_caret {
+                self.rect(Rect { x: x + w + self.s, y: r.y + 6.0 * self.s, w: 2.0 * self.s, h: r.h - 12.0 * self.s }, th.accent);
             }
         }
     }

@@ -158,6 +158,9 @@ pub struct Terminal {
     pub generation: u64,
     pub frozen: Option<Frozen>,
     pub title: Option<String>,
+    /// Cuándo cambió el título por última vez (mientras Claude trabaja, su indicador gira
+    /// en el título varias veces por segundo).
+    pub title_at: Instant,
     /// Nombre puesto por el usuario (gana sobre el título que pone el programa).
     pub name: Option<String>,
     /// Sonó la campana mientras el tab no estaba visible.
@@ -247,6 +250,7 @@ impl Terminal {
             size,
             local_size: size,
             remote_size: None,
+            title_at: Instant::now(),
             last_used: Cell::new(Instant::now()),
             output_at: Cell::new(Instant::now()),
             version: Cell::new(0),
@@ -277,6 +281,7 @@ impl Terminal {
             size,
             local_size: size,
             remote_size: None,
+            title_at: Instant::now(),
             last_used: Cell::new(Instant::now()),
             output_at: Cell::new(Instant::now()),
             version: Cell::new(0),

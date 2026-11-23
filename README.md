@@ -74,7 +74,7 @@ Cada tab sabe en qué está su sesión de Claude Code y lo muestra con un punto 
 - **Navegador del agente:** si el agente abre un navegador con una herramienta que avisa a Telar (p. ej. el Chrome de pruebas de pirani-cli), el tab muestra un globo a la izquierda de la ✕. Late mientras el agente lo usa y se apaga (gris) tras 2 min sin uso. Al pasar el puntero muestra de quién es y su estado; con un clic lo trae al frente, y si corría sin ventana, lo reabre con ventana. Si el navegador se cierra, el globo desaparece. Ver «Navegadores de los agentes» más abajo.
 - **⌘J** salta al siguiente tab que te necesita (o, si no hay, al siguiente que terminó).
 - **Bandeja de agentes** (⌘⇧J, o el ícono de bandeja junto a «GRUPOS», que lleva un punto si alguien te necesita): todas las sesiones de Claude de todos los grupos, de la más urgente a la menos, con su estado, desde hace cuánto, y la pregunta pendiente o el último paso (la última línea con ⏺). Un permiso se responde desde ahí con los botones de las opciones que muestra Claude (o con las teclas 1–9), sin cambiar de tab; «Ir al tab» lo abre.
-- Si interrumpes a Claude con Esc o el turno se corta por un error de la API o por el límite de uso, el tab deja de figurar como trabajando: Telar escucha `StopFailure` y, además, si un Claude «trabajando» pasa 10 s sin mostrar nada (mientras trabaja, su indicador se redibuja varias veces por segundo), lo da por detenido.
+- Si interrumpes a Claude con Esc o el turno se corta por un error de la API o por el límite de uso, el tab deja de figurar como trabajando: Telar escucha `StopFailure` y, además, si un Claude «trabajando» pasa 10 s sin mostrar nada (mientras trabaja, su indicador se redibuja varias veces por segundo), lo da por detenido. También mira su título: trabajando empieza con un indicador que gira y en reposo con «✳»; si lleva 4 s en reposo, ya no trabaja (sirve aunque la pantalla siga cambiando, p. ej. por una barra de estado que se refresca).
 - Con la ventana sin foco llega una notificación de macOS y el ícono rebota en el Dock. Desde Telar.app las notificaciones son las nativas de macOS (la primera vez pide permiso): un clic en una trae Telar al frente y muestra el tab que avisó. Fuera del paquete (el binario de `target/`) o sin permiso, se usa `osascript`.
 
 Funcionamiento:
@@ -188,6 +188,7 @@ Va con `-w <pid de Telar>`: si Telar se cierra o se cae, `caffeinate` termina so
 | ⌘⇧← / ⌘⇧→, ⌃Tab | Tab anterior / siguiente |
 | ⌘⇧↑ / ⌘⇧↓ | Grupo anterior / siguiente |
 | ⌘⇧R o doble clic | Renombrar grupo (Enter guarda, Esc cancela) |
+| ⌫ / ⌥⌫ / ⌘⌫ al renombrar, buscar o filtrar | Borra una letra, la palabra anterior o todo |
 | ⌘C / ⌘V | Copiar selección / pegar (con bracketed paste). Con una imagen en el portapapeles, ⌘V (o ⌃V) la adjunta en Claude Code |
 | Arrastrar archivos a la ventana | Escribe su ruta escapada; Claude Code adjunta las imágenes |
 | ⌘V con imagen o arrastrar, en un tab con `ssh` | Sube el archivo al servidor (`/tmp/telar-pegado/`, con las mismas opciones de esa conexión, sin pedir nada) y pega su ruta remota: el Claude de allá la adjunta. Necesita una llave SSH o ControlMaster |

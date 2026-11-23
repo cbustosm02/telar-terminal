@@ -382,6 +382,9 @@ impl State {
     }
 
     pub(crate) fn start_rename(&mut self, group: usize) {
+        // El cursor del campo arranca visible.
+        self.caret_since = Instant::now();
+        self.next_caret = self.caret_since + super::keys::CARET_BLINK;
         if let Some(g) = self.ws.groups.get(group) {
             self.editing = Some((Edit::Group(group), g.name.clone()));
             self.window.request_redraw();
@@ -390,6 +393,9 @@ impl State {
 
     /// Renombrar un tab: se edita en la barra de tabs (el tab pasa a estar visible).
     pub(crate) fn start_rename_tab(&mut self, id: u64) {
+        // El cursor del campo arranca visible.
+        self.caret_since = Instant::now();
+        self.next_caret = self.caret_since + super::keys::CARET_BLINK;
         self.show_tab(id);
         if let Some(t) = self.terms.get(&id) {
             self.editing = Some((Edit::Tab(id), t.label().unwrap_or_default().to_string()));

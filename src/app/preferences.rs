@@ -246,7 +246,7 @@ impl State {
                 return;
             }
             Key::Named(NamedKey::Backspace) => {
-                st.filter.pop();
+                input::delete_back(&mut st.filter, self.mods);
                 st.select(0, page);
                 st.scroll = 0;
             }

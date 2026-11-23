@@ -35,6 +35,9 @@ impl State {
 
     /// ⌘P o clic en el buscador.
     pub(crate) fn open_search(&mut self) {
+        // El cursor del campo arranca visible.
+        self.caret_since = Instant::now();
+        self.next_caret = self.caret_since + super::keys::CARET_BLINK;
         if self.search.is_none() {
             self.search = Some((String::new(), 0));
         }
@@ -75,7 +78,7 @@ impl State {
             Key::Named(NamedKey::ArrowDown) if n > 0 => *selected = (*selected + 1).min(n - 1),
             Key::Named(NamedKey::ArrowUp) => *selected = selected.saturating_sub(1),
             Key::Named(NamedKey::Backspace) => {
-                query.pop();
+                input::delete_back(query, self.mods);
                 *selected = 0;
             }
             _ if cmd => match event.key_without_modifiers() {

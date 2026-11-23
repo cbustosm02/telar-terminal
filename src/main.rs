@@ -277,6 +277,9 @@ struct State {
     remote_session: Option<remote::SessionInfo>,
     remote_login: Option<remote::LoginUi>,
     remote_login_generation: u64,
+    /// Cursor de los campos de texto: titila desde la última tecla (ver `caret_visible`).
+    caret_since: Instant,
+    next_caret: Instant,
     remote_viewers: Vec<remote::Viewer>,
     /// Diálogo de confirmación abierto (eliminar un grupo).
     confirm: Option<confirm::Confirm>,
@@ -421,6 +424,8 @@ impl ApplicationHandler<UserEvent> for App {
             remote_session: None,
             remote_login: None,
             remote_login_generation: 0,
+            caret_since: Instant::now(),
+            next_caret: Instant::now(),
             remote_viewers: Vec::new(),
             confirm: None,
             link_cell: None,
@@ -687,6 +692,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(t) = st.terms.get_mut(&id) {
                     // Un título vacío (Claude lo deja así al salir) es como no tener título.
                     t.title = (!title.trim().is_empty()).then_some(title);
+                    t.title_at = Instant::now();
                 }
                 st.window.request_redraw();
             }
@@ -754,6 +760,14 @@ impl ApplicationHandler<UserEvent> for App {
         // Telar remoto: sin bridge suscrito no hace nada.
         if let Some(at) = st.remote_tick(now) {
             wake = wake.map(|w| w.min(at));
+        }
+        // Un campo de texto con el foco: el cursor titila (un cuadro cada medio segundo).
+        if !st.occluded && st.focused && st.text_field_focused() {
+            if now >= st.next_caret {
+                st.window.request_redraw();
+                st.next_caret = st.next_caret_toggle(now);
+            }
+            wake = wake.map(|w| w.min(st.next_caret));
         }
         if !st.occluded && (st.terms.values().any(|t| t.agent.state == AgentState::Working) || st.browser_pulsing()) {
             if now >= st.next_tick {
@@ -955,6 +969,7 @@ impl State {
 
     fn draw(&mut self) {
         let empty_usage = claude_usage::Usage::default();
+        kit::set_caret(self.caret_visible(Instant::now()));
         // Si se borraron grupos o la ventana se achicó, la lista no queda desplazada de más.
         let max = self.list_len().saturating_sub(self.layout().list_rows());
         self.list_scroll = self.list_scroll.min(max);
