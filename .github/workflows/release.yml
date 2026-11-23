@@ -30,16 +30,18 @@ jobs:
       - name: Pruebas
         run: cargo test --release
 
+      # Apple Silicon es el sistema del runner (macos-15): `cargo build --release` reutiliza
+      # lo que ya compilaron las pruebas (mismo perfil y carpeta) y solo arma el binario.
       - name: Compilar para Apple Silicon e Intel
         run: |
-          cargo build --release --target aarch64-apple-darwin
+          cargo build --release
           cargo build --release --target x86_64-apple-darwin
 
       - name: Binario universal, firma ad hoc y paquete
         run: |
           mkdir -p dist
           lipo -create -output dist/telar \
-            target/aarch64-apple-darwin/release/telar \
+            target/release/telar \
             target/x86_64-apple-darwin/release/telar
           codesign --force --sign - dist/telar
           ./dist/telar --version | grep -q "$VERSION"

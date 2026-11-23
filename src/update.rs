@@ -18,8 +18,9 @@ use crate::UserEvent;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPO: &str = "cbustosm02/telar-terminal";
-/// Nombre del paquete de cada release (binario universal: Apple Silicon e Intel).
-const ASSET_SUFFIX: &str = "-macos-universal.tar.gz";
+/// Nombre del paquete de cada release, en orden de preferencia. Desde la 0.15.6 solo se
+/// publica para Apple Silicon (`arm64`); hasta la 0.15.5, un binario universal.
+const ASSET_SUFFIXES: &[&str] = &["-macos-arm64.tar.gz", "-macos-universal.tar.gz"];
 const TMP_PREFIX: &str = ".telar-update-";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,10 +78,10 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 fn release_from_json(v: &Value) -> Result<Release, String> {
     let tag = v["tag_name"].as_str().ok_or("el release no tiene tag")?;
     let assets = v["assets"].as_array().ok_or("el release no tiene archivos")?;
-    let pkg = assets
+    let pkg = ASSET_SUFFIXES
         .iter()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(ASSET_SUFFIX)))
-        .ok_or_else(|| format!("el release {tag} no tiene un paquete *{ASSET_SUFFIX}"))?;
+        .find_map(|suffix| assets.iter().find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(suffix))))
+        .ok_or_else(|| format!("el release {tag} no tiene un paquete *{}", ASSET_SUFFIXES[0]))?;
     let name = pkg["name"].as_str().unwrap_or_default();
     let sha = assets
         .iter()
@@ -455,6 +456,19 @@ mod tests {
         assert_eq!(r.version, "0.2.0");
         assert_eq!(r.size, 7_000_000);
         assert!(r.url.ends_with(".tar.gz") && r.sha_url.ends_with(".sha256"));
+    }
+
+    #[test]
+    fn prefiere_el_paquete_de_apple_silicon() {
+        let v = json!({ "tag_name": "v0.16.0", "assets": [
+            asset("telar-0.16.0-macos-universal.tar.gz", 12_000_000), asset("telar-0.16.0-macos-universal.tar.gz.sha256", 90),
+            asset("telar-0.16.0-macos-arm64.tar.gz", 6_000_000), asset("telar-0.16.0-macos-arm64.tar.gz.sha256", 90),
+        ]});
+        let r = release_from_json(&v).unwrap();
+        assert!(r.url.ends_with("macos-arm64.tar.gz") && r.sha_url.ends_with("macos-arm64.tar.gz.sha256"));
+        // Solo arm64 (desde la 0.15.6).
+        let v = json!({ "tag_name": "v0.16.0", "assets": [asset("telar-0.16.0-macos-arm64.tar.gz", 6_000_000), asset("telar-0.16.0-macos-arm64.tar.gz.sha256", 90)] });
+        assert_eq!(release_from_json(&v).unwrap().size, 6_000_000);
     }
 
     #[test]
