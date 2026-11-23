@@ -1,29 +1,72 @@
-# Publica una versión al empujar un tag vX.Y.Z (ver scripts/release.sh).
-# Telar busca aquí sus actualizaciones: necesita el paquete *-macos-universal.tar.gz y su .sha256.
+# Publica una versión de Telar. Normalmente la publica scripts/release.sh desde el Mac
+# (compila en Apple Silicon y sube el paquete en ~1 min, sin esperar la cola de GitHub);
+# este workflow es el respaldo: si el release ya tiene su paquete no hace nada, y si no
+# (falló la subida desde el Mac), lo compila y lo sube.
+#
+# Telar busca aquí sus actualizaciones: el paquete *-macos-arm64.tar.gz y su .sha256.
+# Desde la 0.15.6, solo Apple Silicon (la 0.15.5 fue la última universal y ya busca este nombre).
 name: Release
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag a publicar (vX.Y.Z)'
+        required: true
 
 permissions:
   contents: write
 
 jobs:
+  # En Linux (sin esperar un Mac): ¿ya está publicado con su paquete?
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      needed: ${{ steps.check.outputs.needed }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          v="${TAG#v}"
+          pkg="telar-$v-macos-arm64.tar.gz"
+          # scripts/release.sh crea el release y en seguida sube el paquete: si el release
+          # existe sin el paquete, se espera un poco antes de compilarlo aquí.
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            names=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null || true)
+            if echo "$names" | grep -qx "$pkg" && echo "$names" | grep -qx "$pkg.sha256"; then
+              echo "El release $TAG ya tiene su paquete (publicado desde el Mac): nada que hacer."
+              echo "needed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [ -z "$names" ] && ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 && break
+            sleep 10
+          done
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+
   release:
+    needs: check
+    if: needs.check.outputs.needed == 'true'
     runs-on: macos-15
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          ref: ${{ needs.check.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
       - name: El tag coincide con la versión de Cargo.toml
         run: |
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
-            echo "El tag $GITHUB_REF_NAME no coincide con Cargo.toml ($v)"; exit 1
+          if [ "v$v" != "$TAG" ]; then
+            echo "El tag $TAG no coincide con Cargo.toml ($v)"; exit 1
           fi
           echo "VERSION=$v" >> "$GITHUB_ENV"
 
@@ -32,26 +75,28 @@ jobs:
 
       # Apple Silicon es el sistema del runner (macos-15): `cargo build --release` reutiliza
       # lo que ya compilaron las pruebas (mismo perfil y carpeta) y solo arma el binario.
-      - name: Compilar para Apple Silicon e Intel
-        run: |
-          cargo build --release
-          cargo build --release --target x86_64-apple-darwin
+      - name: Compilar para Apple Silicon
+        run: cargo build --release
 
-      - name: Binario universal, firma ad hoc y paquete
+      - name: Firma ad hoc y paquete
         run: |
           mkdir -p dist
-          lipo -create -output dist/telar \
-            target/release/telar \
-            target/x86_64-apple-darwin/release/telar
+          cp target/release/telar dist/telar
           codesign --force --sign - dist/telar
+          lipo -archs dist/telar | grep -qx arm64
           ./dist/telar --version | grep -q "$VERSION"
-          pkg="telar-$VERSION-macos-universal.tar.gz"
+          pkg="telar-$VERSION-macos-arm64.tar.gz"
           tar -czf "dist/$pkg" -C dist telar
           (cd dist && shasum -a 256 "$pkg" > "$pkg.sha256")
 
+      # Si el release ya existe (lo creó el Mac pero no alcanzó a subir el paquete), se
+      # completa; si no, se crea.
       - name: Publicar el release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
-            --title "Telar $VERSION" --generate-notes
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+          else
+            gh release create "$TAG" dist/*.tar.gz dist/*.sha256 --title "Telar $VERSION" --generate-notes
+          fi

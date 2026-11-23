@@ -443,3 +443,15 @@ Hallazgos del lado de Telar y cómo se resolvieron. El lado web lo atiende homeL
 - El `state` lleva `accounts`, con la activa y la lista. Cada cuenta trae key, correo, organización, plan, sesión y semana (porcentaje y `resets_at` en segundos desde 1970) y un error (`login` o `sin-datos`). Sin secretos: los tokens siguen en el Llavero.
 - `refresh-accounts` pide el uso de todas, como al abrir el menú (como mucho una vez por minuto). `switch-account` usa el mismo `cuentas::switch` que el menú: en caliente, las sesiones abiertas siguen. Solo acepta keys guardadas en el Mac. Es una acción que actúa: «Solo ver» la rechaza y la primera vez dispara el aviso en el Mac.
 - Los cambios de cuentas y de uso marcan el estado como sucio, así llega a la web sin sondeo.
+
+## Releases solo para Apple Silicon (2026-11-23)
+
+- El release tardaba ~7,5 min: 2 min de pruebas y 5 min compilando Apple Silicon e Intel. El código se compilaba tres veces, y las pruebas y el binario aarch64 no compartían artefactos (`target/release` frente a `target/aarch64-apple-darwin/release`).
+- En uso no cambiaba nada: macOS ejecuta solo la mitad de su procesador del binario universal. Solo se ganan tiempo de CI y tamaño de descarga (~12 MB → ~6 MB). Los Macs del usuario son Apple Silicon (M4), así que Intel se deja.
+- **Transición sin romper el actualizador:**
+  - La 0.15.5 todavía se publicó universal, para que la encontraran los Telar instalados, que solo buscaban `*-macos-universal.tar.gz`. Su actualizador busca primero `*-macos-arm64.tar.gz` y, si no está, `*-macos-universal.tar.gz` (`ASSET_SUFFIXES`).
+  - Desde la 0.15.6 el workflow compila con `cargo build --release`, que es el sistema del runner y reutiliza lo de las pruebas, y publica solo `telar-X.Y.Z-macos-arm64.tar.gz`. Verifica con `lipo -archs` que el binario sea arm64.
+- **Publicar desde el Mac (2026-11-23).** Los equipos macOS con Apple Silicon de GitHub tienen colas largas: la 0.15.5 se canceló dos veces tras 15 min sin conseguir uno («The job was not acquired by Runner… capacity constraints»). La 0.15.5 se publicó a mano desde el M4 (universal, con `rustup target add x86_64-apple-darwin` y `lipo`).
+  - Desde la 0.15.6, `scripts/release.sh` compila y publica desde el Mac. Sube el commit y después `gh release create --target <sha>` crea el release y el tag con el paquete adentro, en ese orden: así, cuando el tag dispara el workflow, el release ya existe.
+  - El workflow es el respaldo. El job `check` corre en ubuntu-latest (no espera un Mac). Si el release tiene `*-macos-arm64.tar.gz` y su `.sha256`, no hace nada. Si el release existe sin el paquete, espera hasta 2 min por si el Mac todavía lo está subiendo. Si no, el job `release` (macos-15) lo compila, y si el release ya existía, lo completa con `gh release upload --clobber`.
+  - `workflow_dispatch` con el tag sirve para lanzarlo a mano.
