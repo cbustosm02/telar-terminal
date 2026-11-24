@@ -312,7 +312,7 @@ Telar consulta el uso por su cuenta (`api.anthropic.com/api/oauth/usage`, con el
 
 ## Cuentas de Claude
 
-Un clic en el correo del bloque de Claude abre el menú de cuentas, cada una con su uso (sesión · semana):
+Un clic en el correo del bloque de Claude abre el menú de cuentas, cada una con su uso: la sesión con lo que falta para que se reinicie y la semana (p. ej. «42 % (2 h 14 min) · 18 %»):
 
 - **Elegir una cuenta** la activa en caliente, como cswap: las sesiones de Claude abiertas (también las que trabajan) siguen y toman la credencial nueva; no se reinicia nada.
 - **Agregar la cuenta actual** guarda la sesión con que está Claude Code ahora (si ya estaba, la actualiza). **Iniciar sesión con otra cuenta** guarda la actual y abre un tab con `claude auth login`.

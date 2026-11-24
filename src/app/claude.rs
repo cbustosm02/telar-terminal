@@ -43,12 +43,11 @@ impl State {
         });
     }
 
-    /// Texto corto del uso de una cuenta para el menú: «42 % · 18 %» (sesión · semana).
+    /// Texto corto del uso de una cuenta para el menú: «42 % (2 h 14 min) · 18 %» (sesión,
+    /// lo que falta para que se reinicie, y semana).
     pub(crate) fn usage_detail(&self, key: &str) -> Option<String> {
         if let Some(u) = self.claude_use.get(key) {
-            let now = std::time::SystemTime::now();
-            let pct = |l: Option<claude_usage::Limit>| l.map_or("—".to_string(), |l| format!("{:.0} %", l.now(now).0));
-            return Some(format!("{} · {}", pct(u.session), pct(u.week)));
+            return Some(usage_text(u, std::time::SystemTime::now()));
         }
         self.usage_errors.get(key).map(|e| if e == claude_usage::DEAD_LOGIN { "inicia sesión".into() } else { "sin datos".into() })
     }
@@ -80,7 +79,7 @@ impl State {
         items.push(MenuItem::new(icons::USER_PLUS, save_label, &[], Action::SaveAccount));
         items.push(MenuItem::new(icons::LOG_IN, "Iniciar sesión con otra cuenta", &[], Action::LoginAccount));
         let l = self.layout();
-        self.menu = Some(Menu::with_width(self.cursor.0, self.cursor.1, None, self.ws.active, items, &l, 380.0));
+        self.menu = Some(Menu::with_width(self.cursor.0, self.cursor.1, None, self.ws.active, items, &l, 440.0));
         self.editing = None;
         self.window.set_cursor(CursorIcon::Default);
         self.window.request_redraw();
@@ -111,5 +110,37 @@ impl State {
         self.claude_account = None;
         self.refresh_claude_account();
         self.window.request_redraw();
+    }
+}
+
+/// «42 % (2 h 14 min) · 18 %»: la sesión con lo que falta para su reinicio, y la semana.
+/// Sin dato de reinicio (o si ya pasó y el uso volvió a cero), solo el porcentaje.
+fn usage_text(u: &claude_usage::Usage, now: std::time::SystemTime) -> String {
+    let pct = |l: Option<claude_usage::Limit>| l.map_or("—".to_string(), |l| format!("{:.0} %", l.now(now).0));
+    let session = match u.session.map(|l| l.now(now)) {
+        Some((p, Some(left))) => format!("{p:.0} % ({})", claude_usage::until(left)),
+        _ => pct(u.session),
+    };
+    format!("{session} · {}", pct(u.week))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use claude_usage::{Limit, Usage};
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn uso_con_el_reinicio_de_la_sesion() {
+        let now = SystemTime::now();
+        let u = Usage {
+            session: Some(Limit { percent: 42.0, resets_at: Some(now + Duration::from_secs(134 * 60)) }),
+            week: Some(Limit { percent: 18.0, resets_at: None }),
+        };
+        assert_eq!(usage_text(&u, now), "42 % (2 h 14 min) · 18 %");
+        // La sesión ya se reinició: 0 % y sin tiempo.
+        let past = Usage { session: Some(Limit { percent: 90.0, resets_at: Some(now - Duration::from_secs(1)) }), ..u };
+        assert_eq!(usage_text(&past, now), "0 % · 18 %");
+        assert_eq!(usage_text(&Usage::default(), now), "— · —");
     }
 }

@@ -3,6 +3,27 @@
 
 use crate::*;
 
+/// La vista previa (`scripts/vista-previa.sh`) no se conecta a Telar web: comparte la
+/// configuración y la sesión del Llavero con Telar.app, y el servidor deja una sola
+/// conexión por dispositivo, así que le quitaría la suya a Telar.app. Para probar la web
+/// en la vista previa: `scripts/vista-previa.sh TELAR_WEB=1`.
+static PREVIEW_WITHOUT_WEB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lee (y quita, para que no lo hereden los tabs) cómo se abrió la vista previa.
+pub(crate) fn read_preview_env() {
+    let preview = std::env::var_os("TELAR_VISTA_PREVIA").is_some();
+    let web = std::env::var_os("TELAR_WEB").is_some_and(|v| v == "1");
+    PREVIEW_WITHOUT_WEB.store(preview && !web, std::sync::atomic::Ordering::Relaxed);
+    for var in ["TELAR_VISTA_PREVIA", "TELAR_WEB"] {
+        // SAFETY: al empezar `main`, antes de crear hilos.
+        unsafe { std::env::remove_var(var) };
+    }
+}
+
+pub(crate) fn preview_without_web() -> bool {
+    PREVIEW_WITHOUT_WEB.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl State {
     /// `telar bridge` se suscribió: desde ahora recibe el estado y las pantallas.
     pub(crate) fn remote_subscribe(&mut self, tx: std::sync::mpsc::Sender<String>) {
@@ -270,7 +291,7 @@ impl State {
     /// Lanza o cierra `telar bridge` según la configuración y las credenciales.
     pub(crate) fn sync_bridge(&mut self) {
         let running = self.bridge.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)));
-        let want = self.config.remote && self.snapshot.is_none();
+        let want = self.config.remote && self.snapshot.is_none() && !preview_without_web();
         if !want {
             if let Some(mut c) = self.bridge.take() {
                 let _ = c.kill();
@@ -583,6 +604,7 @@ impl State {
                 "connected" => "conectado",
                 "connecting" => "conectando",
                 "error" | "fatal" => "con error",
+                _ if preview_without_web() => "la vista previa no se conecta",
                 _ if !self.config.remote => "desconectado",
                 _ => "",
             };

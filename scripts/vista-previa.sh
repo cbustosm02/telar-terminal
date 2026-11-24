@@ -41,7 +41,9 @@ pkill -f "target/vista-previa/Telar" 2>/dev/null || true
 pkill -f "target/release/telar$" 2>/dev/null || true
 # Con `open` (no como hijo de esta shell), macOS la trata como app propia: los permisos
 # que pida son de la vista previa, no de la terminal desde la que se lanzó.
-ENVS=(--env "TELAR_SESSION_FILE=$HOME/.config/telar/vista-previa.json")
+# TELAR_VISTA_PREVIA: no se conecta a Telar web (le quitaría la conexión a Telar.app);
+# para probar la web: scripts/vista-previa.sh TELAR_WEB=1
+ENVS=(--env "TELAR_SESSION_FILE=$HOME/.config/telar/vista-previa.json" --env "TELAR_VISTA_PREVIA=1")
 for v in "$@"; do ENVS+=(--env "$v"); done
 open -n "$APP" "${ENVS[@]}"
 echo "Vista previa abierta"

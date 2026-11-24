@@ -9,7 +9,7 @@ mod menu;
 mod mouse;
 mod persist;
 mod preferences;
-mod remote;
+pub(crate) mod remote;
 mod resources;
 mod search;
 mod snapshot;

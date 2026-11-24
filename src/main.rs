@@ -158,6 +158,7 @@ fn main() {
     }
 
     forget_parent_session_env();
+    app::remote::read_preview_env();
     env_logger::init();
     // El paquete se pone al día antes de abrir: si cambió, se reinicia para que macOS vea
     // la misma firma en el proceso y en el disco (y respete los permisos concedidos).
