@@ -34,15 +34,26 @@ pub struct Entry {
     pub detail: Option<String>,
     /// Opciones de un permiso pendiente: la tecla y su texto.
     pub options: Vec<(char, String)>,
+    /// Comandos de shell que lanzó Claude y siguen corriendo (ver `proc::claude_shells`).
+    pub shells: usize,
 }
 
-/// Qué tan arriba va: primero lo que te necesita, después lo que terminó.
-fn rank(state: AgentState) -> u8 {
-    match state {
+impl Entry {
+    /// En espera, pero con comandos de shell suyos corriendo (un servidor, una espera…).
+    pub fn waiting_shell(&self) -> bool {
+        self.state == AgentState::Idle && self.shells > 0
+    }
+}
+
+/// Qué tan arriba va: primero lo que te necesita, después lo que terminó, lo que trabaja,
+/// lo que espera una shell y lo que solo espera.
+fn rank(e: &Entry) -> u8 {
+    match e.state {
         AgentState::NeedsYou => 0,
         AgentState::Done => 1,
         AgentState::Working => 2,
-        _ => 3,
+        _ if e.waiting_shell() => 3,
+        _ => 4,
     }
 }
 
@@ -72,10 +83,11 @@ pub fn entries(ws: &Workspace, terms: &HashMap<u64, Terminal>) -> Vec<Entry> {
                 secs: t.agent.since.elapsed().as_secs(),
                 detail,
                 options,
+                shells: t.claude_shells,
             });
         }
     }
-    out.sort_by(|a, b| rank(a.state).cmp(&rank(b.state)).then(b.secs.cmp(&a.secs)));
+    out.sort_by(|a, b| rank(a).cmp(&rank(b)).then(b.secs.cmp(&a.secs)));
     out
 }
 
@@ -280,13 +292,17 @@ impl Inbox {
         k.icon(p.x + 34.0 * s, p.y + 30.0 * s, icons::INBOX, 17.0, th.accent);
         k.text(p.x + 52.0 * s, p.y + 20.0 * s, "Agentes", Text::title(), p.w - 120.0 * s);
         let count = |st: AgentState| entries.iter().filter(|e| e.state == st).count();
-        let summary = format!(
+        let shells = entries.iter().filter(|e| e.waiting_shell()).count();
+        let mut summary = format!(
             "{} te necesitan · {} terminaron · {} trabajando · {} en espera",
             count(AgentState::NeedsYou),
             count(AgentState::Done),
             count(AgentState::Working),
-            count(AgentState::Idle)
+            count(AgentState::Idle) - shells
         );
+        if shells > 0 {
+            summary.push_str(&format!(" · {shells} esperando una shell"));
+        }
         k.text(p.x + 52.0 * s, p.y + 40.0 * s, &summary, Text::small(), p.w - 120.0 * s);
         k.icon_button(g.close, icons::X, 15.0, self.hover == Some(Hit::Close));
 
@@ -298,16 +314,26 @@ impl Inbox {
         for (i, e) in entries.iter().enumerate().skip(self.scroll).take(g.rows) {
             let (r, go, opts) = row_parts(&mut k, &g, i, self.scroll, e);
             let hovered = matches!(self.hover, Some(Hit::Row(h) | Hit::Go(h) | Hit::Option(h, _)) if h == i);
+            let shell_label = match e.shells {
+                1 => "esperando una shell".to_string(),
+                n => format!("esperando {n} shells"),
+            };
             let (label, color) = match e.state {
                 AgentState::NeedsYou => ("te necesita", th.attention),
                 AgentState::Done => ("terminó", th.done),
                 AgentState::Working => ("trabajando", crate::ui::status_pulse(time)),
+                _ if e.waiting_shell() => (shell_label.as_str(), th.accent),
                 _ => ("en espera", th.text_dim),
             };
             let border = if i == self.selected { th.accent } else if hovered { theme::mix(th.border, th.text, 0.25) } else { th.border };
             k.bordered(r, 8.0, th.chrome, border);
             let ty = r.y + 10.0 * s;
-            k.dot(r.x + 18.0 * s, ty + 8.0 * s, 8.0, color);
+            if e.waiting_shell() {
+                // El mismo ícono que en la barra lateral.
+                k.icon(r.x + 18.0 * s, ty + 8.0 * s, icons::SQUARE_TERMINAL, 12.0, color);
+            } else {
+                k.dot(r.x + 18.0 * s, ty + 8.0 * s, 8.0, color);
+            }
             let when = format!("{label} · hace {}", ago(e.secs));
             let when_w = k.measure(&when, Text::small());
             let right = r.x + r.w - 14.0 * s;
@@ -334,6 +360,16 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn esperando_una_shell_va_antes_que_en_espera() {
+        let e = |state, shells| Entry { tab: 1, place: String::new(), state, secs: 0, detail: None, options: Vec::new(), shells };
+        assert!(e(AgentState::Idle, 1).waiting_shell());
+        assert!(!e(AgentState::Working, 1).waiting_shell());
+        assert!(!e(AgentState::Idle, 0).waiting_shell());
+        assert!(rank(&e(AgentState::Working, 0)) < rank(&e(AgentState::Idle, 2)));
+        assert!(rank(&e(AgentState::Idle, 2)) < rank(&e(AgentState::Idle, 0)));
+    }
 
     fn lines(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
