@@ -131,11 +131,13 @@ pub struct Agent {
     pub message: Option<String>,
     /// Cuántas veces cambió de estado (lo usa `telar wait`).
     pub changes: u64,
+    /// Cuándo se lanzó el último hook aplicado (µs desde 1970; ver `ipc::hook_main`).
+    pub hook_t: u64,
 }
 
 impl Default for Agent {
     fn default() -> Self {
-        Self { state: AgentState::None, since: Instant::now(), session_id: None, cwd: None, message: None, changes: 0 }
+        Self { state: AgentState::None, since: Instant::now(), session_id: None, cwd: None, message: None, changes: 0, hook_t: 0 }
     }
 }
 

@@ -18,7 +18,7 @@ impl State {
         match body["cmd"].as_str() {
             Some("hook") => {
                 if let Some(tab) = body["tab"].as_u64() {
-                    self.on_hook(tab, &body["payload"]);
+                    self.on_hook(tab, &body["payload"], body["t"].as_u64());
                 }
                 self.remote.state_dirty = true;
                 json!({ "ok": true })

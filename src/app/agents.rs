@@ -30,7 +30,7 @@ impl State {
             obj.remove("cwd");
             obj.retain(|k, _| matches!(k.as_str(), "hook_event_name" | "notification_type" | "message"));
         }
-        self.on_hook(tab, &payload);
+        self.on_hook(tab, &payload, None);
         self.remote.state_dirty = true;
         self.update_awake();
     }
@@ -120,11 +120,17 @@ impl State {
         changed
     }
 
-    /// Evento de un hook de Claude Code en el tab `tab`.
-    pub(crate) fn on_hook(&mut self, tab: u64, p: &Value) {
+    /// Evento de un hook de Claude Code en el tab `tab`. `t`: cuándo se lanzó el hook (los
+    /// locales lo traen; uno más viejo que el último aplicado llegó en desorden y se descarta).
+    pub(crate) fn on_hook(&mut self, tab: u64, p: &Value, t: Option<u64>) {
         // Un tab suspendido no tiene Claude: lo que llegue es del proceso que se cerró (SessionEnd).
-        if self.terms.get(&tab).is_none_or(Terminal::is_suspended) {
-            return;
+        let Some(term) = self.terms.get_mut(&tab).filter(|t| !t.is_suspended()) else { return };
+        if let Some(t) = t {
+            if t < term.agent.hook_t {
+                log::info!("hook atrasado en el tab {tab} ({}): se descarta", p["hook_event_name"]);
+                return;
+            }
+            term.agent.hook_t = t;
         }
         if p["hook_event_name"] == "SessionStart" {
             if let Some(cwd) = p["cwd"].as_str() {

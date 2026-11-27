@@ -134,9 +134,12 @@ pub fn request_to(path: &Path, body: &Value, wait: bool) -> Result<Value, String
 /// `telar hook`: Claude Code lo ejecuta en cada evento, con el JSON del evento por stdin.
 /// Nunca falla ni bloquea: si algo sale mal, simplemente no avisa.
 pub fn hook_main() {
+    // Cuándo lo lanzó Claude (lo más cerca posible): los hooks son asíncronos y pueden
+    // llegar en desorden; Telar descarta los que sean más viejos que el último que aplicó.
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_micros() as u64);
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     let Some(tab) = std::env::var("TELAR_TAB_ID").ok().and_then(|t| t.parse::<u64>().ok()) else { return };
     let payload = serde_json::from_str::<Value>(&input).unwrap_or(Value::Null);
-    let _ = request(&json!({ "cmd": "hook", "tab": tab, "payload": payload }), false);
+    let _ = request(&json!({ "cmd": "hook", "tab": tab, "payload": payload, "t": t }), false);
 }

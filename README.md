@@ -79,7 +79,7 @@ Cada tab sabe en qué está su sesión de Claude Code y lo muestra con un punto 
 
 Funcionamiento:
 1. Telar abre un socket (`$TMPDIR/telar-<pid>.sock`) y exporta `TELAR_SOCKET`, `TELAR_TAB_ID` y `TELAR_BIN` en cada tab.
-2. `install-hooks` agrega a `~/.claude/settings.json` un hook por evento, que corre `telar hook`. Respeta tus otros hooks y deja un respaldo en `settings.json.telar-bak`. Si una versión nueva escucha eventos que la anterior no registraba, los agrega sola al abrir (solo si los hooks de Telar ya estaban instalados).
+2. `install-hooks` agrega a `~/.claude/settings.json` un hook por evento, que corre `telar hook`. Respeta tus otros hooks y deja un respaldo en `settings.json.telar-bak`. Si una versión nueva escucha eventos que la anterior no registraba, los agrega sola al abrir (solo si los hooks de Telar ya estaban instalados). Los hooks son asíncronos (`"async": true`): Claude los lanza y sigue, sin esperar a Telar. Cada uno lleva la hora en que se lanzó, y Telar descarta el que llega más viejo que el último que aplicó en ese tab.
 3. Fuera de Telar el hook no hace nada.
 
 Para quitarlo todo (hooks, enlace y regla): `telar uninstall`.

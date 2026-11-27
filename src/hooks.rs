@@ -122,6 +122,9 @@ fn save(path: &PathBuf, root: &Value) -> Result<(), String> {
 pub fn install_hooks() -> Result<String, String> {
     let (path, mut root) = load()?;
     let added = add_hooks(&mut root)?;
+    if make_async(&mut root) > 0 {
+        save(&path, &root)?;
+    }
     if added.is_empty() {
         return Ok(format!("Los hooks de Telar ya estaban en {}", path.display()));
     }
@@ -138,10 +141,35 @@ pub fn upgrade_hooks() -> Result<Vec<&'static str>, String> {
         return Ok(Vec::new());
     }
     let added = add_hooks(&mut root)?;
-    if !added.is_empty() {
+    let made_async = make_async(&mut root);
+    if !added.is_empty() || made_async > 0 {
         save(&path, &root)?;
     }
+    if made_async > 0 {
+        log::info!("hooks de Telar ahora asíncronos: {made_async}");
+    }
     Ok(added)
+}
+
+/// Marca como asíncronos los hooks de Telar que una versión anterior instaló sin esa
+/// marca (Claude esperaba a cada uno). Devuelve cuántos cambió.
+fn make_async(root: &mut Value) -> usize {
+    let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else { return 0 };
+    let mut changed = 0;
+    for list in hooks.values_mut().filter_map(Value::as_array_mut) {
+        for entry in list.iter_mut().filter(|e| is_ours(e)) {
+            for h in entry["hooks"].as_array_mut().into_iter().flatten() {
+                let ours = h["command"].as_str().is_some_and(|c| c.contains(MARK));
+                if ours && h["async"] != json!(true) {
+                    if let Some(o) = h.as_object_mut() {
+                        o.insert("async".into(), json!(true));
+                        changed += 1;
+                    }
+                }
+            }
+        }
+    }
+    changed
 }
 
 /// Algún evento ya tiene el hook de Telar.
@@ -161,7 +189,9 @@ fn add_hooks(root: &mut Value) -> Result<Vec<&'static str>, String> {
         if list.iter().any(is_ours) {
             continue;
         }
-        let mut entry = json!({ "hooks": [{ "type": "command", "command": COMMAND, "timeout": 5 }] });
+        // Asíncrono: Claude lo lanza y sigue, sin esperar a que Telar reciba el aviso (con el
+        // Mac cargado, arrancar el proceso puede tardar segundos).
+        let mut entry = json!({ "hooks": [{ "type": "command", "command": COMMAND, "timeout": 5, "async": true }] });
         if *matcher {
             entry.as_object_mut().unwrap().insert("matcher".into(), json!("*"));
         }
@@ -246,6 +276,19 @@ mod tests {
         // Una instalación vieja, sin StopFailure: al ponerse al día se agrega solo ese.
         root["hooks"].as_object_mut().unwrap().remove("StopFailure");
         assert_eq!(add_hooks(&mut root).unwrap(), vec!["StopFailure"]);
+    }
+
+    #[test]
+    fn los_hooks_son_asincronos() {
+        let mut root = json!({ "hooks": { "Stop": [ajeno()] } });
+        add_hooks(&mut root).unwrap();
+        assert_eq!(root["hooks"]["Stop"][1]["hooks"][0]["async"], true);
+        assert_eq!(make_async(&mut root), 0);
+        // Una instalación vieja, sin `async`: se marca la suya y el hook ajeno no se toca.
+        root["hooks"]["Stop"][1]["hooks"][0].as_object_mut().unwrap().remove("async");
+        assert_eq!(make_async(&mut root), 1);
+        assert_eq!(root["hooks"]["Stop"][1]["hooks"][0]["async"], true);
+        assert_eq!(root["hooks"]["Stop"][0], ajeno());
     }
 
     #[test]
