@@ -660,6 +660,18 @@ impl Bridge {
                 }
                 vec![json!({ "type": "tab-created", "tab": r["id"], "group": r["group"] })]
             }
+            // Desplazarse en un tab, como con la rueda en el Mac: `lines` negativo sube (lo
+            // anterior), positivo baja; `bottom` vuelve al final. También en «Solo ver».
+            "scroll" => {
+                let Some(tab) = tab else { return err("falta tab".into()) };
+                let bottom = msg["bottom"] == json!(true);
+                let lines = msg["lines"].as_i64().filter(|l| *l != 0 && l.abs() <= 100);
+                if !bottom && lines.is_none() {
+                    return err("lines debe ser un entero entre -100 y 100, sin 0 (o bottom: true)".into());
+                }
+                let r = self.telar(json!({ "cmd": "remote-scroll", "tab": tab, "lines": lines, "bottom": bottom }));
+                if r["ok"] == json!(false) { err(r["error"].as_str().unwrap_or("no se pudo desplazar").into()) } else { Vec::new() }
+            }
             "scrollback" => {
                 let Some(tab) = tab else { return err("falta tab".into()) };
                 let lines = msg["lines"].as_u64().unwrap_or(500).clamp(1, MAX_SCROLLBACK);

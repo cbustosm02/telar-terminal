@@ -225,13 +225,18 @@ pub fn state(ws: &Workspace, terms: &HashMap<u64, Terminal>, view_only: bool, ac
             json!({ "name": g.name, "dir": g.dir, "tabs": tabs })
         })
         .collect();
-    json!({ "type": "state", "view_only": view_only, "accounts": accounts, "groups": groups })
+    json!({ "type": "state", "view_only": view_only, "accounts": accounts, "groups": groups, "capabilities": CAPABILITIES })
 }
+
+/// Lo que este Telar sabe hacer además de lo básico (la web lo mira antes de ofrecerlo).
+pub const CAPABILITIES: &[&str] = &["scroll"];
 
 /// Pantalla visible de un tab, con el cursor donde está.
 pub fn screen(id: u64, t: &Terminal, seq: u64) -> Value {
     let term = t.term.lock();
-    let mut ansi = crate::screen::to_ansi(&*term);
+    // Si se subió por el historial (rueda en el Mac o `scroll` desde la web), esa vista.
+    let offset = term.grid().display_offset();
+    let mut ansi = crate::screen::to_ansi_view(&*term, offset);
     // `to_ansi` deja el cursor oculto (es para una imagen fija): aquí va donde está.
     if let Some(stripped) = ansi.strip_suffix("\x1b[?25l") {
         ansi.truncate(stripped.len());
@@ -239,11 +244,12 @@ pub fn screen(id: u64, t: &Terminal, seq: u64) -> Value {
     let cursor = term.grid().cursor.point;
     let (col, row) = (cursor.column.0, cursor.line.0.max(0) as usize);
     ansi.push_str(&format!("\x1b[{};{}H", row + 1, col + 1));
-    if term.mode().contains(alacritty_terminal::term::TermMode::SHOW_CURSOR) {
+    // Con la vista desplazada, el cursor no está en pantalla.
+    if offset == 0 && term.mode().contains(alacritty_terminal::term::TermMode::SHOW_CURSOR) {
         ansi.push_str("\x1b[?25h");
     }
     let size = t.size();
-    json!({ "type": "screen", "tab": id, "cols": size.cols, "rows": size.rows, "ansi": ansi, "cursor": [col, row], "seq": seq })
+    json!({ "type": "screen", "tab": id, "cols": size.cols, "rows": size.rows, "ansi": ansi, "cursor": [col, row], "seq": seq, "scrolled": offset })
 }
 
 #[cfg(test)]

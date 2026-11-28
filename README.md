@@ -277,6 +277,7 @@ Ver y manejar Telar desde el celular o desde otro computador, con tu cuenta de T
 - **Cuentas de Claude desde la web:** la web ve las cuentas guardadas en el Mac, cuál está activa y su uso (sesión y semana), y puede cambiar a otra en caliente, como el menú del correo en la barra lateral. «Solo ver» lo bloquea.
 - **Desde la web se pueden crear tabs** (terminal o agente de Claude, en la carpeta del grupo) **y grupos nuevos.** No se ejecutan comandos arbitrarios, y no le quita el foco a quien esté en el Mac.
 - **Seguridad:** la primera vez que un dispositivo escribe o cambia algo desde la web, el Mac muestra una notificación. Con **«Solo ver desde la web»** (menú de la zona o `telar remote readonly on`), Telar no deja que la web escriba ni cambie nada.
+- **Desplazarse desde la web** (arrastrando el dedo sobre el tab, mensaje `scroll`): lo mismo que la rueda en el Mac. Al programa que recibe el mouse (Claude Code en pantalla completa) le llegan muescas de rueda; en otro caso se desplaza el historial de la terminal y la pantalla que se envía es esa vista (con `scrolled`: cuántas líneas arriba está). `bottom` vuelve al final, y escribir o pegar desde la web también. Se permite con «Solo ver». El estado anuncia `"capabilities": ["scroll"]`.
 - **Mientras alguien mira un tab,** ese tab toma el tamaño de su pantalla, para que Claude se dibuje bien en el celular. Al soltarlo, o si se corta, vuelve al tamaño de la ventana.
 - **Comandos:**
   - `telar remote status`;

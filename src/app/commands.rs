@@ -25,7 +25,7 @@ impl State {
             }
             Some("tabs") => self.tabs_json(),
             Some("browser") => self.ipc_browser(body),
-            Some(cmd @ ("remote-attach" | "remote-release" | "remote-answer" | "remote-new" | "remote-close" | "remote-delete-group" | "remote-paste-file" | "remote-paste" | "remote-sync" | "remote-switch-account" | "remote-refresh-accounts")) => {
+            Some(cmd @ ("remote-attach" | "remote-release" | "remote-answer" | "remote-new" | "remote-close" | "remote-delete-group" | "remote-paste-file" | "remote-paste" | "remote-sync" | "remote-switch-account" | "remote-refresh-accounts" | "remote-scroll")) => {
                 self.ipc_remote(cmd, body)
             }
             Some(cmd @ ("remote-status" | "remote-control" | "remote-info" | "remote-viewers" | "remote-login" | "remote-logout" | "remote-notice")) => {
@@ -56,6 +56,10 @@ impl State {
                         text.as_bytes().to_vec()
                     };
                     t.touch();
+                    // Escribir desde la web vuelve al final, como en una terminal.
+                    if body["remote"] == json!(true) {
+                        t.term.lock().scroll_display(Scroll::Bottom);
+                    }
                     t.write(bytes);
                     json!({ "ok": true, "id": id })
                 }

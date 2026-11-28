@@ -479,15 +479,8 @@ impl State {
     pub(crate) fn mouse_report(&self, button: u8, pressed: bool, col: usize, row: usize, mode: TermMode) {
         let m = self.mods;
         let b = button + 4 * m.shift_key() as u8 + 8 * m.alt_key() as u8 + 16 * m.control_key() as u8;
-        let bytes = if mode.contains(TermMode::SGR_MOUSE) {
-            format!("\x1b[<{};{};{}{}", b, col + 1, row + 1, if pressed { 'M' } else { 'm' }).into_bytes()
-        } else {
-            let b = if pressed { b } else { 3 + (b & !3) };
-            let clamp = |v: usize| (32 + 1 + v).min(255) as u8;
-            vec![0x1b, b'[', b'M', 32 + b, clamp(col), clamp(row)]
-        };
         if let Some(id) = self.ws.active_term() {
-            self.write(id, bytes);
+            self.write(id, mouse_bytes(b, pressed, col, row, mode));
         }
     }
 
@@ -617,7 +610,23 @@ impl State {
             }
         } else if let Some(t) = self.active() {
             t.term.lock().scroll_display(Scroll::Delta(lines));
+            // Si lo miran desde Telar web, también ven la vista desplazada.
+            if let Some(id) = self.ws.active_term() {
+                self.remote_output(id);
+            }
             self.window.request_redraw();
         }
+    }
+}
+
+/// Un evento de mouse como lo espera el programa (SGR o el formato clásico). `b`: el botón
+/// con los modificadores ya sumados (64 y 65 son la rueda hacia arriba y hacia abajo).
+pub(crate) fn mouse_bytes(b: u8, pressed: bool, col: usize, row: usize, mode: TermMode) -> Vec<u8> {
+    if mode.contains(TermMode::SGR_MOUSE) {
+        format!("\x1b[<{};{};{}{}", b, col + 1, row + 1, if pressed { 'M' } else { 'm' }).into_bytes()
+    } else {
+        let b = if pressed { b } else { 3 + (b & !3) };
+        let clamp = |v: usize| (32 + 1 + v).min(255) as u8;
+        vec![0x1b, b'[', b'M', 32 + b, clamp(col), clamp(row)]
     }
 }

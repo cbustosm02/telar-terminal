@@ -72,17 +72,24 @@ fn blank(cell: &Cell) -> bool {
 
 /// Pantalla visible (sin scrollback) como texto ANSI.
 pub fn to_ansi<L: EventListener>(term: &Term<L>) -> String {
+    to_ansi_view(term, 0)
+}
+
+/// Como `to_ansi`, pero de la vista desplazada `offset` líneas hacia el historial (lo que
+/// se ve tras subir con la rueda; 0 es el final).
+pub fn to_ansi_view<L: EventListener>(term: &Term<L>, offset: usize) -> String {
     let grid = term.grid();
+    let offset = offset.min(grid.history_size()) as i32;
     let (rows, cols) = (grid.screen_lines(), grid.columns());
     let mut out = String::from("\x1b[0m\x1b[H\x1b[2J");
     // Sin filas vacías al final.
     let last_row = (0..rows)
         .rev()
-        .find(|&r| (0..cols).any(|c| !blank(&grid[Line(r as i32)][Column(c)])))
+        .find(|&r| (0..cols).any(|c| !blank(&grid[Line(r as i32 - offset)][Column(c)])))
         .unwrap_or(0);
     let mut style: Option<(Color, Color, Flags)> = None;
     for r in 0..=last_row {
-        let row = &grid[Line(r as i32)];
+        let row = &grid[Line(r as i32 - offset)];
         let end = (0..cols).rev().find(|&c| !blank(&row[Column(c)])).map_or(0, |c| c + 1);
         for c in 0..end {
             let cell = &row[Column(c)];
@@ -152,5 +159,22 @@ mod tests {
             }
         }
         assert!(!b.mode().contains(alacritty_terminal::term::TermMode::SHOW_CURSOR));
+    }
+
+    /// La vista desplazada muestra el historial: 10 líneas en una pantalla de 3, subiendo 4.
+    #[test]
+    fn vista_desplazada() {
+        let mut a = term(10, 3);
+        let text: Vec<String> = (1..=10).map(|n| format!("linea {n}")).collect();
+        load(&mut a, &text.join("\r\n"));
+        let plain = |ansi: &str| {
+            let mut b = term(10, 3);
+            load(&mut b, ansi);
+            (0..3).map(|r| (0..10).map(|c| b.grid()[Line(r)][Column(c)].c).collect::<String>().trim_end().to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(plain(&to_ansi(&a)), ["linea 8", "linea 9", "linea 10"]);
+        assert_eq!(plain(&to_ansi_view(&a, 4)), ["linea 4", "linea 5", "linea 6"]);
+        // Más allá del historial, se queda en lo más viejo.
+        assert_eq!(plain(&to_ansi_view(&a, 99)), ["linea 1", "linea 2", "linea 3"]);
     }
 }

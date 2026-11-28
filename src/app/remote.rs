@@ -76,6 +76,46 @@ impl State {
         }
     }
 
+    /// `scroll` desde Telar web: lo mismo que la rueda en el Mac. `lines` < 0 sube (lo
+    /// anterior). Con el reporte del mouse activo (Claude Code en pantalla completa) se le
+    /// mandan muescas de rueda; en la pantalla alterna con «alternate scroll», flechas; si
+    /// no, se desplaza el historial de la terminal y la pantalla enviada muestra esa vista.
+    fn remote_scroll(&mut self, tab: u64, lines: i64, bottom: bool) -> Result<(), String> {
+        let t = self.terms.get(&tab).ok_or("el tab ya no existe")?;
+        if t.is_suspended() {
+            return Err("el tab está suspendido".into());
+        }
+        let mode = *t.term.lock().mode();
+        let (cols, rows) = (t.size().cols, t.size().rows);
+        // Muescas de rueda: hacia arriba (64) o hacia abajo (65). Para volver al final en un
+        // programa que maneja su propio desplazamiento, muchas hacia abajo.
+        let notches = if bottom { 300 } else { lines.unsigned_abs() as usize };
+        let up = !bottom && lines < 0;
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            let one = super::mouse::mouse_bytes(if up { 64 } else { 65 }, true, cols / 2, rows / 2, mode);
+            t.write(one.repeat(notches));
+        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+            if bottom {
+                return Ok(());
+            }
+            let seq: &[u8] = match (up, mode.contains(TermMode::APP_CURSOR)) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1b[A",
+                (false, true) => b"\x1bOB",
+                (false, false) => b"\x1b[B",
+            };
+            t.write(seq.repeat(notches));
+        } else {
+            let mut term = t.term.lock();
+            term.scroll_display(if bottom { Scroll::Bottom } else { Scroll::Delta(-lines as i32) });
+            drop(term);
+            t.changed();
+            self.remote_output(tab);
+            self.window.request_redraw();
+        }
+        Ok(())
+    }
+
     /// Se fue el bridge: todos los tabs vuelven al tamaño de la ventana.
     pub(crate) fn remote_release_all(&mut self) {
         let ids: Vec<u64> = self.remote.watches.keys().copied().collect();
@@ -208,6 +248,10 @@ impl State {
             Err(e) => return json!({ "ok": false, "error": e }),
         };
         match cmd {
+            "remote-scroll" => match self.remote_scroll(tab, body["lines"].as_i64().unwrap_or(0), body["bottom"] == json!(true)) {
+                Ok(()) => json!({ "ok": true, "id": tab }),
+                Err(e) => json!({ "ok": false, "error": e }),
+            },
             "remote-attach" => {
                 let cols = body["cols"].as_u64().unwrap_or(0) as usize;
                 let rows = body["rows"].as_u64().unwrap_or(0) as usize;
@@ -245,6 +289,7 @@ impl State {
                 }
                 let mode = *t.term.lock().mode();
                 t.touch();
+                t.term.lock().scroll_display(Scroll::Bottom);
                 t.write(input::paste_bytes(text, mode));
                 json!({ "ok": true, "id": tab })
             }
